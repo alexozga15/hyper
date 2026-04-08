@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: hyperwatch-pro
+    env: docker
+    plan: starter
+    autoDeploy: true
+    disk:
+      name: hyperwatch-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: DATA_DIR
+        value: /var/data
+      - key: ALERT_CHECK_INTERVAL_SECONDS
+        value: 900
