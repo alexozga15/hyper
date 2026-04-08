@@ -39,6 +39,25 @@ Notes:
 - The included [`Dockerfile`](/Users/alexozga/Documents/New%20project%204/Dockerfile) is enough for Docker-based platforms like Render or Railway.
 - Set Telegram alert credentials through `POST /api/alerts/config` after deployment.
 
+## Free Option
+
+If you want a free setup, use the included GitHub Actions workflow at [`.github/workflows/sentiment-alerts.yml`](/Users/alexozga/Documents/New%20project%204/.github/workflows/sentiment-alerts.yml).
+
+How it works:
+
+- GitHub Actions runs every 15 minutes and can also be started manually.
+- Telegram secrets stay in GitHub Secrets, not in the repo.
+- Previous alert state is stored in [`data/alerts.json`](/Users/alexozga/Documents/New%20project%204/data/alerts.json) and committed back to the repo so consensus changes are remembered between runs.
+
+Required GitHub repository secrets:
+
+```text
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=301411846
+```
+
+Then enable Actions in GitHub and run the `Sentiment Alerts` workflow once.
+
 ## Import format
 
 Paste one wallet per line in any of these formats:

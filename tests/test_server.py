@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from server import (
@@ -72,33 +73,40 @@ class AlertSummaryTests(unittest.TestCase):
             {
                 "address": "0x2222222222222222222222222222222222222222",
                 "alias": "Two",
-                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1500}],
+                "positions": [
+                    {"coin": "BTC", "side": "Long", "positionValue": 1500},
+                    {"coin": "@123", "side": "Short", "positionValue": 300},
+                ],
             },
             {
                 "address": "0x3333333333333333333333333333333333333333",
                 "alias": "Three",
-                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 2000}],
+                "positions": [
+                    {"coin": "BTC", "side": "Long", "positionValue": 2000},
+                    {"coin": "@123", "side": "Short", "positionValue": 400},
+                ],
             },
         ]
 
         summary = self.service.build_sentiment_summary(snapshots, min_wallets=3)
         self.assertEqual(summary["overallBias"], "bullish")
-        self.assertEqual(len(summary["consensus"]), 1)
+        self.assertEqual(len(summary["consensus"]), 2)
         self.assertEqual(summary["consensus"][0]["coin"], "BTC")
         self.assertEqual(summary["consensus"][0]["walletCount"], 3)
-        self.assertEqual(len(summary["hip3Positions"]), 1)
-        self.assertEqual(summary["hip3Positions"][0]["coin"], "@123")
+        self.assertEqual(len(summary["hip3Consensus"]), 1)
+        self.assertEqual(summary["hip3Consensus"][0]["coin"], "@123")
+        self.assertEqual(summary["hip3Consensus"][0]["walletCount"], 3)
 
     def test_summarize_changes_detects_consensus_and_hip3_deltas(self) -> None:
         previous = {
             "overallBias": "mixed",
             "consensus": [{"coin": "BTC", "side": "long", "walletCount": 3, "totalValue": 100.0}],
-            "hip3Positions": [{"coin": "@1", "side": "short", "address": "0xabc"}],
+            "hip3Consensus": [{"coin": "@1", "side": "short", "walletCount": 3, "totalValue": 50.0}],
         }
         current = {
             "overallBias": "bearish",
             "consensus": [{"coin": "ETH", "side": "short", "walletCount": 4, "totalValue": 200.0}],
-            "hip3Positions": [{"coin": "@2", "side": "long", "address": "0xdef"}],
+            "hip3Consensus": [{"coin": "@2", "side": "long", "walletCount": 4, "totalValue": 75.0}],
         }
 
         changes = self.service.summarize_changes(previous, current, track_hip3=True)
@@ -107,6 +115,33 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(changes["removedConsensus"][0]["coin"], "BTC")
         self.assertEqual(changes["hip3Added"][0]["coin"], "@2")
         self.assertEqual(changes["hip3Removed"][0]["coin"], "@1")
+
+    def test_resolve_alert_config_prefers_env_over_stored_values(self) -> None:
+        stored = {
+            "enabled": False,
+            "botToken": "stored-token",
+            "chatId": "stored-chat",
+            "minConsensusWallets": 2,
+            "trackHip3": False,
+        }
+        with patch.dict(
+            "os.environ",
+            {
+                "ALERTS_ENABLED": "true",
+                "TELEGRAM_BOT_TOKEN": "env-token",
+                "TELEGRAM_CHAT_ID": "env-chat",
+                "MIN_CONSENSUS_WALLETS": "3",
+                "TRACK_HIP3": "true",
+            },
+            clear=False,
+        ):
+            config = self.service.resolve_alert_config(stored)
+
+        self.assertTrue(config["enabled"])
+        self.assertEqual(config["botToken"], "env-token")
+        self.assertEqual(config["chatId"], "env-chat")
+        self.assertEqual(config["minConsensusWallets"], 3)
+        self.assertTrue(config["trackHip3"])
 
 
 if __name__ == "__main__":

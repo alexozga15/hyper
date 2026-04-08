@@ -51,6 +51,13 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def env_flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def to_float(value: Any) -> float:
     try:
         return float(value)
@@ -558,7 +565,7 @@ class WalletTrackerService:
 
     def get_alert_settings(self) -> dict[str, Any]:
         raw = load_json_file(self.alerts_path, {})
-        config = raw.get("config", {}) if isinstance(raw, dict) else {}
+        config = self.resolve_alert_config(raw.get("config", {}) if isinstance(raw, dict) else {})
         state = raw.get("state", {}) if isinstance(raw, dict) else {}
         return {
             "enabled": bool(config.get("enabled")),
@@ -570,6 +577,32 @@ class WalletTrackerService:
             "lastSentAt": state.get("lastSentAt"),
             "lastSummary": state.get("summary", {}),
         }
+
+    def resolve_alert_config(self, stored_config: dict[str, Any]) -> dict[str, Any]:
+        config = {
+            "enabled": bool(stored_config.get("enabled")),
+            "botToken": str(stored_config.get("botToken", "")).strip(),
+            "chatId": str(stored_config.get("chatId", "")).strip(),
+            "minConsensusWallets": max(
+                1, int(stored_config.get("minConsensusWallets", DEFAULT_CONSENSUS_THRESHOLD))
+            ),
+            "trackHip3": bool(stored_config.get("trackHip3", True)),
+        }
+
+        if "ALERTS_ENABLED" in os.environ:
+            config["enabled"] = env_flag("ALERTS_ENABLED", config["enabled"])
+        if "TELEGRAM_BOT_TOKEN" in os.environ:
+            config["botToken"] = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+        if "TELEGRAM_CHAT_ID" in os.environ:
+            config["chatId"] = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+        if "MIN_CONSENSUS_WALLETS" in os.environ:
+            config["minConsensusWallets"] = max(
+                1, int(os.environ.get("MIN_CONSENSUS_WALLETS", str(config["minConsensusWallets"])))
+            )
+        if "TRACK_HIP3" in os.environ:
+            config["trackHip3"] = env_flag("TRACK_HIP3", config["trackHip3"])
+
+        return config
 
     def update_alert_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
         raw = load_json_file(self.alerts_path, {})
@@ -592,7 +625,6 @@ class WalletTrackerService:
 
     def build_sentiment_summary(self, snapshots: list[dict[str, Any]], min_wallets: int) -> dict[str, Any]:
         aggregate: dict[tuple[str, str], dict[str, Any]] = {}
-        hip3_positions: list[dict[str, Any]] = []
         total_long = 0.0
         total_short = 0.0
 
@@ -624,17 +656,6 @@ class WalletTrackerService:
                 else:
                     total_short += position_value
 
-                if coin.startswith("@"):
-                    hip3_positions.append(
-                        {
-                            "coin": coin,
-                            "side": side,
-                            "address": snapshot["address"],
-                            "alias": snapshot.get("alias", ""),
-                            "value": round(position_value, 2),
-                        }
-                    )
-
         consensus = sorted(
             [
                 {
@@ -648,6 +669,7 @@ class WalletTrackerService:
             key=lambda item: (item["walletCount"], item["totalValue"]),
             reverse=True,
         )
+        hip3_consensus = [item for item in consensus if str(item.get("coin", "")).startswith("@")]
 
         overall_bias = "mixed"
         if total_long > total_short * 1.2:
@@ -659,10 +681,7 @@ class WalletTrackerService:
             "generatedAt": now_iso(),
             "overallBias": overall_bias,
             "consensus": consensus,
-            "hip3Positions": sorted(
-                hip3_positions,
-                key=lambda item: (item["coin"], item["side"], -item["value"]),
-            ),
+            "hip3Consensus": hip3_consensus,
             "longExposure": round(total_long, 2),
             "shortExposure": round(total_short, 2),
             "walletCount": len(snapshots),
@@ -696,10 +715,10 @@ class WalletTrackerService:
         hip3_removed: list[dict[str, Any]] = []
         if track_hip3:
             previous_hip3 = {
-                f'{item["coin"]}:{item["side"]}:{item["address"]}': item for item in previous.get("hip3Positions", [])
+                f'{item["coin"]}:{item["side"]}': item for item in previous.get("hip3Consensus", [])
             }
             current_hip3 = {
-                f'{item["coin"]}:{item["side"]}:{item["address"]}': item for item in current.get("hip3Positions", [])
+                f'{item["coin"]}:{item["side"]}': item for item in current.get("hip3Consensus", [])
             }
             hip3_added = [current_hip3[key] for key in current_hip3.keys() - previous_hip3.keys()]
             hip3_removed = [previous_hip3[key] for key in previous_hip3.keys() - current_hip3.keys()]
@@ -744,15 +763,17 @@ class WalletTrackerService:
 
         if changes["hip3Added"]:
             lines.append("")
-            lines.append("New HIP-3 positions:")
+            lines.append("New HIP-3 consensus:")
             for item in changes["hip3Added"][:10]:
-                lines.append(f'- {item["coin"]} {item["side"]} by {item["address"][:10]}...')
+                lines.append(
+                    f'- {item["coin"]} {item["side"]} ({item["walletCount"]} wallets, ${item["totalValue"]:,.0f})'
+                )
 
         if changes["hip3Removed"]:
             lines.append("")
-            lines.append("Closed HIP-3 positions:")
+            lines.append("HIP-3 consensus removed:")
             for item in changes["hip3Removed"][:10]:
-                lines.append(f'- {item["coin"]} {item["side"]} by {item["address"][:10]}...')
+                lines.append(f'- {item["coin"]} {item["side"]}')
 
         return "\n".join(lines)
 
@@ -768,7 +789,8 @@ class WalletTrackerService:
 
     def check_alerts(self, send_notification: bool = True) -> dict[str, Any]:
         raw = load_json_file(self.alerts_path, {})
-        config = raw.get("config", {}) if isinstance(raw, dict) else {}
+        stored_config = raw.get("config", {}) if isinstance(raw, dict) else {}
+        config = self.resolve_alert_config(stored_config)
         state = raw.get("state", {}) if isinstance(raw, dict) else {}
         min_wallets = max(1, int(config.get("minConsensusWallets", DEFAULT_CONSENSUS_THRESHOLD)))
         track_hip3 = bool(config.get("trackHip3", True))
@@ -813,7 +835,7 @@ class WalletTrackerService:
             "lastCheckedAt": now_iso(),
             "lastSentAt": now_iso() if sent else state.get("lastSentAt"),
         }
-        save_json_file(self.alerts_path, {"config": config, "state": new_state})
+        save_json_file(self.alerts_path, {"config": stored_config, "state": new_state})
 
         return {
             "enabled": bool(config.get("enabled")),
