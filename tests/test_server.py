@@ -370,6 +370,48 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("SPACEX short (1 wallets, 1 positions, $2,500)", message)
         self.assertNotIn("xyz:NVDA", message)
 
+    def test_build_positions_message_shows_empty_sections_when_category_has_no_positions(self) -> None:
+        dashboard = {
+            "generatedAt": "2026-04-09T06:00:00Z",
+            "wallets": [
+                {
+                    "alias": "main-1",
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 150000.0}],
+                }
+            ],
+        }
+
+        message = self.service.build_positions_message(dashboard)
+        self.assertIn("Commodities:\n- None", message)
+        self.assertIn("Stocks / indices:\n- None", message)
+        self.assertIn("HIP-3 positions:\n- None", message)
+
+    def test_build_positions_message_supports_raw_commodity_and_index_symbols(self) -> None:
+        dashboard = {
+            "generatedAt": "2026-04-09T06:00:00Z",
+            "wallets": [
+                {
+                    "alias": "main-1",
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "positions": [
+                        {"coin": "CL", "side": "Long", "positionValue": 423450.0},
+                        {"coin": "SP500", "side": "Long", "positionValue": 29095.0},
+                        {"coin": "XYZ100", "side": "Long", "positionValue": 914001.24},
+                        {"coin": "SILVER", "side": "Short", "positionValue": 76938.0},
+                    ],
+                }
+            ],
+        }
+
+        message = self.service.build_positions_message(dashboard)
+        self.assertIn("Commodities:", message)
+        self.assertIn("OIL long (1 wallets, 1 positions, $423,450)", message)
+        self.assertIn("SILVER short (1 wallets, 1 positions, $76,938)", message)
+        self.assertIn("Stocks / indices:", message)
+        self.assertIn("XYZ100 long (1 wallets, 1 positions, $914,001)", message)
+        self.assertIn("SP500 long (1 wallets, 1 positions, $29,095)", message)
+
 
 if __name__ == "__main__":
     unittest.main()
