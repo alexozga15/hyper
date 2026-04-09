@@ -165,14 +165,14 @@ class AlertSummaryTests(unittest.TestCase):
                     "alias": "main-1",
                     "address": "0x1111111111111111111111111111111111111111",
                     "positions": [
-                        {"coin": "BTC", "side": "Long", "positionValue": 1234.0},
-                        {"coin": "ETH", "side": "Short", "positionValue": 4321.0},
+                        {"coin": "BTC", "side": "Long", "positionValue": 125000.0},
+                        {"coin": "ETH", "side": "Short", "positionValue": 99000.0},
                     ],
                 },
                 {
                     "alias": "main-2",
                     "address": "0x2222222222222222222222222222222222222222",
-                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 2222.0}],
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 225000.0}],
                 },
             ],
         }
@@ -180,9 +180,9 @@ class AlertSummaryTests(unittest.TestCase):
         message = self.service.build_positions_message(dashboard)
         self.assertIn("Open positions now", message)
         self.assertIn("By position:", message)
-        self.assertIn("BTC long (2 wallets, 2 positions, $3,456)", message)
-        self.assertIn("ETH short (1 wallets, 1 positions, $4,321)", message)
-        self.assertIn("Position groups: 2", message)
+        self.assertIn("BTC long (2 wallets, 2 positions, $350,000)", message)
+        self.assertNotIn("ETH short", message)
+        self.assertIn("Position groups: 1", message)
 
 
 if __name__ == "__main__":

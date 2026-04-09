@@ -29,6 +29,7 @@ HEX_ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 MAX_IMPORT_BATCH = 100
 MAX_DISCOVERY_BATCH = 60
 DEFAULT_CONSENSUS_THRESHOLD = 3
+MIN_POSITION_MESSAGE_VALUE = 100_000
 
 WALLET_SIZE_BANDS = [
     ("Apex", 5_000_000),
@@ -831,6 +832,9 @@ class WalletTrackerService:
 
         for wallet in dashboard.get("wallets", []):
             for position in wallet.get("positions", []):
+                position_value = to_float(position.get("positionValue"))
+                if position_value < MIN_POSITION_MESSAGE_VALUE:
+                    continue
                 coin = str(position.get("coin") or "Unknown")
                 side = str(position.get("side") or "Flat").lower()
                 if side not in {"long", "short"}:
@@ -848,7 +852,7 @@ class WalletTrackerService:
                     },
                 )
                 bucket["positionCount"] += 1
-                bucket["totalValue"] += to_float(position.get("positionValue"))
+                bucket["totalValue"] += position_value
                 address = str(wallet.get("address") or "")
                 if address and address not in bucket["walletAddresses"]:
                     bucket["walletAddresses"].add(address)
