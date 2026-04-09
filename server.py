@@ -30,6 +30,7 @@ MAX_IMPORT_BATCH = 100
 MAX_DISCOVERY_BATCH = 60
 DEFAULT_CONSENSUS_THRESHOLD = 3
 MIN_POSITION_MESSAGE_VALUE = 100_000
+OIL_POSITION_ALIASES = {"flx:OIL", "cash:WTI", "xyz:BRENTOIL", "xyz:CL"}
 
 WALLET_SIZE_BANDS = [
     ("Apex", 5_000_000),
@@ -65,6 +66,13 @@ def to_float(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def normalize_position_coin(coin: Any) -> str:
+    label = str(coin or "Unknown")
+    if label in OIL_POSITION_ALIASES:
+        return "OIL"
+    return label
 
 
 def normalize_address(value: str) -> str:
@@ -632,7 +640,7 @@ class WalletTrackerService:
 
         for snapshot in snapshots:
             for position in snapshot.get("positions", []):
-                coin = str(position.get("coin") or "Unknown")
+                coin = normalize_position_coin(position.get("coin"))
                 side = str(position.get("side") or "Flat").lower()
                 position_value = to_float(position.get("positionValue"))
                 if side not in {"long", "short"}:
@@ -839,8 +847,9 @@ class WalletTrackerService:
         for wallet in dashboard.get("wallets", []):
             for position in wallet.get("positions", []):
                 position_value = to_float(position.get("positionValue"))
-                coin = str(position.get("coin") or "Unknown")
-                is_hip3 = coin.startswith("@")
+                raw_coin = str(position.get("coin") or "Unknown")
+                coin = normalize_position_coin(raw_coin)
+                is_hip3 = raw_coin.startswith("@")
                 if hip3_only is True and not is_hip3:
                     continue
                 if hip3_only is False and is_hip3:
