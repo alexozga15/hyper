@@ -1,15 +1,15 @@
-name: Sentiment Alerts
+name: Hourly Update
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "0 * * * *"
 
 permissions:
   contents: write
 
 jobs:
-  sentiment-alerts:
+  hourly-update:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -20,10 +20,10 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Run sentiment check
+      - name: Send hourly update
         env:
           ALERTS_ENABLED: "true"
-          SEND_CHANGE_ALERTS: "true"
+          SEND_HOURLY_UPDATE: "true"
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           MIN_CONSENSUS_WALLETS: "3"
