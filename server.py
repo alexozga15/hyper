@@ -31,8 +31,11 @@ MAX_DISCOVERY_BATCH = 60
 DEFAULT_CONSENSUS_THRESHOLD = 3
 MIN_POSITION_MESSAGE_VALUE = 100_000
 OIL_POSITION_ALIASES = {"flx:OIL", "cash:WTI", "xyz:BRENTOIL", "xyz:CL"}
+RAW_OIL_POSITION_NAMES = {"BRENTOIL", "CL", "WTI", "OIL"}
+RAW_COMMODITY_POSITION_NAMES = RAW_OIL_POSITION_NAMES | {"GOLD", "SILVER", "COPPER", "NATGAS"}
+RAW_STOCK_INDEX_POSITION_NAMES = {"SP500", "US500", "XYZ100", "NAS100", "NDX", "SPX"}
 STOCK_POSITION_PREFIXES = {"xyz", "vntl", "km"}
-NON_STOCK_MARKET_SUFFIXES = {"BRENTOIL", "CL", "WTI", "OIL", "GOLD", "SILVER", "COPPER", "NATGAS"}
+NON_STOCK_MARKET_SUFFIXES = RAW_COMMODITY_POSITION_NAMES
 
 WALLET_SIZE_BANDS = [
     ("Apex", 5_000_000),
@@ -74,6 +77,10 @@ def normalize_position_coin(coin: Any) -> str:
     label = str(coin or "Unknown")
     if label in OIL_POSITION_ALIASES:
         return "OIL"
+    if label in RAW_OIL_POSITION_NAMES:
+        return "OIL"
+    if label in RAW_COMMODITY_POSITION_NAMES or label in RAW_STOCK_INDEX_POSITION_NAMES:
+        return label
     prefix, separator, suffix = label.partition(":")
     if separator and suffix in NON_STOCK_MARKET_SUFFIXES:
         return "OIL" if suffix in {"BRENTOIL", "CL", "WTI", "OIL"} else suffix
@@ -86,6 +93,10 @@ def is_stock_like_position(coin: Any) -> bool:
     label = str(coin or "Unknown")
     if label in OIL_POSITION_ALIASES:
         return False
+    if label in RAW_STOCK_INDEX_POSITION_NAMES:
+        return True
+    if label in RAW_COMMODITY_POSITION_NAMES:
+        return False
     prefix, separator, suffix = label.partition(":")
     return bool(separator and prefix in STOCK_POSITION_PREFIXES and suffix and suffix not in NON_STOCK_MARKET_SUFFIXES)
 
@@ -93,6 +104,8 @@ def is_stock_like_position(coin: Any) -> bool:
 def is_commodity_like_position(coin: Any) -> bool:
     label = str(coin or "Unknown")
     if label in OIL_POSITION_ALIASES:
+        return True
+    if label in RAW_COMMODITY_POSITION_NAMES:
         return True
     _, separator, suffix = label.partition(":")
     return bool(separator and suffix in NON_STOCK_MARKET_SUFFIXES)
@@ -951,41 +964,23 @@ class WalletTrackerService:
             lines.append("")
             lines.append("- No open positions")
         else:
-            if position_groups:
+            sections = [
+                (f"By position (>= ${MIN_POSITION_MESSAGE_VALUE:,.0f}):", position_groups),
+                ("Commodities:", commodity_groups),
+                ("Stocks / indices:", stock_groups),
+                ("HIP-3 positions:", hip3_groups),
+            ]
+            for heading, groups in sections:
                 lines.append("")
-                lines.append(f"By position (>= ${MIN_POSITION_MESSAGE_VALUE:,.0f}):")
-                for item in position_groups[:50]:
-                    lines.append(
-                        f'- {item["coin"]} {item["side"]} '
-                        f'({item["walletCount"]} wallets, {item["positionCount"]} positions, ${item["totalValue"]:,.0f})'
-                    )
-
-            if commodity_groups:
-                lines.append("")
-                lines.append("Commodities:")
-                for item in commodity_groups[:50]:
-                    lines.append(
-                        f'- {item["coin"]} {item["side"]} '
-                        f'({item["walletCount"]} wallets, {item["positionCount"]} positions, ${item["totalValue"]:,.0f})'
-                    )
-
-            if stock_groups:
-                lines.append("")
-                lines.append("Stocks / indices:")
-                for item in stock_groups[:50]:
-                    lines.append(
-                        f'- {item["coin"]} {item["side"]} '
-                        f'({item["walletCount"]} wallets, {item["positionCount"]} positions, ${item["totalValue"]:,.0f})'
-                    )
-
-            if hip3_groups:
-                lines.append("")
-                lines.append("HIP-3 positions:")
-                for item in hip3_groups[:50]:
-                    lines.append(
-                        f'- {item["coin"]} {item["side"]} '
-                        f'({item["walletCount"]} wallets, {item["positionCount"]} positions, ${item["totalValue"]:,.0f})'
-                    )
+                lines.append(heading)
+                if groups:
+                    for item in groups[:50]:
+                        lines.append(
+                            f'- {item["coin"]} {item["side"]} '
+                            f'({item["walletCount"]} wallets, {item["positionCount"]} positions, ${item["totalValue"]:,.0f})'
+                        )
+                else:
+                    lines.append("- None")
 
         lines.append("")
         lines.append(f"Position groups: {len(position_groups) + len(commodity_groups) + len(stock_groups) + len(hip3_groups)}")
