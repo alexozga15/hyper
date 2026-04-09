@@ -181,6 +181,30 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(summary["consensus"][0]["walletCount"], 3)
         self.assertEqual(summary["consensus"][0]["totalValue"], 720000)
 
+    def test_build_sentiment_summary_strips_stock_prefixes(self) -> None:
+        snapshots = [
+            {
+                "address": "0x1111111111111111111111111111111111111111",
+                "alias": "One",
+                "positions": [{"coin": "xyz:NVDA", "side": "Long", "positionValue": 120000}],
+            },
+            {
+                "address": "0x2222222222222222222222222222222222222222",
+                "alias": "Two",
+                "positions": [{"coin": "xyz:NVDA", "side": "Long", "positionValue": 240000}],
+            },
+            {
+                "address": "0x3333333333333333333333333333333333333333",
+                "alias": "Three",
+                "positions": [{"coin": "xyz:NVDA", "side": "Long", "positionValue": 360000}],
+            },
+        ]
+
+        summary = self.service.build_sentiment_summary(snapshots, min_wallets=3)
+        self.assertEqual(summary["consensus"][0]["coin"], "NVDA")
+        self.assertEqual(summary["consensus"][0]["walletCount"], 3)
+        self.assertEqual(summary["consensus"][0]["totalValue"], 720000)
+
     def test_build_positions_message_lists_all_open_positions(self) -> None:
         dashboard = {
             "generatedAt": "2026-04-09T06:00:00Z",
@@ -259,6 +283,32 @@ class AlertSummaryTests(unittest.TestCase):
         message = self.service.build_positions_message(dashboard)
         self.assertIn("OIL long (2 wallets, 2 positions, $1,995,801)", message)
         self.assertIn("OIL short (1 wallets, 1 positions, $573,227)", message)
+
+    def test_build_positions_message_includes_stocks_section_below_main_threshold(self) -> None:
+        dashboard = {
+            "generatedAt": "2026-04-09T06:00:00Z",
+            "wallets": [
+                {
+                    "alias": "main-1",
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "positions": [
+                        {"coin": "xyz:NVDA", "side": "Long", "positionValue": 75250.0},
+                        {"coin": "vntl:SPACEX", "side": "Short", "positionValue": 2500.0},
+                    ],
+                },
+                {
+                    "alias": "main-2",
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "positions": [{"coin": "xyz:NVDA", "side": "Long", "positionValue": 25000.0}],
+                },
+            ],
+        }
+
+        message = self.service.build_positions_message(dashboard)
+        self.assertIn("Stocks / indices:", message)
+        self.assertIn("NVDA long (2 wallets, 2 positions, $100,250)", message)
+        self.assertIn("SPACEX short (1 wallets, 1 positions, $2,500)", message)
+        self.assertNotIn("xyz:NVDA", message)
 
 
 if __name__ == "__main__":
