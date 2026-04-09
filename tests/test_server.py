@@ -157,6 +157,30 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("BTC long (3 wallets, $12,345)", message)
         self.assertIn("@PUMP-1 short (3 wallets, $456)", message)
 
+    def test_build_sentiment_summary_groups_oil_aliases(self) -> None:
+        snapshots = [
+            {
+                "address": "0x1111111111111111111111111111111111111111",
+                "alias": "One",
+                "positions": [{"coin": "flx:OIL", "side": "Long", "positionValue": 120000}],
+            },
+            {
+                "address": "0x2222222222222222222222222222222222222222",
+                "alias": "Two",
+                "positions": [{"coin": "xyz:BRENTOIL", "side": "Long", "positionValue": 240000}],
+            },
+            {
+                "address": "0x3333333333333333333333333333333333333333",
+                "alias": "Three",
+                "positions": [{"coin": "cash:WTI", "side": "Long", "positionValue": 360000}],
+            },
+        ]
+
+        summary = self.service.build_sentiment_summary(snapshots, min_wallets=3)
+        self.assertEqual(summary["consensus"][0]["coin"], "OIL")
+        self.assertEqual(summary["consensus"][0]["walletCount"], 3)
+        self.assertEqual(summary["consensus"][0]["totalValue"], 720000)
+
     def test_build_positions_message_lists_all_open_positions(self) -> None:
         dashboard = {
             "generatedAt": "2026-04-09T06:00:00Z",
@@ -209,6 +233,32 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("@MOON-1 long (2 wallets, 2 positions, $2,000)", message)
         self.assertIn("BTC long (1 wallets, 1 positions, $150,000)", message)
         self.assertIn("Position groups: 2", message)
+
+    def test_build_positions_message_groups_oil_aliases_under_oil(self) -> None:
+        dashboard = {
+            "generatedAt": "2026-04-09T06:00:00Z",
+            "wallets": [
+                {
+                    "alias": "main-1",
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "positions": [{"coin": "flx:OIL", "side": "Long", "positionValue": 404840.15}],
+                },
+                {
+                    "alias": "main-2",
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "positions": [{"coin": "xyz:BRENTOIL", "side": "Long", "positionValue": 1590960.44}],
+                },
+                {
+                    "alias": "main-3",
+                    "address": "0x3333333333333333333333333333333333333333",
+                    "positions": [{"coin": "cash:WTI", "side": "Short", "positionValue": 573226.89}],
+                },
+            ],
+        }
+
+        message = self.service.build_positions_message(dashboard)
+        self.assertIn("OIL long (2 wallets, 2 positions, $1,995,801)", message)
+        self.assertIn("OIL short (1 wallets, 1 positions, $573,227)", message)
 
 
 if __name__ == "__main__":
