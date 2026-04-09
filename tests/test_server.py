@@ -143,6 +143,20 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(config["minConsensusWallets"], 3)
         self.assertTrue(config["trackHip3"])
 
+    def test_build_summary_message_includes_consensus_and_hip3_sections(self) -> None:
+        summary = {
+            "generatedAt": "2026-04-09T06:00:00Z",
+            "overallBias": "bearish",
+            "walletCount": 16,
+            "consensus": [{"coin": "BTC", "side": "long", "walletCount": 3, "totalValue": 12345.0}],
+            "hip3Consensus": [{"coin": "@PUMP-1", "side": "short", "walletCount": 3, "totalValue": 456.0}],
+        }
+
+        message = self.service.build_summary_message(summary, min_wallets=3)
+        self.assertIn("Current wallet sentiment", message)
+        self.assertIn("BTC long (3 wallets, $12,345)", message)
+        self.assertIn("@PUMP-1 short (3 wallets, $456)", message)
+
 
 if __name__ == "__main__":
     unittest.main()

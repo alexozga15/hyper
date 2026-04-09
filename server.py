@@ -23,6 +23,7 @@ STATIC_DIR = ROOT / "static"
 DATA_DIR = Path(os.environ.get("DATA_DIR", str(ROOT / "data"))).resolve()
 WALLETS_FILE = DATA_DIR / "tracked_wallets.json"
 ALERTS_FILE = DATA_DIR / "alerts.json"
+TELEGRAM_STATE_FILE = DATA_DIR / "telegram_bot_state.json"
 HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
 HEX_ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 MAX_IMPORT_BATCH = 100
@@ -777,6 +778,54 @@ class WalletTrackerService:
 
         return "\n".join(lines)
 
+    def build_summary_message(
+        self,
+        summary: dict[str, Any],
+        min_wallets: int,
+        *,
+        title: str = "Current wallet sentiment",
+        include_consensus: bool = True,
+        include_hip3: bool = True,
+    ) -> str:
+        lines = [
+            title,
+            f"Bias: {summary.get('overallBias', 'mixed')}",
+            f"Consensus threshold: {min_wallets} wallets",
+            f'Wallets tracked: {summary.get("walletCount", 0)}',
+        ]
+
+        if include_consensus:
+            consensus = summary.get("consensus", [])
+            lines.append("")
+            lines.append("Consensus:")
+            if consensus:
+                for item in consensus[:10]:
+                    lines.append(
+                        f'- {item["coin"]} {item["side"]} ({item["walletCount"]} wallets, ${item["totalValue"]:,.0f})'
+                    )
+            else:
+                lines.append("- None")
+
+        if include_hip3:
+            hip3_consensus = summary.get("hip3Consensus", [])
+            lines.append("")
+            lines.append("HIP-3 consensus:")
+            if hip3_consensus:
+                for item in hip3_consensus[:10]:
+                    lines.append(
+                        f'- {item["coin"]} {item["side"]} ({item["walletCount"]} wallets, ${item["totalValue"]:,.0f})'
+                    )
+            else:
+                lines.append("- None")
+
+        lines.append("")
+        lines.append(f'Checked at: {summary.get("generatedAt", now_iso())}')
+        return "\n".join(lines)
+
+    def live_sentiment_summary(self, min_wallets: int) -> dict[str, Any]:
+        dashboard = self.dashboard()
+        return self.build_sentiment_summary(dashboard["wallets"], min_wallets)
+
     def send_telegram_message(self, bot_token: str, chat_id: str, message: str) -> None:
         payload = urllib.parse.urlencode({"chat_id": chat_id, "text": message}).encode("utf-8")
         request = urllib.request.Request(
@@ -786,6 +835,19 @@ class WalletTrackerService:
         )
         with urllib.request.urlopen(request, timeout=20):
             return
+
+    def fetch_telegram_updates(self, bot_token: str, offset: int = 0) -> list[dict[str, Any]]:
+        query = urllib.parse.urlencode({"offset": offset})
+        request = urllib.request.Request(
+            f"https://api.telegram.org/bot{bot_token}/getUpdates?{query}",
+            headers={"Accept": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=20) as response:
+            payload = json.load(response)
+        if not isinstance(payload, dict) or not payload.get("ok"):
+            return []
+        result = payload.get("result", [])
+        return result if isinstance(result, list) else []
 
     def check_alerts(self, send_notification: bool = True) -> dict[str, Any]:
         raw = load_json_file(self.alerts_path, {})

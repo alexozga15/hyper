@@ -60,6 +60,16 @@ Then enable Actions in GitHub and run the `Sentiment Alerts` workflow once.
 
 If you want to verify Telegram delivery without waiting for a real sentiment change, run [`.github/workflows/telegram-test.yml`](/Users/alexozga/Documents/New%20project%204/.github/workflows/telegram-test.yml). It sends a one-off test message and does not touch the saved alert baseline.
 
+If you want on-demand bot replies, enable [`.github/workflows/telegram-commands.yml`](/Users/alexozga/Documents/New%20project%204/.github/workflows/telegram-commands.yml). It checks your bot inbox every 5 minutes and replies to:
+
+- `/update`
+- `/sentiment`
+- `/consensus`
+- `/hip3`
+- `/help`
+
+The Telegram command cursor is stored in [`data/telegram_bot_state.json`](/Users/alexozga/Documents/New%20project%204/data/telegram_bot_state.json), so the bot only answers new messages once.
+
 ## Import format
 
 Paste one wallet per line in any of these formats:
