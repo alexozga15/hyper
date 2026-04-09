@@ -58,6 +58,8 @@ TELEGRAM_CHAT_ID=301411846
 
 Then enable Actions in GitHub and run the `Sentiment Alerts` workflow once.
 
+If you want to verify Telegram delivery without waiting for a real sentiment change, run [`.github/workflows/telegram-test.yml`](/Users/alexozga/Documents/New%20project%204/.github/workflows/telegram-test.yml). It sends a one-off test message and does not touch the saved alert baseline.
+
 ## Import format
 
 Paste one wallet per line in any of these formats:
