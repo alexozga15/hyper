@@ -827,15 +827,26 @@ class WalletTrackerService:
         dashboard = self.dashboard()
         return self.build_sentiment_summary(dashboard["wallets"], min_wallets)
 
-    def build_position_groups(self, dashboard: dict[str, Any]) -> list[dict[str, Any]]:
+    def build_position_groups(
+        self,
+        dashboard: dict[str, Any],
+        *,
+        min_value: float = MIN_POSITION_MESSAGE_VALUE,
+        hip3_only: bool | None = None,
+    ) -> list[dict[str, Any]]:
         groups: dict[tuple[str, str], dict[str, Any]] = {}
 
         for wallet in dashboard.get("wallets", []):
             for position in wallet.get("positions", []):
                 position_value = to_float(position.get("positionValue"))
-                if position_value < MIN_POSITION_MESSAGE_VALUE:
-                    continue
                 coin = str(position.get("coin") or "Unknown")
+                is_hip3 = coin.startswith("@")
+                if hip3_only is True and not is_hip3:
+                    continue
+                if hip3_only is False and is_hip3:
+                    continue
+                if position_value < min_value:
+                    continue
                 side = str(position.get("side") or "Flat").lower()
                 if side not in {"long", "short"}:
                     continue
@@ -875,23 +886,34 @@ class WalletTrackerService:
 
     def build_positions_message(self, dashboard: dict[str, Any], *, title: str = "Open positions now") -> str:
         lines = [title]
-        position_groups = self.build_position_groups(dashboard)
-        total_positions = sum(item["positionCount"] for item in position_groups)
+        position_groups = self.build_position_groups(dashboard, hip3_only=False)
+        hip3_groups = self.build_position_groups(dashboard, min_value=0, hip3_only=True)
+        total_positions = sum(item["positionCount"] for item in position_groups + hip3_groups)
 
-        if not position_groups:
+        if not position_groups and not hip3_groups:
             lines.append("")
             lines.append("- No open positions")
         else:
-            lines.append("")
-            lines.append("By position:")
-            for item in position_groups[:50]:
-                lines.append(
-                    f'- {item["coin"]} {item["side"]} '
-                    f'({item["walletCount"]} wallets, {item["positionCount"]} positions, ${item["totalValue"]:,.0f})'
-                )
+            if position_groups:
+                lines.append("")
+                lines.append(f"By position (>= ${MIN_POSITION_MESSAGE_VALUE:,.0f}):")
+                for item in position_groups[:50]:
+                    lines.append(
+                        f'- {item["coin"]} {item["side"]} '
+                        f'({item["walletCount"]} wallets, {item["positionCount"]} positions, ${item["totalValue"]:,.0f})'
+                    )
+
+            if hip3_groups:
+                lines.append("")
+                lines.append("HIP-3 positions:")
+                for item in hip3_groups[:50]:
+                    lines.append(
+                        f'- {item["coin"]} {item["side"]} '
+                        f'({item["walletCount"]} wallets, {item["positionCount"]} positions, ${item["totalValue"]:,.0f})'
+                    )
 
         lines.append("")
-        lines.append(f"Position groups: {len(position_groups)}")
+        lines.append(f"Position groups: {len(position_groups) + len(hip3_groups)}")
         lines.append(f"Open positions: {total_positions}")
         lines.append(f'Checked at: {dashboard.get("generatedAt", now_iso())}')
         return "\n".join(lines)

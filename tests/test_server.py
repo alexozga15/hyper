@@ -179,10 +179,36 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_positions_message(dashboard)
         self.assertIn("Open positions now", message)
-        self.assertIn("By position:", message)
+        self.assertIn("By position (>= $100,000):", message)
         self.assertIn("BTC long (2 wallets, 2 positions, $350,000)", message)
         self.assertNotIn("ETH short", message)
         self.assertIn("Position groups: 1", message)
+
+    def test_build_positions_message_includes_hip3_positions_below_main_threshold(self) -> None:
+        dashboard = {
+            "generatedAt": "2026-04-09T06:00:00Z",
+            "wallets": [
+                {
+                    "alias": "main-1",
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "positions": [
+                        {"coin": "@MOON-1", "side": "Long", "positionValue": 1200.0},
+                        {"coin": "BTC", "side": "Long", "positionValue": 150000.0},
+                    ],
+                },
+                {
+                    "alias": "main-2",
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "positions": [{"coin": "@MOON-1", "side": "Long", "positionValue": 800.0}],
+                },
+            ],
+        }
+
+        message = self.service.build_positions_message(dashboard)
+        self.assertIn("HIP-3 positions:", message)
+        self.assertIn("@MOON-1 long (2 wallets, 2 positions, $2,000)", message)
+        self.assertIn("BTC long (1 wallets, 1 positions, $150,000)", message)
+        self.assertIn("Position groups: 2", message)
 
 
 if __name__ == "__main__":

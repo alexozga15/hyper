@@ -24,6 +24,7 @@ jobs:
         env:
           ALERTS_ENABLED: "true"
           SEND_HOURLY_UPDATE: "true"
+          SEND_CHANGE_ALERTS: "true"
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           MIN_CONSENSUS_WALLETS: "3"
