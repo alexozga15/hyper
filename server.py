@@ -31,6 +31,8 @@ MAX_DISCOVERY_BATCH = 60
 DEFAULT_CONSENSUS_THRESHOLD = 3
 MIN_POSITION_MESSAGE_VALUE = 100_000
 OIL_POSITION_ALIASES = {"flx:OIL", "cash:WTI", "xyz:BRENTOIL", "xyz:CL"}
+STOCK_POSITION_PREFIXES = {"xyz", "vntl", "km"}
+NON_STOCK_MARKET_SUFFIXES = {"BRENTOIL", "CL", "WTI", "OIL", "GOLD", "SILVER", "COPPER", "NATGAS"}
 
 WALLET_SIZE_BANDS = [
     ("Apex", 5_000_000),
@@ -72,7 +74,18 @@ def normalize_position_coin(coin: Any) -> str:
     label = str(coin or "Unknown")
     if label in OIL_POSITION_ALIASES:
         return "OIL"
+    prefix, separator, suffix = label.partition(":")
+    if separator and prefix in STOCK_POSITION_PREFIXES and suffix and suffix not in NON_STOCK_MARKET_SUFFIXES:
+        return suffix
     return label
+
+
+def is_stock_like_position(coin: Any) -> bool:
+    label = str(coin or "Unknown")
+    if label in OIL_POSITION_ALIASES:
+        return False
+    prefix, separator, suffix = label.partition(":")
+    return bool(separator and prefix in STOCK_POSITION_PREFIXES and suffix and suffix not in NON_STOCK_MARKET_SUFFIXES)
 
 
 def normalize_address(value: str) -> str:
@@ -841,6 +854,7 @@ class WalletTrackerService:
         *,
         min_value: float = MIN_POSITION_MESSAGE_VALUE,
         hip3_only: bool | None = None,
+        stock_like_only: bool | None = None,
     ) -> list[dict[str, Any]]:
         groups: dict[tuple[str, str], dict[str, Any]] = {}
 
@@ -850,9 +864,14 @@ class WalletTrackerService:
                 raw_coin = str(position.get("coin") or "Unknown")
                 coin = normalize_position_coin(raw_coin)
                 is_hip3 = raw_coin.startswith("@")
+                is_stock_like = is_stock_like_position(raw_coin)
                 if hip3_only is True and not is_hip3:
                     continue
                 if hip3_only is False and is_hip3:
+                    continue
+                if stock_like_only is True and not is_stock_like:
+                    continue
+                if stock_like_only is False and is_stock_like:
                     continue
                 if position_value < min_value:
                     continue
@@ -895,11 +914,12 @@ class WalletTrackerService:
 
     def build_positions_message(self, dashboard: dict[str, Any], *, title: str = "Open positions now") -> str:
         lines = [title]
-        position_groups = self.build_position_groups(dashboard, hip3_only=False)
+        position_groups = self.build_position_groups(dashboard, hip3_only=False, stock_like_only=False)
+        stock_groups = self.build_position_groups(dashboard, min_value=0, hip3_only=False, stock_like_only=True)
         hip3_groups = self.build_position_groups(dashboard, min_value=0, hip3_only=True)
-        total_positions = sum(item["positionCount"] for item in position_groups + hip3_groups)
+        total_positions = sum(item["positionCount"] for item in position_groups + stock_groups + hip3_groups)
 
-        if not position_groups and not hip3_groups:
+        if not position_groups and not stock_groups and not hip3_groups:
             lines.append("")
             lines.append("- No open positions")
         else:
@@ -907,6 +927,15 @@ class WalletTrackerService:
                 lines.append("")
                 lines.append(f"By position (>= ${MIN_POSITION_MESSAGE_VALUE:,.0f}):")
                 for item in position_groups[:50]:
+                    lines.append(
+                        f'- {item["coin"]} {item["side"]} '
+                        f'({item["walletCount"]} wallets, {item["positionCount"]} positions, ${item["totalValue"]:,.0f})'
+                    )
+
+            if stock_groups:
+                lines.append("")
+                lines.append("Stocks / indices:")
+                for item in stock_groups[:50]:
                     lines.append(
                         f'- {item["coin"]} {item["side"]} '
                         f'({item["walletCount"]} wallets, {item["positionCount"]} positions, ${item["totalValue"]:,.0f})'
@@ -922,7 +951,7 @@ class WalletTrackerService:
                     )
 
         lines.append("")
-        lines.append(f"Position groups: {len(position_groups) + len(hip3_groups)}")
+        lines.append(f"Position groups: {len(position_groups) + len(stock_groups) + len(hip3_groups)}")
         lines.append(f"Open positions: {total_positions}")
         lines.append(f'Checked at: {dashboard.get("generatedAt", now_iso())}')
         return "\n".join(lines)
