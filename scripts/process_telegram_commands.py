@@ -33,10 +33,11 @@ def build_help_message() -> str:
     return "\n".join(
         [
             "Hyperwatch Pro commands",
-            "/update - full live sentiment update",
+            "/update - live sentiment plus all open positions",
             "/sentiment - full live sentiment update",
             "/consensus - current consensus only",
             "/hip3 - current HIP-3 consensus only",
+            "/positions - all open positions now",
             "/help - show commands",
         ]
     )
@@ -57,6 +58,7 @@ def main() -> int:
     updates = service.fetch_telegram_updates(bot_token, offset=last_update_id + 1)
     latest_seen = last_update_id
     summary_cache = None
+    dashboard_cache = None
 
     for update in updates:
         update_id = int(update.get("update_id", 0))
@@ -75,11 +77,20 @@ def main() -> int:
         if not command:
             continue
 
-        if command in {"/update", "/sentiment", "/consensus", "/hip3"}:
+        if command in {"/update", "/sentiment", "/consensus", "/hip3", "/positions"}:
+            if dashboard_cache is None:
+                dashboard_cache = service.dashboard()
             if summary_cache is None:
-                summary_cache = service.live_sentiment_summary(min_wallets)
+                summary_cache = service.build_sentiment_summary(dashboard_cache["wallets"], min_wallets)
 
-        if command in {"/update", "/sentiment"}:
+        if command == "/update":
+            reply = "\n\n".join(
+                [
+                    service.build_summary_message(summary_cache, min_wallets),
+                    service.build_positions_message(dashboard_cache),
+                ]
+            )
+        elif command == "/sentiment":
             reply = service.build_summary_message(summary_cache, min_wallets)
         elif command == "/consensus":
             reply = service.build_summary_message(
@@ -97,6 +108,8 @@ def main() -> int:
                 include_consensus=False,
                 include_hip3=True,
             )
+        elif command == "/positions":
+            reply = service.build_positions_message(dashboard_cache)
         else:
             reply = build_help_message()
 

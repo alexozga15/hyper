@@ -157,6 +157,33 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("BTC long (3 wallets, $12,345)", message)
         self.assertIn("@PUMP-1 short (3 wallets, $456)", message)
 
+    def test_build_positions_message_lists_all_open_positions(self) -> None:
+        dashboard = {
+            "generatedAt": "2026-04-09T06:00:00Z",
+            "wallets": [
+                {
+                    "alias": "main-1",
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "positions": [
+                        {"coin": "BTC", "side": "Long", "positionValue": 1234.0},
+                        {"coin": "ETH", "side": "Short", "positionValue": 4321.0},
+                    ],
+                },
+                {
+                    "alias": "main-2",
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "positions": [],
+                },
+            ],
+        }
+
+        message = self.service.build_positions_message(dashboard)
+        self.assertIn("Open positions now", message)
+        self.assertIn("main-1", message)
+        self.assertIn("BTC long $1,234", message)
+        self.assertIn("ETH short $4,321", message)
+        self.assertIn("Wallets with positions: 1", message)
+
 
 if __name__ == "__main__":
     unittest.main()

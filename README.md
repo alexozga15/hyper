@@ -66,6 +66,7 @@ If you want on-demand bot replies, enable [`.github/workflows/telegram-commands.
 - `/sentiment`
 - `/consensus`
 - `/hip3`
+- `/positions`
 - `/help`
 
 The Telegram command cursor is stored in [`data/telegram_bot_state.json`](/Users/alexozga/Documents/New%20project%204/data/telegram_bot_state.json), so the bot only answers new messages once.

@@ -826,15 +826,69 @@ class WalletTrackerService:
         dashboard = self.dashboard()
         return self.build_sentiment_summary(dashboard["wallets"], min_wallets)
 
+    def build_positions_message(self, dashboard: dict[str, Any], *, title: str = "Open positions now") -> str:
+        lines = [title]
+        wallet_count = 0
+        position_count = 0
+
+        for wallet in dashboard.get("wallets", []):
+            positions = wallet.get("positions", [])
+            if not positions:
+                continue
+
+            wallet_count += 1
+            lines.append("")
+            lines.append(wallet.get("alias") or wallet.get("address", "")[:10])
+            for position in positions:
+                position_count += 1
+                lines.append(
+                    f'- {position["coin"]} {str(position["side"]).lower()} '
+                    f'${to_float(position["positionValue"]):,.0f}'
+                )
+
+        if position_count == 0:
+            lines.append("")
+            lines.append("- No open positions")
+
+        lines.append("")
+        lines.append(f"Wallets with positions: {wallet_count}")
+        lines.append(f"Open positions: {position_count}")
+        lines.append(f'Checked at: {dashboard.get("generatedAt", now_iso())}')
+        return "\n".join(lines)
+
+    def split_message(self, message: str, limit: int = 3500) -> list[str]:
+        if len(message) <= limit:
+            return [message]
+
+        chunks: list[str] = []
+        current_lines: list[str] = []
+        current_length = 0
+
+        for line in message.splitlines():
+            line_length = len(line) + 1
+            if current_lines and current_length + line_length > limit:
+                chunks.append("\n".join(current_lines))
+                current_lines = [line]
+                current_length = line_length
+            else:
+                current_lines.append(line)
+                current_length += line_length
+
+        if current_lines:
+            chunks.append("\n".join(current_lines))
+
+        return chunks
+
     def send_telegram_message(self, bot_token: str, chat_id: str, message: str) -> None:
-        payload = urllib.parse.urlencode({"chat_id": chat_id, "text": message}).encode("utf-8")
-        request = urllib.request.Request(
-            f"https://api.telegram.org/bot{bot_token}/sendMessage",
-            data=payload,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-        with urllib.request.urlopen(request, timeout=20):
-            return
+        for chunk in self.split_message(message):
+            payload = urllib.parse.urlencode({"chat_id": chat_id, "text": chunk}).encode("utf-8")
+            request = urllib.request.Request(
+                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                data=payload,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            with urllib.request.urlopen(request, timeout=20):
+                continue
 
     def fetch_telegram_updates(self, bot_token: str, offset: int = 0) -> list[dict[str, Any]]:
         query = urllib.parse.urlencode({"offset": offset})
