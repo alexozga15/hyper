@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import re
+import socket
+import ssl
+import struct
 import threading
 import time
 import urllib.parse
@@ -25,6 +30,10 @@ WALLETS_FILE = DATA_DIR / "tracked_wallets.json"
 ALERTS_FILE = DATA_DIR / "alerts.json"
 TELEGRAM_STATE_FILE = DATA_DIR / "telegram_bot_state.json"
 HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
+HYPERLIQUID_WS_URLS = (
+    "wss://api-ui.hyperliquid.xyz/ws",
+    "wss://api.hyperliquid.xyz/ws",
+)
 HEX_ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 MAX_IMPORT_BATCH = 100
 MAX_DISCOVERY_BATCH = 60
@@ -226,6 +235,12 @@ class TrackedWallet:
         }
 
 
+@dataclass
+class WebSocketConnection:
+    sock: socket.socket
+    remainder: bytes = b""
+
+
 class WalletStore:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -289,6 +304,262 @@ class HyperliquidClient:
         except (urllib.error.URLError, TimeoutError, ValueError):
             return fallback
 
+    def _websocket_connect(self, url: str, timeout: float = 8.0) -> WebSocketConnection:
+        parsed = urllib.parse.urlparse(url)
+        host = parsed.hostname or ""
+        if not host:
+            raise ValueError(f"Invalid WebSocket URL: {url}")
+        port = parsed.port or (443 if parsed.scheme == "wss" else 80)
+        resource = parsed.path or "/"
+        if parsed.query:
+            resource = f"{resource}?{parsed.query}"
+
+        raw_socket = socket.create_connection((host, port), timeout=timeout)
+        if parsed.scheme == "wss":
+            context = ssl.create_default_context()
+            sock = context.wrap_socket(raw_socket, server_hostname=host)
+        else:
+            sock = raw_socket
+        sock.settimeout(timeout)
+
+        key = base64.b64encode(os.urandom(16)).decode("ascii")
+        request = (
+            f"GET {resource} HTTP/1.1\r\n"
+            f"Host: {host}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            "Sec-WebSocket-Version: 13\r\n"
+            "\r\n"
+        )
+        sock.sendall(request.encode("ascii"))
+
+        response = b""
+        while b"\r\n\r\n" not in response:
+            chunk = sock.recv(4096)
+            if not chunk:
+                raise ConnectionError("WebSocket handshake failed")
+            response += chunk
+
+        header_bytes, remainder = response.split(b"\r\n\r\n", 1)
+        header_text = header_bytes.decode("utf-8", errors="replace")
+        status_line = header_text.splitlines()[0] if header_text else ""
+        if " 101 " not in status_line:
+            raise ConnectionError(f"WebSocket handshake failed: {status_line}")
+
+        expected_accept = base64.b64encode(
+            hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest()
+        ).decode("ascii")
+        headers = {}
+        for line in header_text.splitlines()[1:]:
+            if ":" not in line:
+                continue
+            name, value = line.split(":", 1)
+            headers[name.strip().lower()] = value.strip()
+        if headers.get("sec-websocket-accept") != expected_accept:
+            raise ConnectionError("WebSocket handshake validation failed")
+
+        return WebSocketConnection(sock=sock, remainder=remainder)
+
+    def _websocket_recv_exact(self, connection: WebSocketConnection, size: int) -> bytes:
+        chunks = []
+        remainder = connection.remainder
+        if remainder:
+            take = remainder[:size]
+            chunks.append(take)
+            connection.remainder = remainder[size:]
+            size -= len(take)
+        while size > 0:
+            chunk = connection.sock.recv(size)
+            if not chunk:
+                raise ConnectionError("Unexpected WebSocket EOF")
+            chunks.append(chunk)
+            size -= len(chunk)
+        return b"".join(chunks)
+
+    def _websocket_send_text(self, connection: WebSocketConnection, message: str) -> None:
+        payload = message.encode("utf-8")
+        header = bytearray([0x81])
+        length = len(payload)
+        if length < 126:
+            header.append(0x80 | length)
+        elif length < 65536:
+            header.append(0x80 | 126)
+            header.extend(struct.pack("!H", length))
+        else:
+            header.append(0x80 | 127)
+            header.extend(struct.pack("!Q", length))
+        mask = os.urandom(4)
+        masked = bytes(payload[i] ^ mask[i % 4] for i in range(length))
+        connection.sock.sendall(bytes(header) + mask + masked)
+
+    def _websocket_read_json_message(self, connection: WebSocketConnection) -> dict[str, Any]:
+        while True:
+            first, second = self._websocket_recv_exact(connection, 2)
+            opcode = first & 0x0F
+            masked = bool(second & 0x80)
+            length = second & 0x7F
+            if length == 126:
+                length = struct.unpack("!H", self._websocket_recv_exact(connection, 2))[0]
+            elif length == 127:
+                length = struct.unpack("!Q", self._websocket_recv_exact(connection, 8))[0]
+            mask = self._websocket_recv_exact(connection, 4) if masked else b""
+            payload = self._websocket_recv_exact(connection, length)
+            if masked:
+                payload = bytes(payload[i] ^ mask[i % 4] for i in range(length))
+            if opcode == 0x8:
+                raise ConnectionError("WebSocket closed by remote host")
+            if opcode == 0x9:
+                pong_header = bytearray([0x8A])
+                pong_len = len(payload)
+                if pong_len < 126:
+                    pong_header.append(0x80 | pong_len)
+                elif pong_len < 65536:
+                    pong_header.append(0x80 | 126)
+                    pong_header.extend(struct.pack("!H", pong_len))
+                else:
+                    pong_header.append(0x80 | 127)
+                    pong_header.extend(struct.pack("!Q", pong_len))
+                pong_mask = os.urandom(4)
+                masked_payload = bytes(payload[i] ^ pong_mask[i % 4] for i in range(pong_len))
+                connection.sock.sendall(bytes(pong_header) + pong_mask + masked_payload)
+                continue
+            if opcode != 0x1:
+                continue
+            try:
+                message = json.loads(payload.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if isinstance(message, dict):
+                return message
+
+    def _subscribe_channel(
+        self,
+        channel: str,
+        subscription: dict[str, Any],
+        *,
+        address: str,
+        timeout: float = 8.0,
+    ) -> dict[str, Any]:
+        request = json.dumps({"method": "subscribe", "subscription": subscription})
+        deadline = time.time() + timeout
+        last_error: Exception | None = None
+        for url in HYPERLIQUID_WS_URLS:
+            connection: WebSocketConnection | None = None
+            try:
+                connection = self._websocket_connect(url, timeout=timeout)
+                self._websocket_send_text(connection, request)
+                while time.time() < deadline:
+                    remaining = max(0.5, deadline - time.time())
+                    connection.sock.settimeout(remaining)
+                    message = self._websocket_read_json_message(connection)
+                    if message.get("channel") != channel:
+                        continue
+                    data = message.get("data")
+                    if isinstance(data, dict) and str(data.get("user", "")).lower() == address.lower():
+                        return data
+            except (ConnectionError, OSError, TimeoutError, ValueError, ssl.SSLError) as error:
+                last_error = error
+            finally:
+                if connection is not None:
+                    try:
+                        connection.sock.close()
+                    except OSError:
+                        pass
+        if last_error is not None:
+            raise last_error
+        raise TimeoutError(f"Timed out waiting for {channel} for {address}")
+
+    def subscribe_clearinghouse_state(self, address: str, timeout: float = 8.0) -> dict[str, Any]:
+        return self._subscribe_channel(
+            "clearinghouseState",
+            {"type": "clearinghouseState", "user": address},
+            address=address,
+            timeout=timeout,
+        )
+
+    def safe_subscribe_clearinghouse_state(self, address: str, fallback: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return self.subscribe_clearinghouse_state(address)
+        except (ConnectionError, OSError, TimeoutError, ValueError, ssl.SSLError):
+            return fallback
+
+    def merge_all_dexs_clearinghouse_state(self, address: str, data: dict[str, Any]) -> dict[str, Any]:
+        aggregated = {
+            "user": address,
+            "marginSummary": {
+                "accountValue": "0.0",
+                "totalNtlPos": "0.0",
+                "totalRawUsd": "0.0",
+                "totalMarginUsed": "0.0",
+            },
+            "crossMarginSummary": {
+                "accountValue": "0.0",
+                "totalNtlPos": "0.0",
+                "totalRawUsd": "0.0",
+                "totalMarginUsed": "0.0",
+            },
+            "crossMaintenanceMarginUsed": "0.0",
+            "withdrawable": "0.0",
+            "assetPositions": [],
+            "time": None,
+        }
+
+        states = data.get("clearinghouseStates", []) if isinstance(data, dict) else []
+        summary_fields = ("accountValue", "totalNtlPos", "totalRawUsd", "totalMarginUsed")
+        latest_time: int | None = None
+        for state_entry in states:
+            if not (isinstance(state_entry, list) and len(state_entry) == 2):
+                continue
+            dex, state = state_entry
+            if not isinstance(state, dict):
+                continue
+
+            aggregated["withdrawable"] = str(to_float(aggregated["withdrawable"]) + to_float(state.get("withdrawable")))
+            aggregated["crossMaintenanceMarginUsed"] = str(
+                to_float(aggregated["crossMaintenanceMarginUsed"]) + to_float(state.get("crossMaintenanceMarginUsed"))
+            )
+
+            for summary_name in ("marginSummary", "crossMarginSummary"):
+                source_summary = state.get(summary_name, {})
+                target_summary = aggregated[summary_name]
+                if not isinstance(source_summary, dict):
+                    continue
+                for field in summary_fields:
+                    target_summary[field] = str(to_float(target_summary.get(field)) + to_float(source_summary.get(field)))
+
+            for raw_position in state.get("assetPositions", []):
+                if not isinstance(raw_position, dict):
+                    continue
+                position_with_dex = dict(raw_position)
+                position_with_dex.setdefault("dex", dex)
+                aggregated["assetPositions"].append(position_with_dex)
+
+            state_time = state.get("time")
+            if isinstance(state_time, (int, float)):
+                latest_time = max(latest_time or int(state_time), int(state_time))
+
+        aggregated["time"] = latest_time
+        return aggregated
+
+    def subscribe_all_dexs_clearinghouse_state(self, address: str, timeout: float = 8.0) -> dict[str, Any]:
+        data = self._subscribe_channel(
+            "allDexsClearinghouseState",
+            {"type": "allDexsClearinghouseState", "user": address},
+            address=address,
+            timeout=timeout,
+        )
+        return self.merge_all_dexs_clearinghouse_state(address, data)
+
+    def safe_subscribe_all_dexs_clearinghouse_state(self, address: str, fallback: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return self.subscribe_all_dexs_clearinghouse_state(address)
+        except (ConnectionError, OSError, TimeoutError, ValueError, ssl.SSLError):
+            try:
+                return self.subscribe_clearinghouse_state(address)
+            except (ConnectionError, OSError, TimeoutError, ValueError, ssl.SSLError):
+                return fallback
+
     def list_markets(self) -> list[str]:
         meta = self.safe_post({"type": "meta"}, {"universe": []})
         universe = meta.get("universe", []) if isinstance(meta, dict) else []
@@ -340,9 +611,10 @@ class WalletTrackerService:
         with ThreadPoolExecutor(max_workers=5) as executor:
             futures = {
                 "state": executor.submit(
-                    self.client.safe_post,
-                    {"type": "clearinghouseState", "user": wallet.address},
+                    self.client.safe_subscribe_all_dexs_clearinghouse_state,
+                    wallet.address,
                     {
+                        "user": wallet.address,
                         "marginSummary": {},
                         "crossMarginSummary": {},
                         "withdrawable": "0",

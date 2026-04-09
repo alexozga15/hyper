@@ -413,5 +413,86 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("SP500 long (1 wallets, 1 positions, $29,095)", message)
 
 
+class HyperliquidClientTests(unittest.TestCase):
+    def test_merge_all_dexs_clearinghouse_state_combines_positions_and_balances(self) -> None:
+        client = HyperliquidClient()
+        merged = client.merge_all_dexs_clearinghouse_state(
+            "0x1111111111111111111111111111111111111111",
+            {
+                "user": "0x1111111111111111111111111111111111111111",
+                "clearinghouseStates": [
+                    [
+                        "",
+                        {
+                            "marginSummary": {
+                                "accountValue": "2139672.7633750001",
+                                "totalNtlPos": "0.0",
+                                "totalRawUsd": "2139672.7633750001",
+                                "totalMarginUsed": "0.0",
+                            },
+                            "crossMarginSummary": {
+                                "accountValue": "2139672.7633750001",
+                                "totalNtlPos": "0.0",
+                                "totalRawUsd": "2139672.7633750001",
+                                "totalMarginUsed": "0.0",
+                            },
+                            "crossMaintenanceMarginUsed": "0.0",
+                            "withdrawable": "2005860.2633750001",
+                            "assetPositions": [],
+                            "time": 1775742877177,
+                        },
+                    ],
+                    [
+                        "xyz",
+                        {
+                            "marginSummary": {
+                                "accountValue": "4184888.718471",
+                                "totalNtlPos": "19380689.7974",
+                                "totalRawUsd": "4184888.718471",
+                                "totalMarginUsed": "2539707.789871",
+                            },
+                            "crossMarginSummary": {
+                                "accountValue": "4184888.718471",
+                                "totalNtlPos": "19380689.7974",
+                                "totalRawUsd": "4184888.718471",
+                                "totalMarginUsed": "2539707.789871",
+                            },
+                            "crossMaintenanceMarginUsed": "0.0",
+                            "withdrawable": "1645180.9286",
+                            "assetPositions": [
+                                {
+                                    "type": "oneWay",
+                                    "position": {
+                                        "coin": "xyz:XYZ100",
+                                        "szi": "600.2214",
+                                        "positionValue": "14910099.7974",
+                                    },
+                                },
+                                {
+                                    "type": "oneWay",
+                                    "position": {
+                                        "coin": "xyz:CL",
+                                        "szi": "25000.0",
+                                        "positionValue": "2448275.0",
+                                    },
+                                },
+                            ],
+                            "time": 1775742878000,
+                        },
+                    ],
+                ],
+            },
+        )
+
+        self.assertEqual(merged["user"], "0x1111111111111111111111111111111111111111")
+        self.assertEqual(len(merged["assetPositions"]), 2)
+        self.assertEqual(merged["assetPositions"][0]["dex"], "xyz")
+        self.assertEqual(merged["assetPositions"][0]["position"]["coin"], "xyz:XYZ100")
+        self.assertAlmostEqual(float(merged["marginSummary"]["accountValue"]), 6324561.481846001)
+        self.assertAlmostEqual(float(merged["marginSummary"]["totalNtlPos"]), 19380689.7974)
+        self.assertAlmostEqual(float(merged["withdrawable"]), 3651041.1919750003)
+        self.assertEqual(merged["time"], 1775742878000)
+
+
 if __name__ == "__main__":
     unittest.main()
