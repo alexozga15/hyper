@@ -38,7 +38,7 @@ HEX_ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 MAX_IMPORT_BATCH = 100
 MAX_DISCOVERY_BATCH = 60
 DEFAULT_CONSENSUS_THRESHOLD = 3
-MIN_POSITION_MESSAGE_VALUE = 100_000
+MIN_POSITION_MESSAGE_VALUE = 200_000
 OIL_POSITION_ALIASES = {"flx:OIL", "cash:WTI", "xyz:BRENTOIL", "xyz:CL"}
 RAW_OIL_POSITION_NAMES = {"BRENTOIL", "CL", "WTI", "OIL"}
 RAW_COMMODITY_POSITION_NAMES = RAW_OIL_POSITION_NAMES | {"GOLD", "SILVER", "COPPER", "NATGAS"}
@@ -1223,13 +1223,12 @@ class WalletTrackerService:
         )
         commodity_groups = self.build_position_groups(
             dashboard,
-            min_value=0,
             hip3_only=False,
             stock_like_only=False,
             commodity_like_only=True,
         )
-        stock_groups = self.build_position_groups(dashboard, min_value=0, hip3_only=False, stock_like_only=True)
-        hip3_groups = self.build_position_groups(dashboard, min_value=0, hip3_only=True)
+        stock_groups = self.build_position_groups(dashboard, hip3_only=False, stock_like_only=True)
+        hip3_groups = self.build_position_groups(dashboard, hip3_only=True)
         total_positions = sum(item["positionCount"] for item in position_groups + commodity_groups + stock_groups + hip3_groups)
 
         if not position_groups and not commodity_groups and not stock_groups and not hip3_groups:
