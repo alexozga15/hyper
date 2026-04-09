@@ -61,16 +61,21 @@ Then enable Actions in GitHub and run the `Sentiment Alerts` workflow once.
 
 If you want to verify Telegram delivery without waiting for a real sentiment change, run [`.github/workflows/telegram-test.yml`](/Users/alexozga/Documents/New%20project%204/.github/workflows/telegram-test.yml). It sends a one-off test message and does not touch the saved alert baseline.
 
-If you want on-demand bot replies, enable [`.github/workflows/telegram-commands.yml`](/Users/alexozga/Documents/New%20project%204/.github/workflows/telegram-commands.yml). It checks your bot inbox every 5 minutes and replies to:
+If you want on-demand bot replies, enable [`.github/workflows/telegram-commands.yml`](.github/workflows/telegram-commands.yml).
 
-- `/update`
-- `/sentiment`
-- `/consensus`
-- `/hip3`
-- `/positions`
-- `/help`
+- It supports both `repository_dispatch` (instant trigger) and a scheduled fallback every 15 minutes.
+- In webhook mode, the workflow replies from the dispatch payload directly. In polling mode, it falls back to Telegram `getUpdates`.
+- Commands supported:
+  - `/update`
+  - `/sentiment`
+  - `/consensus`
+  - `/hip3`
+  - `/positions`
+  - `/help`
 
-The Telegram command cursor is stored in [`data/telegram_bot_state.json`](/Users/alexozga/Documents/New%20project%204/data/telegram_bot_state.json), so the bot only answers new messages once.
+For near-real-time replies, deploy the Cloudflare Worker bridge in [`worker/`](worker/) and connect Telegram webhooks to it. The worker triggers `repository_dispatch` with the full Telegram update so the workflow runs right away when you message the bot.
+
+The Telegram command cursor is stored in [`data/telegram_bot_state.json`](data/telegram_bot_state.json), so the bot only answers new messages once.
 
 ## Import format
 
