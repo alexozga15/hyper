@@ -181,6 +181,39 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(summary["consensus"][0]["walletCount"], 3)
         self.assertEqual(summary["consensus"][0]["totalValue"], 720000)
 
+    def test_build_sentiment_summary_groups_gold_and_silver_aliases(self) -> None:
+        snapshots = [
+            {
+                "address": "0x1111111111111111111111111111111111111111",
+                "alias": "One",
+                "positions": [{"coin": "xyz:GOLD", "side": "Long", "positionValue": 120000}],
+            },
+            {
+                "address": "0x2222222222222222222222222222222222222222",
+                "alias": "Two",
+                "positions": [{"coin": "cash:GOLD", "side": "Long", "positionValue": 240000}],
+            },
+            {
+                "address": "0x3333333333333333333333333333333333333333",
+                "alias": "Three",
+                "positions": [{"coin": "xyz:SILVER", "side": "Short", "positionValue": 360000}],
+            },
+            {
+                "address": "0x4444444444444444444444444444444444444444",
+                "alias": "Four",
+                "positions": [{"coin": "xyz:SILVER", "side": "Short", "positionValue": 480000}],
+            },
+            {
+                "address": "0x5555555555555555555555555555555555555555",
+                "alias": "Five",
+                "positions": [{"coin": "cash:SILVER", "side": "Short", "positionValue": 600000}],
+            },
+        ]
+
+        summary = self.service.build_sentiment_summary(snapshots, min_wallets=2)
+        self.assertTrue(any(item["coin"] == "GOLD" for item in summary["consensus"]))
+        self.assertTrue(any(item["coin"] == "SILVER" for item in summary["consensus"]))
+
     def test_build_sentiment_summary_strips_stock_prefixes(self) -> None:
         snapshots = [
             {
@@ -283,6 +316,33 @@ class AlertSummaryTests(unittest.TestCase):
         message = self.service.build_positions_message(dashboard)
         self.assertIn("OIL long (2 wallets, 2 positions, $1,995,801)", message)
         self.assertIn("OIL short (1 wallets, 1 positions, $573,227)", message)
+
+    def test_build_positions_message_includes_commodities_section_for_gold_and_silver(self) -> None:
+        dashboard = {
+            "generatedAt": "2026-04-09T06:00:00Z",
+            "wallets": [
+                {
+                    "alias": "main-1",
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "positions": [
+                        {"coin": "xyz:GOLD", "side": "Long", "positionValue": 96322.0},
+                        {"coin": "xyz:SILVER", "side": "Short", "positionValue": 76938.0},
+                    ],
+                },
+                {
+                    "alias": "main-2",
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "positions": [{"coin": "cash:GOLD", "side": "Long", "positionValue": 17206.81}],
+                },
+            ],
+        }
+
+        message = self.service.build_positions_message(dashboard)
+        self.assertIn("Commodities:", message)
+        self.assertIn("GOLD long (2 wallets, 2 positions, $113,529)", message)
+        self.assertIn("SILVER short (1 wallets, 1 positions, $76,938)", message)
+        self.assertNotIn("xyz:GOLD", message)
+        self.assertNotIn("xyz:SILVER", message)
 
     def test_build_positions_message_includes_stocks_section_below_main_threshold(self) -> None:
         dashboard = {
