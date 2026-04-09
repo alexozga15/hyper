@@ -75,6 +75,8 @@ def normalize_position_coin(coin: Any) -> str:
     if label in OIL_POSITION_ALIASES:
         return "OIL"
     prefix, separator, suffix = label.partition(":")
+    if separator and suffix in NON_STOCK_MARKET_SUFFIXES:
+        return "OIL" if suffix in {"BRENTOIL", "CL", "WTI", "OIL"} else suffix
     if separator and prefix in STOCK_POSITION_PREFIXES and suffix and suffix not in NON_STOCK_MARKET_SUFFIXES:
         return suffix
     return label
@@ -86,6 +88,14 @@ def is_stock_like_position(coin: Any) -> bool:
         return False
     prefix, separator, suffix = label.partition(":")
     return bool(separator and prefix in STOCK_POSITION_PREFIXES and suffix and suffix not in NON_STOCK_MARKET_SUFFIXES)
+
+
+def is_commodity_like_position(coin: Any) -> bool:
+    label = str(coin or "Unknown")
+    if label in OIL_POSITION_ALIASES:
+        return True
+    _, separator, suffix = label.partition(":")
+    return bool(separator and suffix in NON_STOCK_MARKET_SUFFIXES)
 
 
 def normalize_address(value: str) -> str:
@@ -855,6 +865,7 @@ class WalletTrackerService:
         min_value: float = MIN_POSITION_MESSAGE_VALUE,
         hip3_only: bool | None = None,
         stock_like_only: bool | None = None,
+        commodity_like_only: bool | None = None,
     ) -> list[dict[str, Any]]:
         groups: dict[tuple[str, str], dict[str, Any]] = {}
 
@@ -865,6 +876,7 @@ class WalletTrackerService:
                 coin = normalize_position_coin(raw_coin)
                 is_hip3 = raw_coin.startswith("@")
                 is_stock_like = is_stock_like_position(raw_coin)
+                is_commodity_like = is_commodity_like_position(raw_coin)
                 if hip3_only is True and not is_hip3:
                     continue
                 if hip3_only is False and is_hip3:
@@ -872,6 +884,10 @@ class WalletTrackerService:
                 if stock_like_only is True and not is_stock_like:
                     continue
                 if stock_like_only is False and is_stock_like:
+                    continue
+                if commodity_like_only is True and not is_commodity_like:
+                    continue
+                if commodity_like_only is False and is_commodity_like:
                     continue
                 if position_value < min_value:
                     continue
@@ -914,12 +930,24 @@ class WalletTrackerService:
 
     def build_positions_message(self, dashboard: dict[str, Any], *, title: str = "Open positions now") -> str:
         lines = [title]
-        position_groups = self.build_position_groups(dashboard, hip3_only=False, stock_like_only=False)
+        position_groups = self.build_position_groups(
+            dashboard,
+            hip3_only=False,
+            stock_like_only=False,
+            commodity_like_only=False,
+        )
+        commodity_groups = self.build_position_groups(
+            dashboard,
+            min_value=0,
+            hip3_only=False,
+            stock_like_only=False,
+            commodity_like_only=True,
+        )
         stock_groups = self.build_position_groups(dashboard, min_value=0, hip3_only=False, stock_like_only=True)
         hip3_groups = self.build_position_groups(dashboard, min_value=0, hip3_only=True)
-        total_positions = sum(item["positionCount"] for item in position_groups + stock_groups + hip3_groups)
+        total_positions = sum(item["positionCount"] for item in position_groups + commodity_groups + stock_groups + hip3_groups)
 
-        if not position_groups and not stock_groups and not hip3_groups:
+        if not position_groups and not commodity_groups and not stock_groups and not hip3_groups:
             lines.append("")
             lines.append("- No open positions")
         else:
@@ -927,6 +955,15 @@ class WalletTrackerService:
                 lines.append("")
                 lines.append(f"By position (>= ${MIN_POSITION_MESSAGE_VALUE:,.0f}):")
                 for item in position_groups[:50]:
+                    lines.append(
+                        f'- {item["coin"]} {item["side"]} '
+                        f'({item["walletCount"]} wallets, {item["positionCount"]} positions, ${item["totalValue"]:,.0f})'
+                    )
+
+            if commodity_groups:
+                lines.append("")
+                lines.append("Commodities:")
+                for item in commodity_groups[:50]:
                     lines.append(
                         f'- {item["coin"]} {item["side"]} '
                         f'({item["walletCount"]} wallets, {item["positionCount"]} positions, ${item["totalValue"]:,.0f})'
@@ -951,7 +988,7 @@ class WalletTrackerService:
                     )
 
         lines.append("")
-        lines.append(f"Position groups: {len(position_groups) + len(stock_groups) + len(hip3_groups)}")
+        lines.append(f"Position groups: {len(position_groups) + len(commodity_groups) + len(stock_groups) + len(hip3_groups)}")
         lines.append(f"Open positions: {total_positions}")
         lines.append(f'Checked at: {dashboard.get("generatedAt", now_iso())}')
         return "\n".join(lines)
