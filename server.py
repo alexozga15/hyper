@@ -826,35 +826,79 @@ class WalletTrackerService:
         dashboard = self.dashboard()
         return self.build_sentiment_summary(dashboard["wallets"], min_wallets)
 
-    def build_positions_message(self, dashboard: dict[str, Any], *, title: str = "Open positions now") -> str:
-        lines = [title]
-        wallet_count = 0
-        position_count = 0
+    def build_position_groups(self, dashboard: dict[str, Any]) -> list[dict[str, Any]]:
+        groups: dict[tuple[str, str], dict[str, Any]] = {}
 
         for wallet in dashboard.get("wallets", []):
-            positions = wallet.get("positions", [])
-            if not positions:
-                continue
-
-            wallet_count += 1
-            lines.append("")
-            lines.append(wallet.get("alias") or wallet.get("address", "")[:10])
-            for position in positions:
-                position_count += 1
-                lines.append(
-                    f'- {position["coin"]} {str(position["side"]).lower()} '
-                    f'${to_float(position["positionValue"]):,.0f}'
+            for position in wallet.get("positions", []):
+                coin = str(position.get("coin") or "Unknown")
+                side = str(position.get("side") or "Flat").lower()
+                if side not in {"long", "short"}:
+                    continue
+                key = (coin, side)
+                bucket = groups.setdefault(
+                    key,
+                    {
+                        "coin": coin,
+                        "side": side,
+                        "walletCount": 0,
+                        "positionCount": 0,
+                        "totalValue": 0.0,
+                        "walletAddresses": set(),
+                    },
                 )
+                bucket["positionCount"] += 1
+                bucket["totalValue"] += to_float(position.get("positionValue"))
+                address = str(wallet.get("address") or "")
+                if address and address not in bucket["walletAddresses"]:
+                    bucket["walletAddresses"].add(address)
+                    bucket["walletCount"] += 1
 
-        if position_count == 0:
+        return sorted(
+            [
+                {
+                    "coin": item["coin"],
+                    "side": item["side"],
+                    "walletCount": item["walletCount"],
+                    "positionCount": item["positionCount"],
+                    "totalValue": round(item["totalValue"], 2),
+                }
+                for item in groups.values()
+            ],
+            key=lambda item: (item["walletCount"], item["totalValue"], item["coin"]),
+            reverse=True,
+        )
+
+    def build_positions_message(self, dashboard: dict[str, Any], *, title: str = "Open positions now") -> str:
+        lines = [title]
+        position_groups = self.build_position_groups(dashboard)
+        total_positions = sum(item["positionCount"] for item in position_groups)
+
+        if not position_groups:
             lines.append("")
             lines.append("- No open positions")
+        else:
+            lines.append("")
+            lines.append("By position:")
+            for item in position_groups[:50]:
+                lines.append(
+                    f'- {item["coin"]} {item["side"]} '
+                    f'({item["walletCount"]} wallets, {item["positionCount"]} positions, ${item["totalValue"]:,.0f})'
+                )
 
         lines.append("")
-        lines.append(f"Wallets with positions: {wallet_count}")
-        lines.append(f"Open positions: {position_count}")
+        lines.append(f"Position groups: {len(position_groups)}")
+        lines.append(f"Open positions: {total_positions}")
         lines.append(f'Checked at: {dashboard.get("generatedAt", now_iso())}')
         return "\n".join(lines)
+
+    def build_hourly_update_message(self, dashboard: dict[str, Any], summary: dict[str, Any], min_wallets: int) -> str:
+        return "\n\n".join(
+            [
+                self.build_summary_message(summary, min_wallets, title="Hourly wallet update"),
+                self.build_positions_message(dashboard),
+            ]
+        )
 
     def split_message(self, message: str, limit: int = 3500) -> list[str]:
         if len(message) <= limit:
@@ -963,6 +1007,16 @@ class WalletTrackerService:
             "changes": changes,
             "summary": summary,
         }
+
+    def send_hourly_update(self, min_wallets: int, bot_token: str, chat_id: str) -> dict[str, Any]:
+        dashboard = self.dashboard()
+        summary = self.build_sentiment_summary(dashboard["wallets"], min_wallets)
+        self.send_telegram_message(
+            bot_token,
+            chat_id,
+            self.build_hourly_update_message(dashboard, summary, min_wallets),
+        )
+        return {"sent": True, "summary": summary}
 
 
 class AlertWorker:

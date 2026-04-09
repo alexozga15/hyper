@@ -21,14 +21,25 @@ def env_flag(name: str, default: bool) -> bool:
 
 def main() -> int:
     service = WalletTrackerService(WalletStore(WALLETS_FILE), HyperliquidClient())
+    min_wallets = int(os.environ.get("MIN_CONSENSUS_WALLETS", "3"))
     service.update_alert_settings(
         {
             "enabled": env_flag("ALERTS_ENABLED", True),
-            "minConsensusWallets": int(os.environ.get("MIN_CONSENSUS_WALLETS", "3")),
+            "minConsensusWallets": min_wallets,
             "trackHip3": env_flag("TRACK_HIP3", True),
         }
     )
-    result = service.check_alerts(send_notification=True)
+
+    if env_flag("SEND_HOURLY_UPDATE", False):
+        bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+        chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+        if not bot_token or not chat_id:
+            print("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
+            return 1
+        result = service.send_hourly_update(min_wallets, bot_token, chat_id)
+    else:
+        result = service.check_alerts(send_notification=True)
+
     print(json.dumps(result, indent=2))
     return 1 if result.get("error") else 0
 

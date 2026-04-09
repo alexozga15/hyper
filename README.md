@@ -46,6 +46,7 @@ If you want a free setup, use the included GitHub Actions workflow at [`.github/
 How it works:
 
 - GitHub Actions runs every 15 minutes and can also be started manually.
+- The scheduled sentiment update runs every hour.
 - Telegram secrets stay in GitHub Secrets, not in the repo.
 - Previous alert state is stored in [`data/alerts.json`](/Users/alexozga/Documents/New%20project%204/data/alerts.json) and committed back to the repo so consensus changes are remembered between runs.
 
