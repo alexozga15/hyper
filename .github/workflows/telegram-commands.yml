@@ -2,11 +2,17 @@ name: Telegram Commands
 
 on:
   workflow_dispatch:
+  repository_dispatch:
+    types: [telegram_update]
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/15 * * * *"
 
 permissions:
   contents: write
+
+concurrency:
+  group: telegram-commands
+  cancel-in-progress: false
 
 jobs:
   telegram-commands:
