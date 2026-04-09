@@ -260,12 +260,12 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_positions_message(dashboard)
         self.assertIn("Open positions now", message)
-        self.assertIn("By position (>= $100,000):", message)
-        self.assertIn("BTC long (2 wallets, 2 positions, $350,000)", message)
+        self.assertIn("By position (>= $200,000):", message)
+        self.assertIn("BTC long (1 wallets, 1 positions, $225,000)", message)
         self.assertNotIn("ETH short", message)
         self.assertIn("Position groups: 1", message)
 
-    def test_build_positions_message_includes_hip3_positions_below_main_threshold(self) -> None:
+    def test_build_positions_message_filters_hip3_positions_below_threshold(self) -> None:
         dashboard = {
             "generatedAt": "2026-04-09T06:00:00Z",
             "wallets": [
@@ -286,10 +286,10 @@ class AlertSummaryTests(unittest.TestCase):
         }
 
         message = self.service.build_positions_message(dashboard)
-        self.assertIn("HIP-3 positions:", message)
-        self.assertIn("@MOON-1 long (2 wallets, 2 positions, $2,000)", message)
-        self.assertIn("BTC long (1 wallets, 1 positions, $150,000)", message)
-        self.assertIn("Position groups: 2", message)
+        self.assertIn("- No open positions", message)
+        self.assertNotIn("@MOON-1 long", message)
+        self.assertNotIn("BTC long (1 wallets, 1 positions, $150,000)", message)
+        self.assertIn("Position groups: 0", message)
 
     def test_build_positions_message_groups_oil_aliases_under_oil(self) -> None:
         dashboard = {
@@ -317,7 +317,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("OIL long (2 wallets, 2 positions, $1,995,801)", message)
         self.assertIn("OIL short (1 wallets, 1 positions, $573,227)", message)
 
-    def test_build_positions_message_includes_commodities_section_for_gold_and_silver(self) -> None:
+    def test_build_positions_message_filters_commodities_below_threshold(self) -> None:
         dashboard = {
             "generatedAt": "2026-04-09T06:00:00Z",
             "wallets": [
@@ -338,13 +338,13 @@ class AlertSummaryTests(unittest.TestCase):
         }
 
         message = self.service.build_positions_message(dashboard)
-        self.assertIn("Commodities:", message)
-        self.assertIn("GOLD long (2 wallets, 2 positions, $113,529)", message)
-        self.assertIn("SILVER short (1 wallets, 1 positions, $76,938)", message)
+        self.assertIn("- No open positions", message)
+        self.assertNotIn("GOLD long", message)
+        self.assertNotIn("SILVER short", message)
         self.assertNotIn("xyz:GOLD", message)
         self.assertNotIn("xyz:SILVER", message)
 
-    def test_build_positions_message_includes_stocks_section_below_main_threshold(self) -> None:
+    def test_build_positions_message_filters_stocks_below_threshold(self) -> None:
         dashboard = {
             "generatedAt": "2026-04-09T06:00:00Z",
             "wallets": [
@@ -365,9 +365,9 @@ class AlertSummaryTests(unittest.TestCase):
         }
 
         message = self.service.build_positions_message(dashboard)
-        self.assertIn("Stocks / indices:", message)
-        self.assertIn("NVDA long (2 wallets, 2 positions, $100,250)", message)
-        self.assertIn("SPACEX short (1 wallets, 1 positions, $2,500)", message)
+        self.assertIn("- No open positions", message)
+        self.assertNotIn("NVDA long", message)
+        self.assertNotIn("SPACEX short", message)
         self.assertNotIn("xyz:NVDA", message)
 
     def test_build_positions_message_shows_empty_sections_when_category_has_no_positions(self) -> None:
@@ -377,7 +377,7 @@ class AlertSummaryTests(unittest.TestCase):
                 {
                     "alias": "main-1",
                     "address": "0x1111111111111111111111111111111111111111",
-                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 150000.0}],
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 250000.0}],
                 }
             ],
         }
@@ -396,9 +396,9 @@ class AlertSummaryTests(unittest.TestCase):
                     "address": "0x1111111111111111111111111111111111111111",
                     "positions": [
                         {"coin": "CL", "side": "Long", "positionValue": 423450.0},
-                        {"coin": "SP500", "side": "Long", "positionValue": 29095.0},
+                        {"coin": "SP500", "side": "Long", "positionValue": 290950.0},
                         {"coin": "XYZ100", "side": "Long", "positionValue": 914001.24},
-                        {"coin": "SILVER", "side": "Short", "positionValue": 76938.0},
+                        {"coin": "SILVER", "side": "Short", "positionValue": 276938.0},
                     ],
                 }
             ],
@@ -407,10 +407,10 @@ class AlertSummaryTests(unittest.TestCase):
         message = self.service.build_positions_message(dashboard)
         self.assertIn("Commodities:", message)
         self.assertIn("OIL long (1 wallets, 1 positions, $423,450)", message)
-        self.assertIn("SILVER short (1 wallets, 1 positions, $76,938)", message)
+        self.assertIn("SILVER short (1 wallets, 1 positions, $276,938)", message)
         self.assertIn("Stocks / indices:", message)
         self.assertIn("XYZ100 long (1 wallets, 1 positions, $914,001)", message)
-        self.assertIn("SP500 long (1 wallets, 1 positions, $29,095)", message)
+        self.assertIn("SP500 long (1 wallets, 1 positions, $290,950)", message)
 
 
 class HyperliquidClientTests(unittest.TestCase):
