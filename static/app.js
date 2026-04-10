@@ -55,6 +55,15 @@ function shortAddress(address) {
   return `${address.slice(0, 6)}...${address.slice(-4)}`;
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
 function setMessage(message, tone = "neutral") {
   const node = document.getElementById("message-box");
   node.textContent = message;
@@ -134,7 +143,7 @@ function renderSegments() {
       (segment) => `
         <article class="list-card">
           <div>
-            <strong>${segment.label}</strong>
+            <strong>${escapeHtml(segment.label)}</strong>
             <p>${segment.count} wallet${segment.count === 1 ? "" : "s"}</p>
           </div>
           <div class="list-card-metrics">
@@ -161,10 +170,10 @@ function renderSavedWallets() {
       (wallet) => `
         <article class="list-card">
           <div>
-            <strong>${wallet.alias || "Unnamed wallet"}</strong>
-            <p>${wallet.address}</p>
+            <strong>${escapeHtml(wallet.alias || "Unnamed wallet")}</strong>
+            <p>${escapeHtml(wallet.address)}</p>
           </div>
-          <button class="danger-btn" data-address="${wallet.address}">Remove</button>
+          <button class="danger-btn" data-address="${escapeHtml(wallet.address)}">Remove</button>
         </article>
       `
     )
@@ -246,8 +255,8 @@ function renderWalletTable() {
         ${wallets
           .map(
             (wallet) => `
-              <tr class="${wallet.address === state.selectedWalletAddress ? "selected-row" : ""}" data-wallet-row="${wallet.address}">
-                <td>${wallet.alias || "Unnamed wallet"}</td>
+              <tr class="${wallet.address === state.selectedWalletAddress ? "selected-row" : ""}" data-wallet-row="${escapeHtml(wallet.address)}">
+                <td>${escapeHtml(wallet.alias || "Unnamed wallet")}</td>
                 <td>${formatMoney(wallet.accountValue)}</td>
                 <td class="${wallet.realizedPnl >= 0 ? "positive" : "negative"}">${formatMoney(wallet.realizedPnl)}</td>
                 <td class="${wallet.unrealizedPnl >= 0 ? "positive" : "negative"}">${formatMoney(wallet.unrealizedPnl)}</td>
@@ -255,8 +264,8 @@ function renderWalletTable() {
                 <td>${wallet.positionCount}</td>
                 <td>${wallet.openOrderCount}</td>
                 <td>${percentFormatter.format(wallet.hitRate)}%</td>
-                <td>${wallet.cohorts.walletSize} / ${wallet.cohorts.profitability}</td>
-                <td>${shortAddress(wallet.address)}</td>
+                <td>${escapeHtml(wallet.cohorts.walletSize)} / ${escapeHtml(wallet.cohorts.profitability)}</td>
+                <td>${escapeHtml(shortAddress(wallet.address))}</td>
               </tr>
             `
           )
@@ -295,8 +304,8 @@ function renderWalletDetails() {
         .map(
           (position) => `
             <tr>
-              <td>${position.coin}</td>
-              <td>${position.side}</td>
+              <td>${escapeHtml(position.coin)}</td>
+              <td>${escapeHtml(position.side)}</td>
               <td>${Number(position.size).toFixed(3)}</td>
               <td>${formatMoney(position.positionValue)}</td>
               <td class="${position.unrealizedPnl >= 0 ? "positive" : "negative"}">${formatMoney(position.unrealizedPnl)}</td>
@@ -312,7 +321,7 @@ function renderWalletDetails() {
         .map(
           (fill) => `
             <li>
-              <span>${fill.coin} ${fill.direction}</span>
+              <span>${escapeHtml(fill.coin)} ${escapeHtml(fill.direction)}</span>
               <span>${formatDate(fill.time)}</span>
               <strong class="${fill.closedPnl >= 0 ? "positive" : "negative"}">${formatMoney(fill.closedPnl)}</strong>
             </li>
@@ -325,15 +334,15 @@ function renderWalletDetails() {
   root.innerHTML = `
     <div class="wallet-summary">
       <div>
-        <p class="wallet-title">${wallet.alias || "Unnamed wallet"}</p>
-        <h3>${wallet.address}</h3>
+        <p class="wallet-title">${escapeHtml(wallet.alias || "Unnamed wallet")}</p>
+        <h3>${escapeHtml(wallet.address)}</h3>
       </div>
-      <span class="pill">${wallet.role}</span>
+      <span class="pill">${escapeHtml(wallet.role)}</span>
     </div>
 
     <div class="wallet-metrics">
-      <div><span>Wallet Size</span><strong>${wallet.cohorts.walletSize}</strong></div>
-      <div><span>Profitability</span><strong>${wallet.cohorts.profitability}</strong></div>
+      <div><span>Wallet Size</span><strong>${escapeHtml(wallet.cohorts.walletSize)}</strong></div>
+      <div><span>Profitability</span><strong>${escapeHtml(wallet.cohorts.profitability)}</strong></div>
       <div><span>Day PnL</span><strong class="${wallet.performance.day.pnl >= 0 ? "positive" : "negative"}">${formatMoney(wallet.performance.day.pnl)}</strong></div>
       <div><span>Week PnL</span><strong class="${wallet.performance.week.pnl >= 0 ? "positive" : "negative"}">${formatMoney(wallet.performance.week.pnl)}</strong></div>
       <div><span>Month PnL</span><strong class="${wallet.performance.month.pnl >= 0 ? "positive" : "negative"}">${formatMoney(wallet.performance.month.pnl)}</strong></div>
@@ -411,9 +420,9 @@ function renderDiscoveryResults(candidates = []) {
                 <td>${formatMoney(wallet.accountValue)}</td>
                 <td class="${wallet.realizedPnl >= 0 ? "positive" : "negative"}">${formatMoney(wallet.realizedPnl)}</td>
                 <td>${formatMoney(wallet.totalNotional)}</td>
-                <td>${wallet.cohorts.walletSize} / ${wallet.cohorts.profitability}</td>
-                <td>${shortAddress(wallet.address)}</td>
-                <td><button class="secondary-btn add-discovered" data-address="${wallet.address}">Track</button></td>
+                <td>${escapeHtml(wallet.cohorts.walletSize)} / ${escapeHtml(wallet.cohorts.profitability)}</td>
+                <td>${escapeHtml(shortAddress(wallet.address))}</td>
+                <td><button class="secondary-btn add-discovered" data-address="${escapeHtml(wallet.address)}">Track</button></td>
               </tr>
             `
           )
@@ -455,8 +464,8 @@ function renderMarketsPicker() {
     .map(
       (market) => `
         <label class="market-chip">
-          <input type="checkbox" value="${market}" ${defaults.has(market) ? "checked" : ""} />
-          <span>${market}</span>
+          <input type="checkbox" value="${escapeHtml(market)}" ${defaults.has(market) ? "checked" : ""} />
+          <span>${escapeHtml(market)}</span>
         </label>
       `
     )

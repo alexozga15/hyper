@@ -957,9 +957,15 @@ class WalletTrackerService:
                 key = (coin, side)
                 bucket = aggregate.setdefault(
                     key,
-                    {"coin": coin, "side": side, "walletCount": 0, "totalValue": 0.0, "wallets": []},
+                    {
+                        "coin": coin,
+                        "side": side,
+                        "walletCount": 0,
+                        "totalValue": 0.0,
+                        "wallets": [],
+                        "walletAddresses": set(),
+                    },
                 )
-                bucket["walletCount"] += 1
                 bucket["totalValue"] += position_value
                 bucket["wallets"].append(
                     {
@@ -968,6 +974,10 @@ class WalletTrackerService:
                         "value": round(position_value, 2),
                     }
                 )
+                address = str(snapshot.get("address") or "")
+                if address and address not in bucket["walletAddresses"]:
+                    bucket["walletAddresses"].add(address)
+                    bucket["walletCount"] += 1
 
                 if side == "long":
                     total_long += position_value
@@ -977,7 +987,9 @@ class WalletTrackerService:
         consensus = sorted(
             [
                 {
-                    **bucket,
+                    "coin": bucket["coin"],
+                    "side": bucket["side"],
+                    "walletCount": bucket["walletCount"],
                     "totalValue": round(bucket["totalValue"], 2),
                     "wallets": sorted(bucket["wallets"], key=lambda item: item["value"], reverse=True),
                 }
@@ -1229,7 +1241,7 @@ class WalletTrackerService:
         )
         stock_groups = self.build_position_groups(dashboard, hip3_only=False, stock_like_only=True)
         hip3_groups = self.build_position_groups(dashboard, hip3_only=True)
-        total_positions = sum(item["positionCount"] for item in position_groups + commodity_groups + stock_groups + hip3_groups)
+        total_positions = sum(len(wallet.get("positions", [])) for wallet in dashboard.get("wallets", []))
 
         if not position_groups and not commodity_groups and not stock_groups and not hip3_groups:
             lines.append("")
@@ -1454,9 +1466,17 @@ class AppHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
+        payload: dict[str, Any] = {}
+        json_routes = {"/api/wallets", "/api/wallets/import", "/api/discovery/scan", "/api/alerts/config"}
+        if path in json_routes:
+            try:
+                payload = self.read_json_body()
+            except ValueError as exc:
+                status, body = format_error(str(exc), HTTPStatus.BAD_REQUEST)
+                self.send_json(body, status)
+                return
 
         if path == "/api/wallets":
-            payload = self.read_json_body()
             address = normalize_address(str(payload.get("address", "")).strip())
             alias = str(payload.get("alias", "")).strip()
             notes = str(payload.get("notes", "")).strip()
@@ -1471,13 +1491,11 @@ class AppHandler(SimpleHTTPRequestHandler):
             return
 
         if path == "/api/wallets/import":
-            payload = self.read_json_body()
             result = self.service.import_wallets(str(payload.get("text", "")))
             self.send_json(result, HTTPStatus.CREATED)
             return
 
         if path == "/api/discovery/scan":
-            payload = self.read_json_body()
             result = self.service.scan_discovery_candidates(
                 addresses=payload.get("addresses", []),
                 limit=int(payload.get("limit", 15)),
@@ -1488,7 +1506,6 @@ class AppHandler(SimpleHTTPRequestHandler):
             return
 
         if path == "/api/alerts/config":
-            payload = self.read_json_body()
             self.send_json(self.service.update_alert_settings(payload))
             return
 
@@ -1522,9 +1539,19 @@ class AppHandler(SimpleHTTPRequestHandler):
         self.send_json(body, status)
 
     def read_json_body(self) -> dict[str, Any]:
-        content_length = int(self.headers.get("Content-Length", "0"))
-        raw = self.rfile.read(content_length).decode("utf-8") if content_length else "{}"
-        return json.loads(raw or "{}")
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError as exc:
+            raise ValueError("Invalid Content-Length header.") from exc
+        raw_bytes = self.rfile.read(content_length) if content_length else b"{}"
+        try:
+            raw = raw_bytes.decode("utf-8")
+            payload = json.loads(raw or "{}")
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("Request body must be valid JSON.") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("Request body must be a JSON object.")
+        return payload
 
     def send_json(self, payload: dict[str, Any], status: int = HTTPStatus.OK) -> None:
         body = json.dumps(payload).encode("utf-8")
