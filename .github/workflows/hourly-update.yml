@@ -1,9 +1,9 @@
-name: Hourly Update
+name: 2-Hour Update
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 * * * *"
+    - cron: "0 */2 * * *"
 
 permissions:
   contents: write
