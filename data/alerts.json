@@ -6,49 +6,92 @@
   },
   "state": {
     "summary": {
-      "generatedAt": "2026-04-13T13:13:29.759801Z",
+      "generatedAt": "2026-04-13T14:56:12.726401Z",
       "overallBias": "mixed",
       "consensus": [
         {
           "coin": "OIL",
           "side": "short",
           "walletCount": 7,
-          "totalValue": 25211588.44,
+          "totalValue": 21340232.36,
           "wallets": [
             {
               "address": "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
               "alias": "wallet-26",
-              "value": 19609164.78
-            },
-            {
-              "address": "0x6b08bbb2daf57d390538d73542f50d5f735ca420",
-              "alias": "wallet-1",
-              "value": 3272658.4
+              "value": 19347449.48
             },
             {
               "address": "0x58cbd807135f66e8c9b4f39eea92a612b477bf00",
               "alias": "wallet-7",
-              "value": 1239900.36
+              "value": 763958.3
             },
             {
               "address": "0x1f67d79afc8d0e7609ddba6c9b657cc635f69981",
               "alias": "wallet-10",
-              "value": 603826.47
+              "value": 595522.15
             },
             {
               "address": "0x1f67d79afc8d0e7609ddba6c9b657cc635f69981",
               "alias": "wallet-10",
-              "value": 292904.5
+              "value": 240832.73
             },
             {
               "address": "0x1f67d79afc8d0e7609ddba6c9b657cc635f69981",
               "alias": "wallet-10",
-              "value": 193000.71
+              "value": 228986.22
+            },
+            {
+              "address": "0x6b08bbb2daf57d390538d73542f50d5f735ca420",
+              "alias": "wallet-1",
+              "value": 163352.37
             },
             {
               "address": "0x1f67d79afc8d0e7609ddba6c9b657cc635f69981",
               "alias": "wallet-10",
-              "value": 133.2
+              "value": 131.11
+            }
+          ]
+        },
+        {
+          "coin": "OIL",
+          "side": "long",
+          "walletCount": 7,
+          "totalValue": 5332588.56,
+          "wallets": [
+            {
+              "address": "0x939f95036d2e7b6d7419ec072bf9d967352204d2",
+              "alias": "wallet-24",
+              "value": 4021572.22
+            },
+            {
+              "address": "0x3d89bcea338f35edfaeb313b1c713978c6dceb14",
+              "alias": "wallet-9",
+              "value": 610430.55
+            },
+            {
+              "address": "0x3d89bcea338f35edfaeb313b1c713978c6dceb14",
+              "alias": "wallet-9",
+              "value": 245628.75
+            },
+            {
+              "address": "0x54a7240cea67b8c41b7c7f2b485360f37331aef4",
+              "alias": "wallet-17",
+              "value": 240812.5
+            },
+            {
+              "address": "0xf5a87994218e1723ed681f14f591b4fb57f65651",
+              "alias": "wallet-15",
+              "value": 181032.63
+            },
+            {
+              "address": "0x1337c163a5d5b60618ffceaf3a7f2130e607f39b",
+              "alias": "wallet-18",
+              "value": 19270.0
+            },
+            {
+              "address": "0x58cbd807135f66e8c9b4f39eea92a612b477bf00",
+              "alias": "wallet-7",
+              "value": 13841.91
             }
           ]
         },
@@ -56,75 +99,37 @@
           "coin": "BTC",
           "side": "long",
           "walletCount": 6,
-          "totalValue": 51737998.85,
+          "totalValue": 52382328.63,
           "wallets": [
             {
               "address": "0x939f95036d2e7b6d7419ec072bf9d967352204d2",
               "alias": "wallet-24",
-              "value": 30104878.01
+              "value": 30480326.55
             },
             {
               "address": "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
               "alias": "wallet-26",
-              "value": 12828476.8
+              "value": 12987552.22
             },
             {
               "address": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
               "alias": "wallet-8",
-              "value": 4338503.0
+              "value": 4392610.0
             },
             {
               "address": "0x932bdd2d5e21475e62d2fea8158fc5974507cb1a",
               "alias": "wallet-6",
-              "value": 2777143.34
+              "value": 2811778.07
             },
             {
               "address": "0x63d417a577b50c96f4f09148d4e4d70950db0522",
               "alias": "wallet-13",
-              "value": 1546751.71
+              "value": 1566041.8
             },
             {
               "address": "0xf97ad6704baec104d00b88e0c157e2b7b3a1ddd1",
               "alias": "wallet-20",
-              "value": 142246.0
-            }
-          ]
-        },
-        {
-          "coin": "OIL",
-          "side": "long",
-          "walletCount": 6,
-          "totalValue": 5487609.29,
-          "wallets": [
-            {
-              "address": "0x939f95036d2e7b6d7419ec072bf9d967352204d2",
-              "alias": "wallet-24",
-              "value": 4075972.51
-            },
-            {
-              "address": "0x3d89bcea338f35edfaeb313b1c713978c6dceb14",
-              "alias": "wallet-9",
-              "value": 618942.77
-            },
-            {
-              "address": "0x3d89bcea338f35edfaeb313b1c713978c6dceb14",
-              "alias": "wallet-9",
-              "value": 248892.75
-            },
-            {
-              "address": "0x54a7240cea67b8c41b7c7f2b485360f37331aef4",
-              "alias": "wallet-17",
-              "value": 244070.0
-            },
-            {
-              "address": "0xf5a87994218e1723ed681f14f591b4fb57f65651",
-              "alias": "wallet-15",
-              "value": 183481.48
-            },
-            {
-              "address": "0x58cbd807135f66e8c9b4f39eea92a612b477bf00",
-              "alias": "wallet-7",
-              "value": 116249.78
+              "value": 144020.0
             }
           ]
         },
@@ -132,32 +137,32 @@
           "coin": "HYPE",
           "side": "short",
           "walletCount": 5,
-          "totalValue": 31937680.89,
+          "totalValue": 32349638.06,
           "wallets": [
             {
               "address": "0x939f95036d2e7b6d7419ec072bf9d967352204d2",
               "alias": "wallet-24",
-              "value": 23261307.76
+              "value": 23561350.28
             },
             {
               "address": "0xa87a233e8a7d8951ff790a2e39738086cb5f71b7",
               "alias": "wallet-27",
-              "value": 4758826.32
+              "value": 4820209.38
             },
             {
               "address": "0xb3e475368ed0fa0ad23c04de0423d48a0758806f",
               "alias": "wallet-22",
-              "value": 3367760.0
+              "value": 3411200.0
             },
             {
               "address": "0x3d89bcea338f35edfaeb313b1c713978c6dceb14",
               "alias": "wallet-9",
-              "value": 419707.09
+              "value": 425120.8
             },
             {
               "address": "0xad59ed47c226987cf458a63428ca10887773ba81",
               "alias": "wallet-19",
-              "value": 130079.73
+              "value": 131757.6
             }
           ]
         },
@@ -165,32 +170,32 @@
           "coin": "ETH",
           "side": "short",
           "walletCount": 5,
-          "totalValue": 20127097.17,
+          "totalValue": 20400245.34,
           "wallets": [
             {
               "address": "0x418aa6bf98a2b2bc93779f810330d88cde488888",
               "alias": "wallet-23",
-              "value": 11637740.0
+              "value": 11773420.0
             },
             {
               "address": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
               "alias": "wallet-12",
-              "value": 5455003.54
+              "value": 5779235.34
             },
             {
               "address": "0x8b0be882a693ad3849f9bfde6951ec36489f30be",
               "alias": "wallet-4",
-              "value": 1759614.65
+              "value": 1780129.33
             },
             {
               "address": "0x95fde6cf0d305078b7eeac44182a931c169dd947",
               "alias": "wallet-11",
-              "value": 1208864.97
+              "value": 1000818.67
             },
             {
               "address": "0xad59ed47c226987cf458a63428ca10887773ba81",
               "alias": "wallet-19",
-              "value": 65874.0
+              "value": 66642.0
             }
           ]
         },
@@ -198,27 +203,27 @@
           "coin": "BTC",
           "side": "short",
           "walletCount": 4,
-          "totalValue": 16456586.19,
+          "totalValue": 14501980.12,
           "wallets": [
             {
               "address": "0x418aa6bf98a2b2bc93779f810330d88cde488888",
               "alias": "wallet-23",
-              "value": 10668450.0
+              "value": 10801500.0
             },
             {
               "address": "0x09bc1cf4d9f0b59e1425a8fde4d4b1f7d3c9410d",
               "alias": "wallet-25",
-              "value": 5503102.23
+              "value": 3411891.41
             },
             {
               "address": "0xad59ed47c226987cf458a63428ca10887773ba81",
               "alias": "wallet-19",
-              "value": 213369.0
+              "value": 216030.0
             },
             {
               "address": "0x1f67d79afc8d0e7609ddba6c9b657cc635f69981",
               "alias": "wallet-10",
-              "value": 71664.96
+              "value": 72558.72
             }
           ]
         },
@@ -226,22 +231,22 @@
           "coin": "XYZ100",
           "side": "long",
           "walletCount": 3,
-          "totalValue": 22732458.2,
+          "totalValue": 22870375.31,
           "wallets": [
             {
               "address": "0x5d2f4460ac3514ada79f5d9838916e508ab39bb7",
               "alias": "wallet-21",
-              "value": 15506155.22
+              "value": 15600428.87
             },
             {
               "address": "0xe9ffe7698f46f96f980f2877e18c43f5b4165903",
               "alias": "wallet-3",
-              "value": 7224200.39
+              "value": 7267831.07
             },
             {
               "address": "0x1f67d79afc8d0e7609ddba6c9b657cc635f69981",
               "alias": "wallet-10",
-              "value": 2102.58
+              "value": 2115.37
             }
           ]
         },
@@ -249,22 +254,22 @@
           "coin": "HYPE",
           "side": "long",
           "walletCount": 3,
-          "totalValue": 12677575.12,
+          "totalValue": 12627474.41,
           "wallets": [
             {
               "address": "0x8b0be882a693ad3849f9bfde6951ec36489f30be",
               "alias": "wallet-4",
-              "value": 8691857.26
+              "value": 8803971.62
             },
             {
               "address": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
               "alias": "wallet-8",
-              "value": 3788738.42
+              "value": 3623982.55
             },
             {
               "address": "0x63d417a577b50c96f4f09148d4e4d70950db0522",
               "alias": "wallet-13",
-              "value": 196979.44
+              "value": 199520.24
             }
           ]
         },
@@ -272,32 +277,32 @@
           "coin": "SP500",
           "side": "long",
           "walletCount": 3,
-          "totalValue": 10098206.36,
+          "totalValue": 9989762.06,
           "wallets": [
             {
               "address": "0xe9ffe7698f46f96f980f2877e18c43f5b4165903",
               "alias": "wallet-3",
-              "value": 7853946.37
+              "value": 7909140.35
             },
             {
               "address": "0x5d2f4460ac3514ada79f5d9838916e508ab39bb7",
               "alias": "wallet-21",
-              "value": 2035770.0
+              "value": 2046540.0
             },
             {
               "address": "0x58cbd807135f66e8c9b4f39eea92a612b477bf00",
               "alias": "wallet-7",
-              "value": 208489.99
+              "value": 34081.71
             }
           ]
         }
       ],
       "hip3Consensus": [],
-      "longExposure": 125159587.47,
-      "shortExposure": 112889030.17,
+      "longExposure": 124554281.14,
+      "shortExposure": 108675817.31,
       "walletCount": 27
     },
-    "lastCheckedAt": "2026-04-13T13:13:30.116830Z",
-    "lastSentAt": "2026-04-13T13:13:30.116849Z"
+    "lastCheckedAt": "2026-04-13T14:56:13.128887Z",
+    "lastSentAt": "2026-04-13T14:56:13.128905Z"
   }
 }
