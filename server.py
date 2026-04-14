@@ -1102,7 +1102,7 @@ class WalletTrackerService:
         *,
         title: str = "Current wallet sentiment",
         include_consensus: bool = True,
-        include_hip3: bool = True,
+        include_hip3: bool = False,
     ) -> str:
         lines = [
             title,
