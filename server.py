@@ -1228,10 +1228,9 @@ class WalletTrackerService:
             commodity_like_only=True,
         )
         stock_groups = self.build_position_groups(dashboard, hip3_only=False, stock_like_only=True)
-        hip3_groups = self.build_position_groups(dashboard, hip3_only=True)
-        total_positions = sum(item["positionCount"] for item in position_groups + commodity_groups + stock_groups + hip3_groups)
+        total_positions = sum(item["positionCount"] for item in position_groups + commodity_groups + stock_groups)
 
-        if not position_groups and not commodity_groups and not stock_groups and not hip3_groups:
+        if not position_groups and not commodity_groups and not stock_groups:
             lines.append("")
             lines.append("- No open positions")
         else:
@@ -1239,7 +1238,6 @@ class WalletTrackerService:
                 (f"By position (>= ${MIN_POSITION_MESSAGE_VALUE:,.0f}):", position_groups),
                 ("Commodities:", commodity_groups),
                 ("Stocks / indices:", stock_groups),
-                ("HIP-3 positions:", hip3_groups),
             ]
             for heading, groups in sections:
                 lines.append("")
@@ -1254,7 +1252,7 @@ class WalletTrackerService:
                     lines.append("- None")
 
         lines.append("")
-        lines.append(f"Position groups: {len(position_groups) + len(commodity_groups) + len(stock_groups) + len(hip3_groups)}")
+        lines.append(f"Position groups: {len(position_groups) + len(commodity_groups) + len(stock_groups)}")
         lines.append(f"Open positions: {total_positions}")
         lines.append(f'Checked at: {dashboard.get("generatedAt", now_iso())}')
         return "\n".join(lines)
