@@ -1079,20 +1079,6 @@ class WalletTrackerService:
             for item in changes["removedConsensus"][:10]:
                 lines.append(f'- {item["coin"]} {item["side"]}')
 
-        if changes["hip3Added"]:
-            lines.append("")
-            lines.append("New HIP-3 consensus:")
-            for item in changes["hip3Added"][:10]:
-                lines.append(
-                    f'- {item["coin"]} {item["side"]} ({item["walletCount"]} wallets, ${item["totalValue"]:,.0f})'
-                )
-
-        if changes["hip3Removed"]:
-            lines.append("")
-            lines.append("HIP-3 consensus removed:")
-            for item in changes["hip3Removed"][:10]:
-                lines.append(f'- {item["coin"]} {item["side"]}')
-
         return "\n".join(lines)
 
     def build_summary_message(
@@ -1174,8 +1160,6 @@ class WalletTrackerService:
                     continue
                 if commodity_like_only is False and is_commodity_like:
                     continue
-                if position_value < min_value:
-                    continue
                 side = str(position.get("side") or "Flat").lower()
                 if side not in {"long", "short"}:
                     continue
@@ -1208,6 +1192,7 @@ class WalletTrackerService:
                     "totalValue": round(item["totalValue"], 2),
                 }
                 for item in groups.values()
+                if item["totalValue"] >= min_value
             ],
             key=lambda item: (item["walletCount"], item["totalValue"], item["coin"]),
             reverse=True,
@@ -1318,12 +1303,13 @@ class WalletTrackerService:
         config = self.resolve_alert_config(stored_config)
         state = raw.get("state", {}) if isinstance(raw, dict) else {}
         min_wallets = max(1, int(config.get("minConsensusWallets", DEFAULT_CONSENSUS_THRESHOLD)))
-        track_hip3 = bool(config.get("trackHip3", True))
 
         dashboard = self.dashboard()
         summary = self.build_sentiment_summary(dashboard["wallets"], min_wallets)
         previous_summary = state.get("summary", {}) if isinstance(state, dict) else {}
-        changes = self.summarize_changes(previous_summary, summary, track_hip3)
+        # Keep HIP-3 available for explicit commands like /hip3, but exclude it
+        # from automatic Telegram alerts and change-trigger decisions.
+        changes = self.summarize_changes(previous_summary, summary, track_hip3=False)
 
         should_notify = any(
             [
@@ -1331,8 +1317,6 @@ class WalletTrackerService:
                 changes["addedConsensus"],
                 changes["removedConsensus"],
                 changes["changedConsensus"],
-                changes["hip3Added"],
-                changes["hip3Removed"],
             ]
         )
 
