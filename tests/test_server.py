@@ -148,19 +148,51 @@ class AlertSummaryTests(unittest.TestCase):
             "generatedAt": "2026-04-09T06:00:00Z",
             "overallBias": "bearish",
             "walletCount": 16,
-            "consensus": [{"coin": "BTC", "side": "long", "walletCount": 3, "totalValue": 12345.0}],
+            "consensus": [{"coin": "BTC", "side": "long", "walletCount": 3, "totalValue": 12345.0, "convictionScore": 84.0}],
             "hip3Consensus": [{"coin": "@PUMP-1", "side": "short", "walletCount": 3, "totalValue": 456.0}],
         }
 
         message = self.service.build_summary_message(summary, min_wallets=3)
         self.assertIn("Current wallet sentiment", message)
-        self.assertIn("BTC long (3 wallets, $12,345)", message)
+        self.assertIn("BTC long (3 wallets, $12,345, conviction 84/100)", message)
         self.assertNotIn("HIP-3 consensus:", message)
         self.assertNotIn("@PUMP-1 short (3 wallets, $456)", message)
 
         hip3_message = self.service.build_summary_message(summary, min_wallets=3, include_consensus=False, include_hip3=True)
         self.assertIn("HIP-3 consensus:", hip3_message)
         self.assertIn("@PUMP-1 short (3 wallets, $456)", hip3_message)
+
+    def test_build_sentiment_summary_assigns_conviction_scores(self) -> None:
+        snapshots = [
+            {
+                "address": "0x1111111111111111111111111111111111111111",
+                "alias": "One",
+                "positions": [
+                    {"coin": "BTC", "side": "Long", "positionValue": 500000},
+                    {"coin": "ETH", "side": "Long", "positionValue": 200000},
+                ],
+            },
+            {
+                "address": "0x2222222222222222222222222222222222222222",
+                "alias": "Two",
+                "positions": [
+                    {"coin": "BTC", "side": "Long", "positionValue": 400000},
+                    {"coin": "ETH", "side": "Long", "positionValue": 100000},
+                ],
+            },
+            {
+                "address": "0x3333333333333333333333333333333333333333",
+                "alias": "Three",
+                "positions": [
+                    {"coin": "BTC", "side": "Long", "positionValue": 300000},
+                ],
+            },
+        ]
+
+        summary = self.service.build_sentiment_summary(snapshots, min_wallets=2)
+        self.assertEqual(summary["consensus"][0]["coin"], "BTC")
+        self.assertEqual(summary["consensus"][0]["convictionScore"], 100.0)
+        self.assertGreater(summary["consensus"][0]["convictionScore"], summary["consensus"][1]["convictionScore"])
 
     def test_build_sentiment_summary_groups_oil_aliases(self) -> None:
         snapshots = [
@@ -441,6 +473,44 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(result["changes"]["hip3Added"], [])
         self.assertEqual(result["changes"]["hip3Removed"], [])
         send_telegram_message.assert_not_called()
+
+    def test_check_alerts_notifies_on_new_large_positions(self) -> None:
+        previous_summary = {
+            "overallBias": "mixed",
+            "consensus": [],
+            "hip3Consensus": [],
+        }
+        current_summary = {
+            "overallBias": "mixed",
+            "consensus": [],
+            "hip3Consensus": [],
+        }
+        dashboard = {
+            "wallets": [
+                {
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "alias": "Trader One",
+                    "positions": [
+                        {"coin": "BTC", "side": "Long", "positionValue": 750000.0},
+                    ],
+                }
+            ]
+        }
+
+        with patch("server.load_json_file", return_value={"config": {"enabled": True, "botToken": "token", "chatId": "chat"}, "state": {"summary": previous_summary, "largePositions": {}}}), patch(
+            "server.save_json_file"
+        ), patch.object(self.service, "dashboard", return_value=dashboard), patch.object(
+            self.service, "build_sentiment_summary", return_value=current_summary
+        ), patch.object(self.service, "send_telegram_message") as send_telegram_message:
+            result = self.service.check_alerts(send_notification=True)
+
+        self.assertTrue(result["shouldNotify"])
+        self.assertTrue(result["sent"])
+        self.assertEqual(len(result["changes"]["newLargePositions"]), 1)
+        self.assertEqual(result["changes"]["newLargePositions"][0]["coin"], "BTC")
+        sent_message = send_telegram_message.call_args.args[2]
+        self.assertIn("New large positions (>= $500,000):", sent_message)
+        self.assertIn("Trader One: BTC long ($750,000)", sent_message)
 
 
 class HyperliquidClientTests(unittest.TestCase):
