@@ -39,6 +39,7 @@ MAX_IMPORT_BATCH = 100
 MAX_DISCOVERY_BATCH = 60
 DEFAULT_CONSENSUS_THRESHOLD = 3
 MIN_POSITION_MESSAGE_VALUE = 500_000
+NEW_POSITION_ALERT_MIN_VALUE = MIN_POSITION_MESSAGE_VALUE
 OIL_POSITION_ALIASES = {"flx:OIL", "cash:WTI", "xyz:BRENTOIL", "xyz:CL"}
 RAW_OIL_POSITION_NAMES = {"BRENTOIL", "CL", "WTI", "OIL"}
 RAW_COMMODITY_POSITION_NAMES = RAW_OIL_POSITION_NAMES | {"GOLD", "SILVER", "COPPER", "NATGAS"}
@@ -123,6 +124,20 @@ def is_commodity_like_position(coin: Any) -> bool:
 def normalize_address(value: str) -> str:
     match = HEX_ADDRESS_RE.search(value or "")
     return match.group(0) if match else ""
+
+
+def short_address(value: str) -> str:
+    address = normalize_address(value)
+    if not address:
+        return value
+    return f"{address[:6]}...{address[-4:]}"
+
+
+def wallet_label(alias: str, address: str) -> str:
+    clean_alias = str(alias or "").strip()
+    if clean_alias and clean_alias.lower() != address.lower():
+        return clean_alias
+    return short_address(address)
 
 
 def classify_wallet_size(account_value: float) -> str:
@@ -974,17 +989,24 @@ class WalletTrackerService:
                 else:
                     total_short += position_value
 
+        consensus = [
+            {
+                **bucket,
+                "totalValue": round(bucket["totalValue"], 2),
+                "wallets": sorted(bucket["wallets"], key=lambda item: item["value"], reverse=True),
+            }
+            for bucket in aggregate.values()
+            if bucket["walletCount"] >= min_wallets
+        ]
+        max_wallet_count = max((item["walletCount"] for item in consensus), default=0)
+        max_total_value = max((item["totalValue"] for item in consensus), default=0.0)
+        for item in consensus:
+            wallet_score = (item["walletCount"] / max_wallet_count) if max_wallet_count else 0.0
+            value_score = (item["totalValue"] / max_total_value) if max_total_value else 0.0
+            item["convictionScore"] = round(((wallet_score * 0.6) + (value_score * 0.4)) * 100, 1)
         consensus = sorted(
-            [
-                {
-                    **bucket,
-                    "totalValue": round(bucket["totalValue"], 2),
-                    "wallets": sorted(bucket["wallets"], key=lambda item: item["value"], reverse=True),
-                }
-                for bucket in aggregate.values()
-                if bucket["walletCount"] >= min_wallets
-            ],
-            key=lambda item: (item["walletCount"], item["totalValue"]),
+            consensus,
+            key=lambda item: (item["convictionScore"], item["walletCount"], item["totalValue"]),
             reverse=True,
         )
         hip3_consensus = [item for item in consensus if str(item.get("coin", "")).startswith("@")]
@@ -1004,6 +1026,54 @@ class WalletTrackerService:
             "shortExposure": round(total_short, 2),
             "walletCount": len(snapshots),
         }
+
+    def build_large_position_snapshot(
+        self,
+        dashboard: dict[str, Any],
+        *,
+        min_value: float = NEW_POSITION_ALERT_MIN_VALUE,
+    ) -> dict[str, dict[str, Any]]:
+        positions: dict[str, dict[str, Any]] = {}
+        for wallet in dashboard.get("wallets", []):
+            address = str(wallet.get("address") or "")
+            alias = str(wallet.get("alias") or "")
+            for position in wallet.get("positions", []):
+                side = str(position.get("side") or "Flat").lower()
+                if side not in {"long", "short"}:
+                    continue
+                position_value = to_float(position.get("positionValue"))
+                if position_value < min_value:
+                    continue
+                coin = normalize_position_coin(position.get("coin"))
+                key = f"{address}:{coin}:{side}"
+                bucket = positions.setdefault(
+                    key,
+                    {
+                        "address": address,
+                        "alias": alias,
+                        "coin": coin,
+                        "side": side,
+                        "totalValue": 0.0,
+                    },
+                )
+                bucket["totalValue"] += position_value
+        return {
+            key: {
+                **item,
+                "totalValue": round(item["totalValue"], 2),
+            }
+            for key, item in positions.items()
+        }
+
+    def summarize_large_position_changes(
+        self,
+        previous_positions: dict[str, Any],
+        current_positions: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        previous_map = previous_positions if isinstance(previous_positions, dict) else {}
+        current_map = current_positions if isinstance(current_positions, dict) else {}
+        added = [current_map[key] for key in current_map.keys() - previous_map.keys()]
+        return sorted(added, key=lambda item: item["totalValue"], reverse=True)
 
     def summarize_changes(self, previous: dict[str, Any], current: dict[str, Any], track_hip3: bool) -> dict[str, Any]:
         previous_consensus = {
@@ -1026,6 +1096,7 @@ class WalletTrackerService:
                         "side": new_item["side"],
                         "fromWalletCount": old_item["walletCount"],
                         "toWalletCount": new_item["walletCount"],
+                        "convictionScore": new_item.get("convictionScore", 0.0),
                     }
                 )
 
@@ -1062,7 +1133,7 @@ class WalletTrackerService:
             lines.append("New consensus:")
             for item in changes["addedConsensus"][:10]:
                 lines.append(
-                    f'- {item["coin"]} {item["side"]} ({item["walletCount"]} wallets, ${item["totalValue"]:,.0f})'
+                    f'- {item["coin"]} {item["side"]} ({item["walletCount"]} wallets, ${item["totalValue"]:,.0f}, conviction {item.get("convictionScore", 0):.0f}/100)'
                 )
 
         if changes["changedConsensus"]:
@@ -1070,7 +1141,7 @@ class WalletTrackerService:
             lines.append("Consensus size changes:")
             for item in changes["changedConsensus"][:10]:
                 lines.append(
-                    f'- {item["coin"]} {item["side"]}: {item["fromWalletCount"]} -> {item["toWalletCount"]} wallets'
+                    f'- {item["coin"]} {item["side"]}: {item["fromWalletCount"]} -> {item["toWalletCount"]} wallets (conviction {item.get("convictionScore", 0):.0f}/100)'
                 )
 
         if changes["removedConsensus"]:
@@ -1078,6 +1149,14 @@ class WalletTrackerService:
             lines.append("Consensus removed:")
             for item in changes["removedConsensus"][:10]:
                 lines.append(f'- {item["coin"]} {item["side"]}')
+
+        if changes["newLargePositions"]:
+            lines.append("")
+            lines.append(f"New large positions (>= ${NEW_POSITION_ALERT_MIN_VALUE:,.0f}):")
+            for item in changes["newLargePositions"][:10]:
+                lines.append(
+                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} (${item["totalValue"]:,.0f})'
+                )
 
         return "\n".join(lines)
 
@@ -1104,7 +1183,7 @@ class WalletTrackerService:
             if consensus:
                 for item in consensus[:10]:
                     lines.append(
-                        f'- {item["coin"]} {item["side"]} ({item["walletCount"]} wallets, ${item["totalValue"]:,.0f})'
+                        f'- {item["coin"]} {item["side"]} ({item["walletCount"]} wallets, ${item["totalValue"]:,.0f}, conviction {item.get("convictionScore", 0):.0f}/100)'
                     )
             else:
                 lines.append("- None")
@@ -1307,9 +1386,12 @@ class WalletTrackerService:
         dashboard = self.dashboard()
         summary = self.build_sentiment_summary(dashboard["wallets"], min_wallets)
         previous_summary = state.get("summary", {}) if isinstance(state, dict) else {}
+        previous_positions = state.get("largePositions", {}) if isinstance(state, dict) else {}
+        current_positions = self.build_large_position_snapshot(dashboard)
         # Keep HIP-3 available for explicit commands like /hip3, but exclude it
         # from automatic Telegram alerts and change-trigger decisions.
         changes = self.summarize_changes(previous_summary, summary, track_hip3=False)
+        changes["newLargePositions"] = self.summarize_large_position_changes(previous_positions, current_positions)
 
         should_notify = any(
             [
@@ -1317,6 +1399,7 @@ class WalletTrackerService:
                 changes["addedConsensus"],
                 changes["removedConsensus"],
                 changes["changedConsensus"],
+                changes["newLargePositions"],
             ]
         )
 
@@ -1341,6 +1424,7 @@ class WalletTrackerService:
 
         new_state = {
             "summary": summary,
+            "largePositions": current_positions,
             "lastCheckedAt": now_iso(),
             "lastSentAt": now_iso() if sent else state.get("lastSentAt"),
         }
