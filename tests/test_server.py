@@ -512,6 +512,77 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("New large positions (>= $500,000):", sent_message)
         self.assertIn("Trader One: BTC long ($750,000)", sent_message)
 
+    def test_check_alerts_notifies_on_large_position_increases(self) -> None:
+        previous_summary = {
+            "overallBias": "mixed",
+            "consensus": [],
+            "hip3Consensus": [],
+        }
+        current_summary = {
+            "overallBias": "mixed",
+            "consensus": [],
+            "hip3Consensus": [],
+        }
+        previous_positions = {
+            "0x1111111111111111111111111111111111111111:BTC:long": {
+                "address": "0x1111111111111111111111111111111111111111",
+                "alias": "Trader One",
+                "coin": "BTC",
+                "side": "long",
+                "totalValue": 600000.0,
+            }
+        }
+        dashboard = {
+            "wallets": [
+                {
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "alias": "Trader One",
+                    "positions": [
+                        {"coin": "BTC", "side": "Long", "positionValue": 1200000.0},
+                    ],
+                }
+            ]
+        }
+
+        with patch("server.load_json_file", return_value={"config": {"enabled": True, "botToken": "token", "chatId": "chat"}, "state": {"summary": previous_summary, "largePositions": previous_positions}}), patch(
+            "server.save_json_file"
+        ), patch.object(self.service, "dashboard", return_value=dashboard), patch.object(
+            self.service, "build_sentiment_summary", return_value=current_summary
+        ), patch.object(self.service, "send_telegram_message") as send_telegram_message:
+            result = self.service.check_alerts(send_notification=True)
+
+        self.assertTrue(result["shouldNotify"])
+        self.assertTrue(result["sent"])
+        self.assertEqual(len(result["changes"]["increasedLargePositions"]), 1)
+        sent_message = send_telegram_message.call_args.args[2]
+        self.assertIn("Position increases (>= $500,000 and >= 50%):", sent_message)
+        self.assertIn("Trader One: BTC long $600,000 -> $1,200,000 (+$600,000, +100%)", sent_message)
+
+    def test_large_position_increases_ignore_small_drift(self) -> None:
+        previous = {
+            "wallet:BTC:long": {
+                "address": "wallet",
+                "alias": "wallet",
+                "coin": "BTC",
+                "side": "long",
+                "totalValue": 1000000.0,
+            }
+        }
+        current = {
+            "wallet:BTC:long": {
+                "address": "wallet",
+                "alias": "wallet",
+                "coin": "BTC",
+                "side": "long",
+                "totalValue": 1200000.0,
+            }
+        }
+
+        added, increased = self.service.summarize_large_position_changes(previous, current)
+
+        self.assertEqual(added, [])
+        self.assertEqual(increased, [])
+
 
 class HyperliquidClientTests(unittest.TestCase):
     def test_merge_all_dexs_clearinghouse_state_combines_positions_and_balances(self) -> None:

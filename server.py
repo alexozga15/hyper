@@ -40,6 +40,8 @@ MAX_DISCOVERY_BATCH = 60
 DEFAULT_CONSENSUS_THRESHOLD = 3
 MIN_POSITION_MESSAGE_VALUE = 500_000
 NEW_POSITION_ALERT_MIN_VALUE = MIN_POSITION_MESSAGE_VALUE
+POSITION_INCREASE_ALERT_MIN_DELTA = MIN_POSITION_MESSAGE_VALUE
+POSITION_INCREASE_ALERT_MIN_PCT = 0.5
 OIL_POSITION_ALIASES = {"flx:OIL", "cash:WTI", "xyz:BRENTOIL", "xyz:CL"}
 RAW_OIL_POSITION_NAMES = {"BRENTOIL", "CL", "WTI", "OIL"}
 RAW_COMMODITY_POSITION_NAMES = RAW_OIL_POSITION_NAMES | {"GOLD", "SILVER", "COPPER", "NATGAS"}
@@ -1069,11 +1071,32 @@ class WalletTrackerService:
         self,
         previous_positions: dict[str, Any],
         current_positions: dict[str, Any],
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         previous_map = previous_positions if isinstance(previous_positions, dict) else {}
         current_map = current_positions if isinstance(current_positions, dict) else {}
         added = [current_map[key] for key in current_map.keys() - previous_map.keys()]
-        return sorted(added, key=lambda item: item["totalValue"], reverse=True)
+        increased = []
+        for key in current_map.keys() & previous_map.keys():
+            current_item = current_map[key]
+            previous_item = previous_map[key]
+            previous_value = to_float(previous_item.get("totalValue"))
+            current_value = to_float(current_item.get("totalValue"))
+            increase_value = current_value - previous_value
+            increase_pct = (increase_value / previous_value) if previous_value > 0 else 0.0
+            if increase_value < POSITION_INCREASE_ALERT_MIN_DELTA or increase_pct < POSITION_INCREASE_ALERT_MIN_PCT:
+                continue
+            increased.append(
+                {
+                    **current_item,
+                    "previousValue": round(previous_value, 2),
+                    "increaseValue": round(increase_value, 2),
+                    "increasePct": round(increase_pct, 4),
+                }
+            )
+        return (
+            sorted(added, key=lambda item: item["totalValue"], reverse=True),
+            sorted(increased, key=lambda item: item["increaseValue"], reverse=True),
+        )
 
     def summarize_changes(self, previous: dict[str, Any], current: dict[str, Any], track_hip3: bool) -> dict[str, Any]:
         previous_consensus = {
@@ -1156,6 +1179,16 @@ class WalletTrackerService:
             for item in changes["newLargePositions"][:10]:
                 lines.append(
                     f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} (${item["totalValue"]:,.0f})'
+                )
+
+        if changes["increasedLargePositions"]:
+            lines.append("")
+            lines.append(
+                f"Position increases (>= ${POSITION_INCREASE_ALERT_MIN_DELTA:,.0f} and >= {POSITION_INCREASE_ALERT_MIN_PCT:.0%}):"
+            )
+            for item in changes["increasedLargePositions"][:10]:
+                lines.append(
+                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} ${item["previousValue"]:,.0f} -> ${item["totalValue"]:,.0f} (+${item["increaseValue"]:,.0f}, +{item["increasePct"]:.0%})'
                 )
 
         return "\n".join(lines)
@@ -1391,7 +1424,12 @@ class WalletTrackerService:
         # Keep HIP-3 available for explicit commands like /hip3, but exclude it
         # from automatic Telegram alerts and change-trigger decisions.
         changes = self.summarize_changes(previous_summary, summary, track_hip3=False)
-        changes["newLargePositions"] = self.summarize_large_position_changes(previous_positions, current_positions)
+        new_large_positions, increased_large_positions = self.summarize_large_position_changes(
+            previous_positions,
+            current_positions,
+        )
+        changes["newLargePositions"] = new_large_positions
+        changes["increasedLargePositions"] = increased_large_positions
 
         should_notify = any(
             [
@@ -1400,6 +1438,7 @@ class WalletTrackerService:
                 changes["removedConsensus"],
                 changes["changedConsensus"],
                 changes["newLargePositions"],
+                changes["increasedLargePositions"],
             ]
         )
 
