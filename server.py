@@ -1118,13 +1118,16 @@ class WalletTrackerService:
                         "coin": coin,
                         "side": side,
                         "totalValue": 0.0,
+                        "totalSize": 0.0,
                     },
                 )
                 bucket["totalValue"] += position_value
+                bucket["totalSize"] += abs(to_float(position.get("size")))
         return {
             key: {
                 **item,
                 "totalValue": round(item["totalValue"], 2),
+                "totalSize": round(item["totalSize"], 8),
             }
             for key, item in positions.items()
         }
@@ -1145,7 +1148,17 @@ class WalletTrackerService:
             current_value = to_float(current_item.get("totalValue"))
             increase_value = current_value - previous_value
             increase_pct = (increase_value / previous_value) if previous_value > 0 else 0.0
-            if increase_value < POSITION_INCREASE_ALERT_MIN_DELTA or increase_pct < POSITION_INCREASE_ALERT_MIN_PCT:
+            previous_size = to_float(previous_item.get("totalSize"))
+            current_size = to_float(current_item.get("totalSize"))
+            size_increase = current_size - previous_size
+            has_size_baseline = previous_size > 0 or current_size > 0
+            is_size_add = has_size_baseline and size_increase > 0 and increase_value >= POSITION_INCREASE_ALERT_MIN_DELTA
+            is_legacy_value_jump = (
+                not has_size_baseline
+                and increase_value >= POSITION_INCREASE_ALERT_MIN_DELTA
+                and increase_pct >= POSITION_INCREASE_ALERT_MIN_PCT
+            )
+            if not is_size_add and not is_legacy_value_jump:
                 continue
             increased.append(
                 {
@@ -1153,6 +1166,8 @@ class WalletTrackerService:
                     "previousValue": round(previous_value, 2),
                     "increaseValue": round(increase_value, 2),
                     "increasePct": round(increase_pct, 4),
+                    "previousSize": round(previous_size, 8),
+                    "sizeIncrease": round(size_increase, 8),
                 }
             )
         return (
@@ -1254,11 +1269,14 @@ class WalletTrackerService:
         if changes["increasedLargePositions"]:
             lines.append("")
             lines.append(
-                f"Position increases (>= ${POSITION_INCREASE_ALERT_MIN_DELTA:,.0f} and >= {POSITION_INCREASE_ALERT_MIN_PCT:.0%}):"
+                f"Position size increases (>= ${POSITION_INCREASE_ALERT_MIN_DELTA:,.0f} added):"
             )
             for item in changes["increasedLargePositions"][:10]:
+                size_note = ""
+                if to_float(item.get("sizeIncrease")) > 0:
+                    size_note = f', +{to_float(item.get("sizeIncrease")):,.4g} size'
                 lines.append(
-                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} ${item["previousValue"]:,.0f} -> ${item["totalValue"]:,.0f} (+${item["increaseValue"]:,.0f}, +{item["increasePct"]:.0%})'
+                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} ${item["previousValue"]:,.0f} -> ${item["totalValue"]:,.0f} (+${item["increaseValue"]:,.0f}{size_note})'
                 )
 
         return "\n".join(lines)
