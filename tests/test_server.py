@@ -657,6 +657,7 @@ class AlertSummaryTests(unittest.TestCase):
                 "coin": "BTC",
                 "side": "long",
                 "totalValue": 600000.0,
+                "totalSize": 10.0,
             }
         }
         dashboard = {
@@ -665,7 +666,7 @@ class AlertSummaryTests(unittest.TestCase):
                     "address": "0x1111111111111111111111111111111111111111",
                     "alias": "Trader One",
                     "positions": [
-                        {"coin": "BTC", "side": "Long", "positionValue": 1200000.0},
+                        {"coin": "BTC", "side": "Long", "positionValue": 1200000.0, "size": 20.0},
                     ],
                 }
             ]
@@ -682,8 +683,36 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertTrue(result["sent"])
         self.assertEqual(len(result["changes"]["increasedLargePositions"]), 1)
         sent_message = send_telegram_message.call_args.args[2]
-        self.assertIn("Position increases (>= $500,000 and >= 50%):", sent_message)
-        self.assertIn("Trader One: BTC long $600,000 -> $1,200,000 (+$600,000, +100%)", sent_message)
+        self.assertIn("Position size increases (>= $500,000 added):", sent_message)
+        self.assertIn("Trader One: BTC long $600,000 -> $1,200,000 (+$600,000, +10 size)", sent_message)
+
+    def test_large_position_increases_notify_on_big_size_add_even_if_pct_small(self) -> None:
+        previous = {
+            "wallet:BTC:long": {
+                "address": "wallet",
+                "alias": "wallet",
+                "coin": "BTC",
+                "side": "long",
+                "totalValue": 8000000.0,
+                "totalSize": 100.0,
+            }
+        }
+        current = {
+            "wallet:BTC:long": {
+                "address": "wallet",
+                "alias": "wallet",
+                "coin": "BTC",
+                "side": "long",
+                "totalValue": 8800000.0,
+                "totalSize": 110.0,
+            }
+        }
+
+        added, increased = self.service.summarize_large_position_changes(previous, current)
+
+        self.assertEqual(added, [])
+        self.assertEqual(len(increased), 1)
+        self.assertEqual(increased[0]["sizeIncrease"], 10.0)
 
     def test_large_position_increases_ignore_small_drift(self) -> None:
         previous = {
@@ -693,6 +722,7 @@ class AlertSummaryTests(unittest.TestCase):
                 "coin": "BTC",
                 "side": "long",
                 "totalValue": 1000000.0,
+                "totalSize": 10.0,
             }
         }
         current = {
@@ -701,7 +731,8 @@ class AlertSummaryTests(unittest.TestCase):
                 "alias": "wallet",
                 "coin": "BTC",
                 "side": "long",
-                "totalValue": 1200000.0,
+                "totalValue": 1600000.0,
+                "totalSize": 10.0,
             }
         }
 
