@@ -44,6 +44,8 @@ POSITION_INCREASE_ALERT_MIN_DELTA = MIN_POSITION_MESSAGE_VALUE
 POSITION_INCREASE_ALERT_MIN_PCT = 0.5
 CONSENSUS_SIZE_ALERT_MIN_DELTA = 2
 CONSENSUS_SIZE_ALERT_MIN_PCT = 0.5
+RECENT_WIN_RATE_MIN_TRADES = 5
+RECENT_WIN_RATE_FULL_CONFIDENCE_TRADES = 20
 OIL_POSITION_ALIASES = {"flx:OIL", "cash:WTI", "xyz:BRENTOIL", "xyz:CL"}
 RAW_OIL_POSITION_NAMES = {"BRENTOIL", "CL", "WTI", "OIL"}
 RAW_COMMODITY_POSITION_NAMES = RAW_OIL_POSITION_NAMES | {"GOLD", "SILVER", "COPPER", "NATGAS"}
@@ -156,6 +158,34 @@ def classify_profitability(realized_pnl: float) -> str:
         if realized_pnl >= floor:
             return label
     return "Rekt"
+
+
+def build_recent_win_rate_rank(hit_rate: float, closed_trade_count: int) -> dict[str, Any]:
+    normalized_hit_rate = max(0.0, min(float(hit_rate), 100.0))
+    sample_size = max(0, int(closed_trade_count))
+    confidence = min(sample_size / RECENT_WIN_RATE_FULL_CONFIDENCE_TRADES, 1.0)
+    score = normalized_hit_rate * confidence
+
+    if sample_size < RECENT_WIN_RATE_MIN_TRADES:
+        label = "Unranked"
+    elif normalized_hit_rate >= 75:
+        label = "Elite"
+    elif normalized_hit_rate >= 60:
+        label = "Strong"
+    elif normalized_hit_rate >= 50:
+        label = "Balanced"
+    elif normalized_hit_rate >= 40:
+        label = "Weak"
+    else:
+        label = "Cold"
+
+    return {
+        "label": label,
+        "score": round(score, 1),
+        "winRate": round(normalized_hit_rate, 1),
+        "sampleSize": sample_size,
+        "confidence": round(confidence, 2),
+    }
 
 
 def side_from_size(size: float) -> str:
@@ -731,6 +761,9 @@ class WalletTrackerService:
 
         performance = self.build_performance(portfolio)
         all_time_realized = performance.get("allTime", {}).get("pnl", 0.0)
+        recent_closed_trade_count = win_count + loss_count
+        hit_rate = (win_count / max(recent_closed_trade_count, 1)) * 100
+        recent_win_rate_rank = build_recent_win_rate_rank(hit_rate, recent_closed_trade_count)
 
         account_value = to_float(margin_summary.get("accountValue"))
         total_notional = to_float(margin_summary.get("totalNtlPos"))
@@ -752,6 +785,10 @@ class WalletTrackerService:
             "unrealizedPnl": unrealized_pnl,
             "realizedPnl": all_time_realized,
             "recentRealizedPnl": recent_realized_pnl,
+            "recentWins": win_count,
+            "recentLosses": loss_count,
+            "recentClosedTrades": recent_closed_trade_count,
+            "recentWinRateRank": recent_win_rate_rank,
             "openOrderCount": len(open_orders),
             "positions": positions,
             "positionCount": len(positions),
@@ -768,7 +805,7 @@ class WalletTrackerService:
             },
             "performance": performance,
             "discoveryScore": round(discovery_score, 2),
-            "hitRate": (win_count / max(win_count + loss_count, 1)) * 100,
+            "hitRate": hit_rate,
         }
 
     def dashboard(self) -> dict[str, Any]:
@@ -1364,10 +1401,45 @@ class WalletTrackerService:
         lines.append(f'Checked at: {dashboard.get("generatedAt", now_iso())}')
         return "\n".join(lines)
 
+    def build_wallet_rankings_message(self, dashboard: dict[str, Any], *, limit: int = 10) -> str:
+        wallets = sorted(
+            dashboard.get("wallets", []),
+            key=lambda wallet: (
+                to_float(wallet.get("recentWinRateRank", {}).get("score")),
+                to_float(wallet.get("hitRate")),
+                int(wallet.get("recentClosedTrades") or 0),
+                to_float(wallet.get("recentRealizedPnl")),
+            ),
+            reverse=True,
+        )
+
+        lines = ["Wallet ranks by recent win rate"]
+        ranked_wallets = [
+            wallet
+            for wallet in wallets
+            if str(wallet.get("recentWinRateRank", {}).get("label") or "Unranked") != "Unranked"
+        ]
+        if ranked_wallets:
+            for index, wallet in enumerate(ranked_wallets[: max(1, limit)], start=1):
+                rank = wallet.get("recentWinRateRank", {})
+                lines.append(
+                    f'{index}. {wallet_label(wallet.get("alias", ""), wallet.get("address", ""))}: '
+                    f'{rank.get("label", "Unranked")} '
+                    f'({to_float(rank.get("winRate")):.1f}% WR, {int(rank.get("sampleSize") or 0)} recent closes, '
+                    f'score {to_float(rank.get("score")):.1f}/100, recent PnL ${to_float(wallet.get("recentRealizedPnl")):,.0f})'
+                )
+        else:
+            lines.append("- Not enough recent closed trades yet")
+
+        lines.append("")
+        lines.append(f'Checked at: {dashboard.get("generatedAt", now_iso())}')
+        return "\n".join(lines)
+
     def build_hourly_update_message(self, dashboard: dict[str, Any], summary: dict[str, Any], min_wallets: int) -> str:
         return "\n\n".join(
             [
                 self.build_summary_message(summary, min_wallets, title="Hourly wallet update"),
+                self.build_wallet_rankings_message(dashboard, limit=5),
                 self.build_positions_message(dashboard),
             ]
         )
