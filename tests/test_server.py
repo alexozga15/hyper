@@ -116,6 +116,40 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(changes["hip3Added"][0]["coin"], "@2")
         self.assertEqual(changes["hip3Removed"][0]["coin"], "@1")
 
+    def test_summarize_changes_ignores_minor_consensus_size_drift(self) -> None:
+        previous = {
+            "overallBias": "mixed",
+            "consensus": [{"coin": "BTC", "side": "long", "walletCount": 7, "totalValue": 70_000_000.0}],
+            "hip3Consensus": [],
+        }
+        current = {
+            "overallBias": "mixed",
+            "consensus": [{"coin": "BTC", "side": "long", "walletCount": 8, "totalValue": 75_000_000.0}],
+            "hip3Consensus": [],
+        }
+
+        changes = self.service.summarize_changes(previous, current, track_hip3=False)
+
+        self.assertEqual(changes["changedConsensus"], [])
+
+    def test_summarize_changes_detects_major_consensus_size_change(self) -> None:
+        previous = {
+            "overallBias": "mixed",
+            "consensus": [{"coin": "BTC", "side": "long", "walletCount": 3, "totalValue": 30_000_000.0}],
+            "hip3Consensus": [],
+        }
+        current = {
+            "overallBias": "mixed",
+            "consensus": [{"coin": "BTC", "side": "long", "walletCount": 5, "totalValue": 50_000_000.0}],
+            "hip3Consensus": [],
+        }
+
+        changes = self.service.summarize_changes(previous, current, track_hip3=False)
+
+        self.assertEqual(len(changes["changedConsensus"]), 1)
+        self.assertEqual(changes["changedConsensus"][0]["fromWalletCount"], 3)
+        self.assertEqual(changes["changedConsensus"][0]["toWalletCount"], 5)
+
     def test_resolve_alert_config_prefers_env_over_stored_values(self) -> None:
         stored = {
             "enabled": False,
@@ -511,6 +545,51 @@ class AlertSummaryTests(unittest.TestCase):
         sent_message = send_telegram_message.call_args.args[2]
         self.assertIn("New large positions (>= $500,000):", sent_message)
         self.assertIn("Trader One: BTC long ($750,000)", sent_message)
+
+    def test_send_hourly_update_syncs_alert_baseline(self) -> None:
+        summary = {
+            "overallBias": "mixed",
+            "consensus": [{"coin": "BTC", "side": "long", "walletCount": 8, "totalValue": 75_000_000.0}],
+            "hip3Consensus": [],
+        }
+        dashboard = {
+            "wallets": [
+                {
+                    "address": "0x69906b0ed626ca01a4b7c001e5711e5714ccf207",
+                    "alias": "Trader One",
+                    "positions": [
+                        {"coin": "BTC", "side": "Long", "positionValue": 807800.0},
+                    ],
+                }
+            ]
+        }
+
+        with patch(
+            "server.load_json_file",
+            return_value={
+                "config": {"enabled": True},
+                "state": {
+                    "summary": {
+                        "overallBias": "mixed",
+                        "consensus": [{"coin": "BTC", "side": "long", "walletCount": 7, "totalValue": 70_000_000.0}],
+                        "hip3Consensus": [],
+                    }
+                },
+            },
+        ), patch("server.save_json_file") as save_json_file, patch.object(
+            self.service, "dashboard", return_value=dashboard
+        ), patch.object(
+            self.service, "build_sentiment_summary", return_value=summary
+        ), patch.object(
+            self.service, "send_telegram_message"
+        ):
+            result = self.service.send_hourly_update(3, "token", "chat")
+
+        self.assertTrue(result["sent"])
+        saved_state = save_json_file.call_args.args[1]["state"]
+        self.assertEqual(saved_state["summary"]["consensus"][0]["walletCount"], 8)
+        self.assertIn("0x69906b0ed626ca01a4b7c001e5711e5714ccf207:BTC:long", saved_state["largePositions"])
+        self.assertIn("lastHourlySyncedAt", saved_state)
 
     def test_check_alerts_notifies_on_large_position_increases(self) -> None:
         previous_summary = {

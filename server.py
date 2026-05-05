@@ -42,6 +42,8 @@ MIN_POSITION_MESSAGE_VALUE = 500_000
 NEW_POSITION_ALERT_MIN_VALUE = MIN_POSITION_MESSAGE_VALUE
 POSITION_INCREASE_ALERT_MIN_DELTA = MIN_POSITION_MESSAGE_VALUE
 POSITION_INCREASE_ALERT_MIN_PCT = 0.5
+CONSENSUS_SIZE_ALERT_MIN_DELTA = 2
+CONSENSUS_SIZE_ALERT_MIN_PCT = 0.5
 OIL_POSITION_ALIASES = {"flx:OIL", "cash:WTI", "xyz:BRENTOIL", "xyz:CL"}
 RAW_OIL_POSITION_NAMES = {"BRENTOIL", "CL", "WTI", "OIL"}
 RAW_COMMODITY_POSITION_NAMES = RAW_OIL_POSITION_NAMES | {"GOLD", "SILVER", "COPPER", "NATGAS"}
@@ -1112,13 +1114,21 @@ class WalletTrackerService:
         for key in current_consensus.keys() & previous_consensus.keys():
             old_item = previous_consensus[key]
             new_item = current_consensus[key]
-            if old_item["walletCount"] != new_item["walletCount"]:
+            old_wallet_count = int(old_item["walletCount"])
+            new_wallet_count = int(new_item["walletCount"])
+            wallet_delta = abs(new_wallet_count - old_wallet_count)
+            wallet_delta_pct = wallet_delta / old_wallet_count if old_wallet_count > 0 else 0.0
+            if (
+                old_wallet_count != new_wallet_count
+                and wallet_delta >= CONSENSUS_SIZE_ALERT_MIN_DELTA
+                and wallet_delta_pct >= CONSENSUS_SIZE_ALERT_MIN_PCT
+            ):
                 changed.append(
                     {
                         "coin": new_item["coin"],
                         "side": new_item["side"],
-                        "fromWalletCount": old_item["walletCount"],
-                        "toWalletCount": new_item["walletCount"],
+                        "fromWalletCount": old_wallet_count,
+                        "toWalletCount": new_wallet_count,
                         "convictionScore": new_item.get("convictionScore", 0.0),
                     }
                 )
@@ -1161,7 +1171,7 @@ class WalletTrackerService:
 
         if changes["changedConsensus"]:
             lines.append("")
-            lines.append("Consensus size changes:")
+            lines.append("Major consensus size changes:")
             for item in changes["changedConsensus"][:10]:
                 lines.append(
                     f'- {item["coin"]} {item["side"]}: {item["fromWalletCount"]} -> {item["toWalletCount"]} wallets (conviction {item.get("convictionScore", 0):.0f}/100)'
@@ -1461,11 +1471,13 @@ class WalletTrackerService:
             except (urllib.error.URLError, TimeoutError, ValueError) as exc:
                 error_message = str(exc)
 
+        checked_at = now_iso()
         new_state = {
+            **state,
             "summary": summary,
             "largePositions": current_positions,
-            "lastCheckedAt": now_iso(),
-            "lastSentAt": now_iso() if sent else state.get("lastSentAt"),
+            "lastCheckedAt": checked_at,
+            "lastSentAt": checked_at if sent else state.get("lastSentAt"),
         }
         save_json_file(self.alerts_path, {"config": stored_config, "state": new_state})
 
@@ -1488,6 +1500,18 @@ class WalletTrackerService:
             chat_id,
             self.build_hourly_update_message(dashboard, summary, min_wallets),
         )
+        raw = load_json_file(self.alerts_path, {})
+        stored_config = raw.get("config", {}) if isinstance(raw, dict) else {}
+        state = raw.get("state", {}) if isinstance(raw, dict) else {}
+        synced_at = now_iso()
+        new_state = {
+            **state,
+            "summary": summary,
+            "largePositions": self.build_large_position_snapshot(dashboard),
+            "lastCheckedAt": synced_at,
+            "lastHourlySyncedAt": synced_at,
+        }
+        save_json_file(self.alerts_path, {"config": stored_config, "state": new_state})
         return {"sent": True, "summary": summary}
 
 
