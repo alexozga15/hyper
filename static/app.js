@@ -225,8 +225,8 @@ function renderWalletTable() {
     ["Exposure", "exposure.net"],
     ["Positions", "positionCount"],
     ["Orders", "openOrderCount"],
-    ["Hit Rate", "hitRate"],
-    ["Recent Rank", "recentWinRateRank.score"],
+    ["7D Hit Rate", "hitRate"],
+    ["7D Rank", "recentWinRateRank.score"],
   ];
 
   root.className = "table-wrap";
@@ -343,8 +343,9 @@ function renderWalletDetails() {
     <div class="wallet-metrics">
       <div><span>Wallet Size</span><strong>${wallet.cohorts.walletSize}</strong></div>
       <div><span>Profitability</span><strong>${wallet.cohorts.profitability}</strong></div>
-      <div><span>Recent Rank</span><strong>${wallet.recentWinRateRank?.label || "Unranked"} (${percentFormatter.format(wallet.recentWinRateRank?.score || 0)})</strong></div>
-      <div><span>Recent Win Rate</span><strong>${percentFormatter.format(wallet.hitRate)}% / ${wallet.recentClosedTrades || 0} closes</strong></div>
+      <div><span>7D Rank</span><strong>${wallet.recentWinRateRank?.label || "Unranked"} (${percentFormatter.format(wallet.recentWinRateRank?.score || 0)})</strong></div>
+      <div><span>7D Hit Rate</span><strong>${percentFormatter.format(wallet.hitRate)}% / ${wallet.recentClosedTrades || 0} closes</strong></div>
+      <div><span>7D PnL</span><strong class="${wallet.recentRealizedPnl >= 0 ? "positive" : "negative"}">${formatMoney(wallet.recentRealizedPnl)}</strong></div>
       <div><span>Day PnL</span><strong class="${wallet.performance.day.pnl >= 0 ? "positive" : "negative"}">${formatMoney(wallet.performance.day.pnl)}</strong></div>
       <div><span>Week PnL</span><strong class="${wallet.performance.week.pnl >= 0 ? "positive" : "negative"}">${formatMoney(wallet.performance.week.pnl)}</strong></div>
       <div><span>Month PnL</span><strong class="${wallet.performance.month.pnl >= 0 ? "positive" : "negative"}">${formatMoney(wallet.performance.month.pnl)}</strong></div>

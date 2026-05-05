@@ -7,7 +7,7 @@ from server import (
     HyperliquidClient,
     WalletStore,
     WalletTrackerService,
-    build_recent_win_rate_rank,
+    build_wallet_quality_rank,
     classify_profitability,
     classify_wallet_size,
     normalize_address,
@@ -27,14 +27,14 @@ class SegmentTests(unittest.TestCase):
         self.assertEqual(classify_profitability(50_000), "Profitable")
         self.assertEqual(classify_profitability(-250_000), "Very Unprofitable")
 
-    def test_recent_win_rate_rank_uses_sample_adjusted_score(self) -> None:
-        self.assertEqual(build_recent_win_rate_rank(100, 1)["label"], "Unranked")
-        strong = build_recent_win_rate_rank(70, 20)
+    def test_wallet_quality_rank_combines_7d_hit_rate_and_pnl(self) -> None:
+        self.assertEqual(build_wallet_quality_rank(100, 1, 10_000, 100_000)["label"], "Unranked")
+        strong = build_wallet_quality_rank(70, 20, 20_000, 100_000)
         self.assertEqual(strong["label"], "Strong")
         self.assertEqual(strong["score"], 70.0)
-        small_sample = build_recent_win_rate_rank(80, 5)
-        self.assertEqual(small_sample["label"], "Elite")
-        self.assertEqual(small_sample["score"], 20.0)
+        losing = build_wallet_quality_rank(80, 20, -50_000, 100_000)
+        self.assertEqual(losing["label"], "Weak")
+        self.assertEqual(losing["pnlReturnPct"], -50.0)
 
     def test_side_from_size(self) -> None:
         self.assertEqual(side_from_size(10), "Long")
@@ -319,7 +319,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(summary["consensus"][0]["walletCount"], 3)
         self.assertEqual(summary["consensus"][0]["totalValue"], 720000)
 
-    def test_build_wallet_rankings_message_orders_by_recent_win_rate_score(self) -> None:
+    def test_build_wallet_rankings_message_orders_by_7d_quality_score(self) -> None:
         dashboard = {
             "generatedAt": "2026-05-05T08:00:00Z",
             "wallets": [
@@ -329,7 +329,7 @@ class AlertSummaryTests(unittest.TestCase):
                     "hitRate": 100.0,
                     "recentClosedTrades": 3,
                     "recentRealizedPnl": 5000.0,
-                    "recentWinRateRank": build_recent_win_rate_rank(100.0, 3),
+                    "recentWinRateRank": build_wallet_quality_rank(100.0, 3, 5000.0, 100_000.0),
                 },
                 {
                     "alias": "Consistent Winner",
@@ -337,24 +337,24 @@ class AlertSummaryTests(unittest.TestCase):
                     "hitRate": 70.0,
                     "recentClosedTrades": 20,
                     "recentRealizedPnl": 25000.0,
-                    "recentWinRateRank": build_recent_win_rate_rank(70.0, 20),
+                    "recentWinRateRank": build_wallet_quality_rank(70.0, 20, 25_000.0, 100_000.0),
                 },
                 {
-                    "alias": "High WR",
+                    "alias": "High WR Losing",
                     "address": "0x3333333333333333333333333333333333333333",
                     "hitRate": 80.0,
-                    "recentClosedTrades": 5,
-                    "recentRealizedPnl": 10000.0,
-                    "recentWinRateRank": build_recent_win_rate_rank(80.0, 5),
+                    "recentClosedTrades": 20,
+                    "recentRealizedPnl": -50_000.0,
+                    "recentWinRateRank": build_wallet_quality_rank(80.0, 20, -50_000.0, 100_000.0),
                 },
             ],
         }
 
         message = self.service.build_wallet_rankings_message(dashboard)
 
-        self.assertIn("Wallet ranks by recent win rate", message)
+        self.assertIn("Wallet ranks by 7D hit rate + PnL", message)
         self.assertIn("1. Consistent Winner: Strong", message)
-        self.assertIn("2. High WR: Elite", message)
+        self.assertIn("2. High WR Losing: Weak", message)
         self.assertNotIn("Lucky Small Sample", message)
 
     def test_build_positions_message_lists_all_open_positions(self) -> None:
