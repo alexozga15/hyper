@@ -44,7 +44,7 @@ def build_help_message() -> str:
             "/consensus - current consensus only",
             "/hip3 - current HIP-3 consensus only",
             "/positions - all open positions now",
-            "/ranks - tracked wallets ranked by recent win rate",
+            "/ranks - tracked wallets ranked by 7D hit rate plus 7D PnL",
             "/help - show commands",
         ]
     )

@@ -44,8 +44,9 @@ POSITION_INCREASE_ALERT_MIN_DELTA = MIN_POSITION_MESSAGE_VALUE
 POSITION_INCREASE_ALERT_MIN_PCT = 0.5
 CONSENSUS_SIZE_ALERT_MIN_DELTA = 2
 CONSENSUS_SIZE_ALERT_MIN_PCT = 0.5
-RECENT_WIN_RATE_MIN_TRADES = 5
-RECENT_WIN_RATE_FULL_CONFIDENCE_TRADES = 20
+RANKING_MIN_7D_CLOSED_TRADES = 5
+RANKING_FULL_CONFIDENCE_7D_CLOSED_TRADES = 20
+RANKING_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 OIL_POSITION_ALIASES = {"flx:OIL", "cash:WTI", "xyz:BRENTOIL", "xyz:CL"}
 RAW_OIL_POSITION_NAMES = {"BRENTOIL", "CL", "WTI", "OIL"}
 RAW_COMMODITY_POSITION_NAMES = RAW_OIL_POSITION_NAMES | {"GOLD", "SILVER", "COPPER", "NATGAS"}
@@ -160,21 +161,24 @@ def classify_profitability(realized_pnl: float) -> str:
     return "Rekt"
 
 
-def build_recent_win_rate_rank(hit_rate: float, closed_trade_count: int) -> dict[str, Any]:
-    normalized_hit_rate = max(0.0, min(float(hit_rate), 100.0))
-    sample_size = max(0, int(closed_trade_count))
-    confidence = min(sample_size / RECENT_WIN_RATE_FULL_CONFIDENCE_TRADES, 1.0)
-    score = normalized_hit_rate * confidence
+def build_wallet_quality_rank(hit_rate: float, closed_trade_count: int, pnl_7d: float, account_value: float) -> dict[str, Any]:
+    normalized_hit_rate = max(0.0, min(to_float(hit_rate), 100.0))
+    sample_size = max(0, int(to_float(closed_trade_count)))
+    confidence = min(sample_size / RANKING_FULL_CONFIDENCE_7D_CLOSED_TRADES, 1.0)
+    pnl_return_pct = (to_float(pnl_7d) / to_float(account_value)) * 100 if to_float(account_value) > 0 else 0.0
+    pnl_score = max(0.0, min(100.0, 50.0 + pnl_return_pct))
+    hit_rate_score = normalized_hit_rate * confidence
+    score = (hit_rate_score * 0.6) + (pnl_score * 0.4)
 
-    if sample_size < RECENT_WIN_RATE_MIN_TRADES:
+    if sample_size < RANKING_MIN_7D_CLOSED_TRADES:
         label = "Unranked"
-    elif normalized_hit_rate >= 75:
+    elif score >= 75:
         label = "Elite"
-    elif normalized_hit_rate >= 60:
+    elif score >= 60:
         label = "Strong"
-    elif normalized_hit_rate >= 50:
+    elif score >= 50:
         label = "Balanced"
-    elif normalized_hit_rate >= 40:
+    elif score >= 40:
         label = "Weak"
     else:
         label = "Cold"
@@ -185,6 +189,11 @@ def build_recent_win_rate_rank(hit_rate: float, closed_trade_count: int) -> dict
         "winRate": round(normalized_hit_rate, 1),
         "sampleSize": sample_size,
         "confidence": round(confidence, 2),
+        "pnl": round(to_float(pnl_7d), 2),
+        "pnlReturnPct": round(pnl_return_pct, 2),
+        "hitRateScore": round(hit_rate_score, 1),
+        "pnlScore": round(pnl_score, 1),
+        "metric": "7d_hit_rate_pnl",
     }
 
 
@@ -207,6 +216,10 @@ def latest_series_value(points: list[Any]) -> float:
     if isinstance(latest, (list, tuple)) and len(latest) > 1:
         return to_float(latest[1])
     return 0.0
+
+
+def current_time_ms() -> int:
+    return int(time.time() * 1000)
 
 
 def load_json_file(path: Path, default: Any) -> Any:
@@ -725,25 +738,30 @@ class WalletTrackerService:
         recent_realized_pnl = 0.0
         win_count = 0
         loss_count = 0
-        for fill in fills[:30]:
+        cutoff_7d_ms = current_time_ms() - RANKING_WINDOW_MS
+        for fill in fills:
             closed_pnl = to_float(fill.get("closedPnl"))
-            recent_realized_pnl += closed_pnl
-            if closed_pnl > 0:
-                win_count += 1
-            elif closed_pnl < 0:
-                loss_count += 1
+            fill_time = int(to_float(fill.get("time")))
+            is_7d_closed_fill = fill_time >= cutoff_7d_ms and closed_pnl != 0
+            if is_7d_closed_fill:
+                recent_realized_pnl += closed_pnl
+                if closed_pnl > 0:
+                    win_count += 1
+                elif closed_pnl < 0:
+                    loss_count += 1
 
-            recent_fills.append(
-                {
-                    "coin": fill.get("coin", "Unknown"),
-                    "direction": fill.get("dir", "Unknown"),
-                    "price": to_float(fill.get("px")),
-                    "size": to_float(fill.get("sz")),
-                    "closedPnl": closed_pnl,
-                    "fee": to_float(fill.get("fee")),
-                    "time": fill.get("time"),
-                }
-            )
+            if len(recent_fills) < 30:
+                recent_fills.append(
+                    {
+                        "coin": fill.get("coin", "Unknown"),
+                        "direction": fill.get("dir", "Unknown"),
+                        "price": to_float(fill.get("px")),
+                        "size": to_float(fill.get("sz")),
+                        "closedPnl": closed_pnl,
+                        "fee": to_float(fill.get("fee")),
+                        "time": fill.get("time"),
+                    }
+                )
 
         normalized_orders = []
         for order in open_orders[:25]:
@@ -763,13 +781,18 @@ class WalletTrackerService:
         all_time_realized = performance.get("allTime", {}).get("pnl", 0.0)
         recent_closed_trade_count = win_count + loss_count
         hit_rate = (win_count / max(recent_closed_trade_count, 1)) * 100
-        recent_win_rate_rank = build_recent_win_rate_rank(hit_rate, recent_closed_trade_count)
 
         account_value = to_float(margin_summary.get("accountValue"))
         total_notional = to_float(margin_summary.get("totalNtlPos"))
         margin_used = to_float(margin_summary.get("totalMarginUsed"))
         withdrawable = to_float(state.get("withdrawable"))
         discovery_score = account_value + (abs(total_notional) * 0.2) + max(all_time_realized, 0.0)
+        recent_win_rate_rank = build_wallet_quality_rank(
+            hit_rate,
+            recent_closed_trade_count,
+            recent_realized_pnl,
+            account_value,
+        )
 
         return {
             "address": wallet.address,
@@ -1413,7 +1436,7 @@ class WalletTrackerService:
             reverse=True,
         )
 
-        lines = ["Wallet ranks by recent win rate"]
+        lines = ["Wallet ranks by 7D hit rate + PnL"]
         ranked_wallets = [
             wallet
             for wallet in wallets
@@ -1425,8 +1448,8 @@ class WalletTrackerService:
                 lines.append(
                     f'{index}. {wallet_label(wallet.get("alias", ""), wallet.get("address", ""))}: '
                     f'{rank.get("label", "Unranked")} '
-                    f'({to_float(rank.get("winRate")):.1f}% WR, {int(rank.get("sampleSize") or 0)} recent closes, '
-                    f'score {to_float(rank.get("score")):.1f}/100, recent PnL ${to_float(wallet.get("recentRealizedPnl")):,.0f})'
+                    f'({to_float(rank.get("winRate")):.1f}% 7D WR, {int(rank.get("sampleSize") or 0)} 7D closes, '
+                    f'7D PnL ${to_float(rank.get("pnl")):,.0f}, score {to_float(rank.get("score")):.1f}/100)'
                 )
         else:
             lines.append("- Not enough recent closed trades yet")
