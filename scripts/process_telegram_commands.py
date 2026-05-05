@@ -22,7 +22,7 @@ from server import (
 )
 
 
-LIVE_COMMANDS = {"/update", "/sentiment", "/consensus", "/hip3", "/positions"}
+LIVE_COMMANDS = {"/update", "/sentiment", "/consensus", "/hip3", "/positions", "/ranks"}
 
 
 def normalize_command(text: str) -> str:
@@ -44,6 +44,7 @@ def build_help_message() -> str:
             "/consensus - current consensus only",
             "/hip3 - current HIP-3 consensus only",
             "/positions - all open positions now",
+            "/ranks - tracked wallets ranked by recent win rate",
             "/help - show commands",
         ]
     )
@@ -138,6 +139,7 @@ def build_reply(
         return "\n\n".join(
             [
                 service.build_summary_message(summary_cache, min_wallets),
+                service.build_wallet_rankings_message(dashboard_cache, limit=10),
                 service.build_positions_message(dashboard_cache),
             ]
         )
@@ -161,6 +163,8 @@ def build_reply(
         )
     if command == "/positions":
         return service.build_positions_message(dashboard_cache)
+    if command == "/ranks":
+        return service.build_wallet_rankings_message(dashboard_cache, limit=20)
     return build_help_message()
 
 
