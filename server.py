@@ -1136,10 +1136,11 @@ class WalletTrackerService:
         self,
         previous_positions: dict[str, Any],
         current_positions: dict[str, Any],
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
         previous_map = previous_positions if isinstance(previous_positions, dict) else {}
         current_map = current_positions if isinstance(current_positions, dict) else {}
         added = [current_map[key] for key in current_map.keys() - previous_map.keys()]
+        closed = [previous_map[key] for key in previous_map.keys() - current_map.keys()]
         increased = []
         for key in current_map.keys() & previous_map.keys():
             current_item = current_map[key]
@@ -1173,6 +1174,7 @@ class WalletTrackerService:
         return (
             sorted(added, key=lambda item: item["totalValue"], reverse=True),
             sorted(increased, key=lambda item: item["increaseValue"], reverse=True),
+            sorted(closed, key=lambda item: item["totalValue"], reverse=True),
         )
 
     def summarize_changes(self, previous: dict[str, Any], current: dict[str, Any], track_hip3: bool) -> dict[str, Any]:
@@ -1260,10 +1262,21 @@ class WalletTrackerService:
 
         if changes["newLargePositions"]:
             lines.append("")
-            lines.append(f"New large positions (>= ${NEW_POSITION_ALERT_MIN_VALUE:,.0f}):")
+            lines.append(f"New open positions (>= ${NEW_POSITION_ALERT_MIN_VALUE:,.0f}):")
             for item in changes["newLargePositions"][:10]:
                 lines.append(
                     f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} (${item["totalValue"]:,.0f})'
+                )
+
+        if changes["closedLargePositions"]:
+            lines.append("")
+            lines.append(f"Closed positions (previously >= ${NEW_POSITION_ALERT_MIN_VALUE:,.0f}):")
+            for item in changes["closedLargePositions"][:10]:
+                size_note = ""
+                if to_float(item.get("totalSize")) > 0:
+                    size_note = f', {to_float(item.get("totalSize")):,.4g} size'
+                lines.append(
+                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} (${item["totalValue"]:,.0f}{size_note})'
                 )
 
         if changes["increasedLargePositions"]:
@@ -1547,12 +1560,13 @@ class WalletTrackerService:
         # Keep HIP-3 available for explicit commands like /hip3, but exclude it
         # from automatic Telegram alerts and change-trigger decisions.
         changes = self.summarize_changes(previous_summary, summary, track_hip3=False)
-        new_large_positions, increased_large_positions = self.summarize_large_position_changes(
+        new_large_positions, increased_large_positions, closed_large_positions = self.summarize_large_position_changes(
             previous_positions,
             current_positions,
         )
         changes["newLargePositions"] = new_large_positions
         changes["increasedLargePositions"] = increased_large_positions
+        changes["closedLargePositions"] = closed_large_positions
 
         should_notify = any(
             [
@@ -1562,6 +1576,7 @@ class WalletTrackerService:
                 changes["changedConsensus"],
                 changes["newLargePositions"],
                 changes["increasedLargePositions"],
+                changes["closedLargePositions"],
             ]
         )
 
