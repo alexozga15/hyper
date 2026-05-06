@@ -573,7 +573,7 @@ class AlertSummaryTests(unittest.TestCase):
                     "address": "0x1111111111111111111111111111111111111111",
                     "alias": "Trader One",
                     "positions": [
-                        {"coin": "BTC", "side": "Long", "positionValue": 750000.0},
+                        {"coin": "BTC", "side": "Long", "positionValue": 750000.0, "size": 10.0, "entryPx": 75000.0},
                     ],
                 }
             ]
@@ -592,7 +592,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(result["changes"]["newLargePositions"][0]["coin"], "BTC")
         sent_message = send_telegram_message.call_args.args[2]
         self.assertIn("New open positions (>= $500,000):", sent_message)
-        self.assertIn("Trader One: BTC long ($750,000)", sent_message)
+        self.assertIn("Trader One: BTC long ($750,000, size 10, entry $75,000)", sent_message)
 
     def test_check_alerts_notifies_on_closed_large_positions(self) -> None:
         previous_summary = {
@@ -629,7 +629,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(len(result["changes"]["closedLargePositions"]), 1)
         sent_message = send_telegram_message.call_args.args[2]
         self.assertIn("Closed positions (previously >= $500,000):", sent_message)
-        self.assertIn("Trader One: ETH short ($900,000, 300 size)", sent_message)
+        self.assertIn("Trader One: ETH short ($900,000, size 300)", sent_message)
 
     def test_send_hourly_update_syncs_alert_baseline(self) -> None:
         summary = {
