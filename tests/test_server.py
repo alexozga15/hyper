@@ -667,14 +667,67 @@ class AlertSummaryTests(unittest.TestCase):
             self.service, "build_sentiment_summary", return_value=summary
         ), patch.object(
             self.service, "send_telegram_message"
-        ):
+        ) as send_telegram_message:
             result = self.service.send_hourly_update(3, "token", "chat")
 
         self.assertTrue(result["sent"])
+        self.assertTrue(result["positionAlertSent"])
+        self.assertEqual(send_telegram_message.call_count, 2)
+        alert_message = send_telegram_message.call_args_list[1].args[2]
+        self.assertIn("Open >$500K", alert_message)
+        self.assertIn("Trader One: BTC long $808K", alert_message)
         saved_state = save_json_file.call_args.args[1]["state"]
         self.assertEqual(saved_state["summary"]["consensus"][0]["walletCount"], 8)
         self.assertIn("0x69906b0ed626ca01a4b7c001e5711e5714ccf207:BTC:long", saved_state["largePositions"])
         self.assertIn("lastHourlySyncedAt", saved_state)
+
+    def test_send_hourly_update_does_not_resync_failed_large_position_alert(self) -> None:
+        summary = {
+            "overallBias": "mixed",
+            "consensus": [],
+            "hip3Consensus": [],
+        }
+        dashboard = {
+            "wallets": [
+                {
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "alias": "Trader One",
+                    "positions": [
+                        {"coin": "ETH", "side": "Short", "positionValue": 900000.0, "size": 300.0},
+                    ],
+                }
+            ]
+        }
+        previous_positions = {
+            "0x2222222222222222222222222222222222222222:BTC:long": {
+                "address": "0x2222222222222222222222222222222222222222",
+                "alias": "Old Trader",
+                "coin": "BTC",
+                "side": "long",
+                "totalValue": 700000.0,
+                "totalSize": 7.0,
+            }
+        }
+
+        with patch(
+            "server.load_json_file",
+            return_value={"config": {"enabled": True}, "state": {"summary": summary, "largePositions": previous_positions}},
+        ), patch("server.save_json_file") as save_json_file, patch.object(
+            self.service, "dashboard", return_value=dashboard
+        ), patch.object(
+            self.service, "build_sentiment_summary", return_value=summary
+        ), patch.object(
+            self.service,
+            "send_telegram_message",
+            side_effect=[None, ValueError("telegram down")],
+        ):
+            result = self.service.send_hourly_update(3, "token", "chat")
+
+        self.assertTrue(result["sent"])
+        self.assertFalse(result["positionAlertSent"])
+        self.assertIn("telegram down", result["positionAlertError"])
+        saved_state = save_json_file.call_args.args[1]["state"]
+        self.assertEqual(saved_state["largePositions"], previous_positions)
 
     def test_check_alerts_notifies_on_large_position_increases(self) -> None:
         previous_summary = {

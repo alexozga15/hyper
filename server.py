@@ -1217,6 +1217,27 @@ class WalletTrackerService:
             sorted(closed, key=lambda item: item["totalValue"], reverse=True),
         )
 
+    def build_large_position_alert_changes(
+        self,
+        previous_positions: dict[str, Any],
+        current_positions: dict[str, Any],
+    ) -> dict[str, Any]:
+        new_large_positions, increased_large_positions, closed_large_positions = self.summarize_large_position_changes(
+            previous_positions,
+            current_positions,
+        )
+        return {
+            "biasChanged": False,
+            "addedConsensus": [],
+            "removedConsensus": [],
+            "changedConsensus": [],
+            "hip3Added": [],
+            "hip3Removed": [],
+            "newLargePositions": new_large_positions,
+            "increasedLargePositions": increased_large_positions,
+            "closedLargePositions": closed_large_positions,
+        }
+
     def summarize_changes(self, previous: dict[str, Any], current: dict[str, Any], track_hip3: bool) -> dict[str, Any]:
         previous_consensus = {
             f'{item["coin"]}:{item["side"]}': item for item in previous.get("consensus", [])
@@ -1621,13 +1642,10 @@ class WalletTrackerService:
         # Keep HIP-3 available for explicit commands like /hip3, but exclude it
         # from automatic Telegram alerts and change-trigger decisions.
         changes = self.summarize_changes(previous_summary, summary, track_hip3=False)
-        new_large_positions, increased_large_positions, closed_large_positions = self.summarize_large_position_changes(
-            previous_positions,
-            current_positions,
-        )
-        changes["newLargePositions"] = new_large_positions
-        changes["increasedLargePositions"] = increased_large_positions
-        changes["closedLargePositions"] = closed_large_positions
+        position_changes = self.build_large_position_alert_changes(previous_positions, current_positions)
+        changes["newLargePositions"] = position_changes["newLargePositions"]
+        changes["increasedLargePositions"] = position_changes["increasedLargePositions"]
+        changes["closedLargePositions"] = position_changes["closedLargePositions"]
 
         should_notify = any(
             [
@@ -1684,6 +1702,7 @@ class WalletTrackerService:
     def send_hourly_update(self, min_wallets: int, bot_token: str, chat_id: str) -> dict[str, Any]:
         dashboard = self.dashboard()
         summary = self.build_sentiment_summary(dashboard["wallets"], min_wallets)
+        current_positions = self.build_large_position_snapshot(dashboard)
         self.send_telegram_message(
             bot_token,
             chat_id,
@@ -1691,17 +1710,48 @@ class WalletTrackerService:
         )
         raw = load_json_file(self.alerts_path, {})
         stored_config = raw.get("config", {}) if isinstance(raw, dict) else {}
+        config = self.resolve_alert_config(stored_config)
         state = raw.get("state", {}) if isinstance(raw, dict) else {}
+        previous_positions = state.get("largePositions", {}) if isinstance(state, dict) else {}
+        position_changes = self.build_large_position_alert_changes(previous_positions, current_positions)
+        should_send_position_alert = any(
+            [
+                position_changes["newLargePositions"],
+                position_changes["increasedLargePositions"],
+                position_changes["closedLargePositions"],
+            ]
+        )
+        position_alert_sent = False
+        position_alert_error = ""
+        if should_send_position_alert and config.get("enabled"):
+            try:
+                self.send_telegram_message(
+                    bot_token,
+                    chat_id,
+                    self.build_telegram_message(position_changes, summary, min_wallets),
+                )
+                position_alert_sent = True
+            except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+                position_alert_error = str(exc)
+
         synced_at = now_iso()
         new_state = {
             **state,
             "summary": summary,
-            "largePositions": self.build_large_position_snapshot(dashboard),
             "lastCheckedAt": synced_at,
             "lastHourlySyncedAt": synced_at,
         }
+        if not should_send_position_alert or position_alert_sent or not config.get("enabled"):
+            new_state["largePositions"] = current_positions
+        if position_alert_sent:
+            new_state["lastSentAt"] = synced_at
         save_json_file(self.alerts_path, {"config": stored_config, "state": new_state})
-        return {"sent": True, "summary": summary}
+        return {
+            "sent": True,
+            "positionAlertSent": position_alert_sent,
+            "positionAlertError": position_alert_error,
+            "summary": summary,
+        }
 
 
 class AlertWorker:
