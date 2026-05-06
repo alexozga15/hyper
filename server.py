@@ -172,6 +172,17 @@ def format_money_thousands(value: float) -> str:
     return f"${round(to_float(value) / 1_000):,.0f}K"
 
 
+def format_money_compact(value: float) -> str:
+    numeric = to_float(value)
+    sign = "-" if numeric < 0 else ""
+    absolute = abs(numeric)
+    if absolute >= 1_000_000:
+        return f"{sign}${absolute / 1_000_000:.1f}M"
+    if absolute >= 1_000:
+        return f"{sign}${absolute / 1_000:.0f}K"
+    return f"{sign}${absolute:,.0f}"
+
+
 def classify_wallet_size(account_value: float) -> str:
     for label, floor in WALLET_SIZE_BANDS:
         if account_value >= floor:
@@ -1262,75 +1273,71 @@ class WalletTrackerService:
 
     def build_telegram_message(self, changes: dict[str, Any], summary: dict[str, Any], min_wallets: int) -> str:
         lines = [
-            f"Wallet sentiment update",
-            f"Bias: {summary.get('overallBias', 'mixed')}",
-            f"Consensus threshold: {min_wallets} wallets",
+            f"Wallet alert | Bias: {summary.get('overallBias', 'mixed')} | Min: {min_wallets}",
         ]
 
         if changes["addedConsensus"]:
             lines.append("")
-            lines.append("New consensus:")
+            lines.append("New consensus")
             for item in changes["addedConsensus"][:10]:
                 lines.append(
-                    f'- {item["coin"]} {item["side"]} ({item["walletCount"]} wallets, ${item["totalValue"]:,.0f}, conviction {item.get("convictionScore", 0):.0f}/100)'
+                    f'- {item["coin"]} {item["side"]}: {item["walletCount"]}w, {format_money_compact(item["totalValue"])}, c{item.get("convictionScore", 0):.0f}'
                 )
 
         if changes["changedConsensus"]:
             lines.append("")
-            lines.append("Major consensus size changes:")
+            lines.append("Consensus changed")
             for item in changes["changedConsensus"][:10]:
                 lines.append(
-                    f'- {item["coin"]} {item["side"]}: {item["fromWalletCount"]} -> {item["toWalletCount"]} wallets (conviction {item.get("convictionScore", 0):.0f}/100)'
+                    f'- {item["coin"]} {item["side"]}: {item["fromWalletCount"]}->{item["toWalletCount"]}w, c{item.get("convictionScore", 0):.0f}'
                 )
 
         if changes["removedConsensus"]:
             lines.append("")
-            lines.append("Consensus removed:")
+            lines.append("Consensus gone")
             for item in changes["removedConsensus"][:10]:
                 lines.append(f'- {item["coin"]} {item["side"]}')
 
         if changes["newLargePositions"]:
             lines.append("")
-            lines.append(f"New open positions (>= ${NEW_POSITION_ALERT_MIN_VALUE:,.0f}):")
+            lines.append(f"Open >{format_money_compact(NEW_POSITION_ALERT_MIN_VALUE)}")
             for item in changes["newLargePositions"][:10]:
                 size_note = ""
                 if to_float(item.get("totalSize")) > 0:
-                    size_note = f', size {format_position_size(to_float(item.get("totalSize")))}'
+                    size_note = f' sz {format_position_size(to_float(item.get("totalSize")))}'
                 entry_note = ""
                 if to_float(item.get("entryPx")) > 0:
-                    entry_note = f', entry ${format_price(to_float(item.get("entryPx")))}'
+                    entry_note = f' @${format_price(to_float(item.get("entryPx")))}'
                 lines.append(
-                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} (${item["totalValue"]:,.0f}{size_note}{entry_note})'
+                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} {format_money_compact(item["totalValue"])}{size_note}{entry_note}'
                 )
 
         if changes["closedLargePositions"]:
             lines.append("")
-            lines.append(f"Closed positions (previously >= ${NEW_POSITION_ALERT_MIN_VALUE:,.0f}):")
+            lines.append(f"Closed >{format_money_compact(NEW_POSITION_ALERT_MIN_VALUE)}")
             for item in changes["closedLargePositions"][:10]:
                 size_note = ""
                 if to_float(item.get("totalSize")) > 0:
-                    size_note = f', size {format_position_size(to_float(item.get("totalSize")))}'
+                    size_note = f' sz {format_position_size(to_float(item.get("totalSize")))}'
                 entry_note = ""
                 if to_float(item.get("entryPx")) > 0:
-                    entry_note = f', entry ${format_price(to_float(item.get("entryPx")))}'
+                    entry_note = f' @${format_price(to_float(item.get("entryPx")))}'
                 lines.append(
-                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} (${item["totalValue"]:,.0f}{size_note}{entry_note})'
+                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} {format_money_compact(item["totalValue"])}{size_note}{entry_note}'
                 )
 
         if changes["increasedLargePositions"]:
             lines.append("")
-            lines.append(
-                f"Position size increases (>= ${POSITION_INCREASE_ALERT_MIN_DELTA:,.0f} added):"
-            )
+            lines.append(f"Added >{format_money_compact(POSITION_INCREASE_ALERT_MIN_DELTA)}")
             for item in changes["increasedLargePositions"][:10]:
                 size_note = ""
                 if to_float(item.get("sizeIncrease")) > 0:
-                    size_note = f', +{format_position_size(to_float(item.get("sizeIncrease")))} size'
+                    size_note = f' +{format_position_size(to_float(item.get("sizeIncrease")))}'
                 entry_note = ""
                 if to_float(item.get("entryPx")) > 0:
-                    entry_note = f', entry ${format_price(to_float(item.get("entryPx")))}'
+                    entry_note = f' @${format_price(to_float(item.get("entryPx")))}'
                 lines.append(
-                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} ${item["previousValue"]:,.0f} -> ${item["totalValue"]:,.0f} (+${item["increaseValue"]:,.0f}{size_note}{entry_note})'
+                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} {format_money_compact(item["previousValue"])}->{format_money_compact(item["totalValue"])} (+{format_money_compact(item["increaseValue"])}{size_note}{entry_note})'
                 )
 
         return "\n".join(lines)
