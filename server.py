@@ -147,6 +147,27 @@ def wallet_label(alias: str, address: str) -> str:
     return short_address(address)
 
 
+def format_position_size(value: float) -> str:
+    numeric = abs(to_float(value))
+    sign = "-" if to_float(value) < 0 else ""
+    if numeric >= 1_000_000:
+        return f"{sign}{numeric / 1_000_000:.1f}M"
+    if numeric >= 1_000:
+        return f"{sign}{numeric / 1_000:.1f}K"
+    if numeric >= 10:
+        return f"{sign}{numeric:,.0f}"
+    return f"{sign}{numeric:,.4g}"
+
+
+def format_price(value: float) -> str:
+    numeric = to_float(value)
+    if abs(numeric) >= 1_000:
+        return f"{numeric:,.0f}"
+    if abs(numeric) >= 1:
+        return f"{numeric:,.2f}"
+    return f"{numeric:,.4g}"
+
+
 def classify_wallet_size(account_value: float) -> str:
     for label, floor in WALLET_SIZE_BANDS:
         if account_value >= floor:
@@ -1119,15 +1140,19 @@ class WalletTrackerService:
                         "side": side,
                         "totalValue": 0.0,
                         "totalSize": 0.0,
+                        "entryValue": 0.0,
                     },
                 )
+                size = abs(to_float(position.get("size")))
                 bucket["totalValue"] += position_value
-                bucket["totalSize"] += abs(to_float(position.get("size")))
+                bucket["totalSize"] += size
+                bucket["entryValue"] += to_float(position.get("entryPx")) * size
         return {
             key: {
                 **item,
                 "totalValue": round(item["totalValue"], 2),
                 "totalSize": round(item["totalSize"], 8),
+                "entryPx": round(item["entryValue"] / item["totalSize"], 8) if item["totalSize"] > 0 else 0.0,
             }
             for key, item in positions.items()
         }
@@ -1264,8 +1289,14 @@ class WalletTrackerService:
             lines.append("")
             lines.append(f"New open positions (>= ${NEW_POSITION_ALERT_MIN_VALUE:,.0f}):")
             for item in changes["newLargePositions"][:10]:
+                size_note = ""
+                if to_float(item.get("totalSize")) > 0:
+                    size_note = f', size {format_position_size(to_float(item.get("totalSize")))}'
+                entry_note = ""
+                if to_float(item.get("entryPx")) > 0:
+                    entry_note = f', entry ${format_price(to_float(item.get("entryPx")))}'
                 lines.append(
-                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} (${item["totalValue"]:,.0f})'
+                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} (${item["totalValue"]:,.0f}{size_note}{entry_note})'
                 )
 
         if changes["closedLargePositions"]:
@@ -1274,9 +1305,12 @@ class WalletTrackerService:
             for item in changes["closedLargePositions"][:10]:
                 size_note = ""
                 if to_float(item.get("totalSize")) > 0:
-                    size_note = f', {to_float(item.get("totalSize")):,.4g} size'
+                    size_note = f', size {format_position_size(to_float(item.get("totalSize")))}'
+                entry_note = ""
+                if to_float(item.get("entryPx")) > 0:
+                    entry_note = f', entry ${format_price(to_float(item.get("entryPx")))}'
                 lines.append(
-                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} (${item["totalValue"]:,.0f}{size_note})'
+                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} (${item["totalValue"]:,.0f}{size_note}{entry_note})'
                 )
 
         if changes["increasedLargePositions"]:
@@ -1287,9 +1321,12 @@ class WalletTrackerService:
             for item in changes["increasedLargePositions"][:10]:
                 size_note = ""
                 if to_float(item.get("sizeIncrease")) > 0:
-                    size_note = f', +{to_float(item.get("sizeIncrease")):,.4g} size'
+                    size_note = f', +{format_position_size(to_float(item.get("sizeIncrease")))} size'
+                entry_note = ""
+                if to_float(item.get("entryPx")) > 0:
+                    entry_note = f', entry ${format_price(to_float(item.get("entryPx")))}'
                 lines.append(
-                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} ${item["previousValue"]:,.0f} -> ${item["totalValue"]:,.0f} (+${item["increaseValue"]:,.0f}{size_note})'
+                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} ${item["previousValue"]:,.0f} -> ${item["totalValue"]:,.0f} (+${item["increaseValue"]:,.0f}{size_note}{entry_note})'
                 )
 
         return "\n".join(lines)
