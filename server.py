@@ -168,6 +168,10 @@ def format_price(value: float) -> str:
     return f"{numeric:,.4g}"
 
 
+def format_money_thousands(value: float) -> str:
+    return f"${round(to_float(value) / 1_000):,.0f}K"
+
+
 def classify_wallet_size(account_value: float) -> str:
     for label, floor in WALLET_SIZE_BANDS:
         if account_value >= floor:
@@ -1494,7 +1498,7 @@ class WalletTrackerService:
                             entry_note = f', entry ${format_price(to_float(item.get("entryPx")))}'
                         lines.append(
                             f'- {item["coin"]} {item["side"]} '
-                            f'({item["walletCount"]} wallets, {item["positionCount"]} positions, ${item["totalValue"]:,.0f}{size_note}{entry_note})'
+                            f'({item["walletCount"]} wallets, {item["positionCount"]} positions, {format_money_thousands(item["totalValue"])}{size_note}{entry_note})'
                         )
                 else:
                     lines.append("- None")

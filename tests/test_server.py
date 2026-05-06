@@ -380,7 +380,7 @@ class AlertSummaryTests(unittest.TestCase):
         message = self.service.build_positions_message(dashboard)
         self.assertIn("Open positions now", message)
         self.assertIn("By position (>= $500,000):", message)
-        self.assertIn("BTC long (2 wallets, 2 positions, $550,000, size 7, entry $78,286)", message)
+        self.assertIn("BTC long (2 wallets, 2 positions, $550K, size 7, entry $78,286)", message)
         self.assertNotIn("ETH short", message)
         self.assertIn("Position groups: 1", message)
 
@@ -433,8 +433,8 @@ class AlertSummaryTests(unittest.TestCase):
         }
 
         message = self.service.build_positions_message(dashboard)
-        self.assertIn("OIL long (2 wallets, 2 positions, $1,995,801)", message)
-        self.assertIn("OIL short (1 wallets, 1 positions, $573,227)", message)
+        self.assertIn("OIL long (2 wallets, 2 positions, $1,996K)", message)
+        self.assertIn("OIL short (1 wallets, 1 positions, $573K)", message)
 
     def test_build_positions_message_filters_commodities_below_threshold(self) -> None:
         dashboard = {
@@ -525,11 +525,11 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_positions_message(dashboard)
         self.assertIn("Commodities:", message)
-        self.assertIn("OIL long (1 wallets, 1 positions, $623,450)", message)
-        self.assertIn("SILVER short (1 wallets, 1 positions, $576,938)", message)
+        self.assertIn("OIL long (1 wallets, 1 positions, $623K)", message)
+        self.assertIn("SILVER short (1 wallets, 1 positions, $577K)", message)
         self.assertIn("Stocks / indices:", message)
-        self.assertIn("XYZ100 long (1 wallets, 1 positions, $914,001)", message)
-        self.assertIn("SP500 long (1 wallets, 1 positions, $590,950)", message)
+        self.assertIn("XYZ100 long (1 wallets, 1 positions, $914K)", message)
+        self.assertIn("SP500 long (1 wallets, 1 positions, $591K)", message)
 
     def test_check_alerts_ignores_hip3_only_changes(self) -> None:
         previous_summary = {
