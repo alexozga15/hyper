@@ -1422,11 +1422,16 @@ class WalletTrackerService:
                         "walletCount": 0,
                         "positionCount": 0,
                         "totalValue": 0.0,
+                        "totalSize": 0.0,
+                        "entryValue": 0.0,
                         "walletAddresses": set(),
                     },
                 )
+                size = abs(to_float(position.get("size")))
                 bucket["positionCount"] += 1
                 bucket["totalValue"] += position_value
+                bucket["totalSize"] += size
+                bucket["entryValue"] += to_float(position.get("entryPx")) * size
                 address = str(wallet.get("address") or "")
                 if address and address not in bucket["walletAddresses"]:
                     bucket["walletAddresses"].add(address)
@@ -1440,6 +1445,8 @@ class WalletTrackerService:
                     "walletCount": item["walletCount"],
                     "positionCount": item["positionCount"],
                     "totalValue": round(item["totalValue"], 2),
+                    "totalSize": round(item["totalSize"], 8),
+                    "entryPx": round(item["entryValue"] / item["totalSize"], 8) if item["totalSize"] > 0 else 0.0,
                 }
                 for item in groups.values()
                 if item["totalValue"] >= min_value
@@ -1479,9 +1486,15 @@ class WalletTrackerService:
                 lines.append(heading)
                 if groups:
                     for item in groups[:50]:
+                        size_note = ""
+                        if to_float(item.get("totalSize")) > 0:
+                            size_note = f', size {format_position_size(to_float(item.get("totalSize")))}'
+                        entry_note = ""
+                        if to_float(item.get("entryPx")) > 0:
+                            entry_note = f', entry ${format_price(to_float(item.get("entryPx")))}'
                         lines.append(
                             f'- {item["coin"]} {item["side"]} '
-                            f'({item["walletCount"]} wallets, {item["positionCount"]} positions, ${item["totalValue"]:,.0f})'
+                            f'({item["walletCount"]} wallets, {item["positionCount"]} positions, ${item["totalValue"]:,.0f}{size_note}{entry_note})'
                         )
                 else:
                     lines.append("- None")
