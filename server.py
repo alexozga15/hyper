@@ -1315,6 +1315,7 @@ class WalletTrackerService:
                     "increasePct": round(increase_pct, 4),
                     "previousSize": round(previous_size, 8),
                     "sizeIncrease": round(size_increase, 8),
+                    "addPrice": round(increase_value / size_increase, 8) if size_increase > 0 else 0.0,
                 }
             )
         return (
@@ -1541,8 +1542,11 @@ class WalletTrackerService:
                 size_note = ""
                 if to_float(item.get("sizeIncrease")) > 0:
                     size_note = f' +{format_position_size(to_float(item.get("sizeIncrease")))}'
+                add_price_note = ""
+                if to_float(item.get("addPrice")) > 0:
+                    add_price_note = f' add @${format_price(to_float(item.get("addPrice")))}'
                 lines.append(
-                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} {format_money_compact(item["previousValue"])}->{format_money_compact(item["totalValue"])} (+{format_money_compact(item["increaseValue"])}{size_note})'
+                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} {format_money_compact(item["previousValue"])}->{format_money_compact(item["totalValue"])} (+{format_money_compact(item["increaseValue"])}{size_note}{add_price_note})'
                 )
 
         return "\n".join(lines)

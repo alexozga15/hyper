@@ -977,7 +977,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(len(result["changes"]["increasedLargePositions"]), 1)
         sent_message = send_telegram_message.call_args.args[2]
         self.assertIn("Added >$500K", sent_message)
-        self.assertIn("Trader One: BTC long $600K->$1.2M (+$600K +10)", sent_message)
+        self.assertIn("Trader One: BTC long $600K->$1.2M (+$600K +10 add @$60,000)", sent_message)
         self.assertNotIn("@$78,000", sent_message)
 
     def test_large_position_increases_notify_on_big_size_add_even_if_pct_small(self) -> None:
@@ -1007,6 +1007,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(added, [])
         self.assertEqual(len(increased), 1)
         self.assertEqual(increased[0]["sizeIncrease"], 10.0)
+        self.assertEqual(increased[0]["addPrice"], 80000.0)
         self.assertEqual(closed, [])
 
     def test_large_position_increases_ignore_small_drift(self) -> None:
