@@ -314,7 +314,7 @@ function renderWalletTable() {
     ["Orders", "openOrderCount"],
     ["30D Fills", "fills30d"],
     ["7D Hit Rate", "hitRate"],
-    ["7D Rank", "recentWinRateRank.score"],
+    ["Quality Rank", "recentWinRateRank.score"],
   ];
 
   root.className = "table-wrap";
@@ -432,8 +432,9 @@ function renderWalletDetails() {
     <div class="wallet-metrics">
       <div><span>Wallet Size</span><strong>${wallet.cohorts.walletSize}</strong></div>
       <div><span>Profitability</span><strong>${wallet.cohorts.profitability}</strong></div>
-      <div><span>7D Rank</span><strong>${wallet.recentWinRateRank?.label || "Unranked"} (${percentFormatter.format(wallet.recentWinRateRank?.score || 0)})</strong></div>
+      <div><span>Quality Rank</span><strong>${wallet.recentWinRateRank?.label || "Unranked"} (${percentFormatter.format(wallet.recentWinRateRank?.score || 0)})</strong></div>
       <div><span>7D Hit Rate</span><strong>${percentFormatter.format(wallet.hitRate)}% / ${wallet.recentClosedTrades || 0} closes</strong></div>
+      <div><span>30D PnL</span><strong class="${(wallet.realizedPnl30d || 0) >= 0 ? "positive" : "negative"}">${formatMoney(wallet.realizedPnl30d || 0)} / ${wallet.closedTrades30d || 0} closes</strong></div>
       <div><span>30D Activity</span><strong>${wallet.holdingOnly30d ? "Holding only" : `${wallet.fills30d || 0} fills`}</strong></div>
       <div><span>7D PnL</span><strong class="${wallet.recentRealizedPnl >= 0 ? "positive" : "negative"}">${formatMoney(wallet.recentRealizedPnl)}</strong></div>
       <div><span>Day PnL</span><strong class="${wallet.performance.day.pnl >= 0 ? "positive" : "negative"}">${formatMoney(wallet.performance.day.pnl)}</strong></div>

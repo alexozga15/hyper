@@ -50,6 +50,8 @@ CONSENSUS_SIZE_ALERT_MIN_DELTA = 2
 CONSENSUS_SIZE_ALERT_MIN_PCT = 0.5
 RANKING_MIN_7D_CLOSED_TRADES = 5
 RANKING_FULL_CONFIDENCE_7D_CLOSED_TRADES = 20
+RANKING_MIN_30D_CLOSED_TRADES = 20
+RANKING_FULL_CONFIDENCE_30D_CLOSED_TRADES = 30
 RANKING_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 HOLDING_ONLY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
 OIL_POSITION_ALIASES = {"flx:OIL", "cash:WTI", "xyz:BRENTOIL", "xyz:CL"}
@@ -211,24 +213,84 @@ def signal_action_from_side(side: str) -> str:
     return "watch"
 
 
-def build_wallet_quality_rank(hit_rate: float, closed_trade_count: int, pnl_7d: float, account_value: float) -> dict[str, Any]:
-    normalized_hit_rate = max(0.0, min(to_float(hit_rate), 100.0))
-    sample_size = max(0, int(to_float(closed_trade_count)))
-    confidence = min(sample_size / RANKING_FULL_CONFIDENCE_7D_CLOSED_TRADES, 1.0)
-    pnl_return_pct = (to_float(pnl_7d) / to_float(account_value)) * 100 if to_float(account_value) > 0 else 0.0
-    pnl_score = max(0.0, min(100.0, 50.0 + pnl_return_pct))
-    hit_rate_score = normalized_hit_rate * confidence
-    score = (hit_rate_score * 0.6) + (pnl_score * 0.4)
+def clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
+    return max(low, min(to_float(value), high))
 
-    if sample_size < RANKING_MIN_7D_CLOSED_TRADES:
+
+def return_score(return_pct: float) -> float:
+    return clamp(50.0 + (to_float(return_pct) * 2.5))
+
+
+def profit_factor_score(profit_factor: float) -> float:
+    if profit_factor == float("inf"):
+        return 100.0
+    return clamp(((to_float(profit_factor) - 0.5) / 2.5) * 100)
+
+
+def build_wallet_quality_rank(
+    hit_rate: float,
+    closed_trade_count: int,
+    pnl_7d: float,
+    account_value: float,
+    *,
+    closed_trade_count_30d: int | None = None,
+    pnl_30d: float | None = None,
+    gross_profit_30d: float = 0.0,
+    gross_loss_30d: float = 0.0,
+    max_drawdown_pct: float = 0.0,
+    margin_usage_pct: float = 0.0,
+    unrealized_pnl: float = 0.0,
+) -> dict[str, Any]:
+    normalized_hit_rate = max(0.0, min(to_float(hit_rate), 100.0))
+    sample_size_7d = max(0, int(to_float(closed_trade_count)))
+    sample_size_30d = max(0, int(to_float(closed_trade_count_30d if closed_trade_count_30d is not None else sample_size_7d)))
+    pnl_30d_value = to_float(pnl_30d if pnl_30d is not None else pnl_7d)
+    account = to_float(account_value)
+    confidence_7d = min(sample_size_7d / RANKING_FULL_CONFIDENCE_7D_CLOSED_TRADES, 1.0)
+    confidence_30d = min(sample_size_30d / RANKING_FULL_CONFIDENCE_30D_CLOSED_TRADES, 1.0)
+    pnl_7d_return_pct = (to_float(pnl_7d) / account) * 100 if account > 0 else 0.0
+    pnl_30d_return_pct = (pnl_30d_value / account) * 100 if account > 0 else 0.0
+    profit = max(0.0, to_float(gross_profit_30d))
+    loss = max(0.0, abs(to_float(gross_loss_30d)))
+    if loss > 0:
+        profit_factor = profit / loss
+    elif profit > 0:
+        profit_factor = float("inf")
+    else:
+        profit_factor = 0.0
+    expectancy_pct = ((pnl_30d_value / max(sample_size_30d, 1)) / account) * 100 if account > 0 else 0.0
+    win_rate_score = normalized_hit_rate * confidence_30d
+    drawdown_control_score = clamp(100.0 - (to_float(max_drawdown_pct) * 5.0))
+    margin_score = clamp(100.0 - max(0.0, to_float(margin_usage_pct) - 30.0) * 2.0)
+    unrealized_return_pct = (to_float(unrealized_pnl) / account) * 100 if account > 0 else 0.0
+    unrealized_score = return_score(unrealized_return_pct)
+    open_health_score = (margin_score * 0.6) + (unrealized_score * 0.4)
+    score = (
+        return_score(pnl_7d_return_pct) * 0.25
+        + return_score(pnl_30d_return_pct) * 0.20
+        + profit_factor_score(profit_factor) * 0.15
+        + return_score(expectancy_pct) * 0.15
+        + win_rate_score * 0.10
+        + drawdown_control_score * 0.10
+        + open_health_score * 0.05
+    )
+
+    elite_eligible = (
+        sample_size_30d >= RANKING_MIN_30D_CLOSED_TRADES
+        and profit_factor >= 1.5
+        and to_float(max_drawdown_pct) <= 20.0
+        and to_float(margin_usage_pct) <= 60.0
+    )
+
+    if sample_size_7d < RANKING_MIN_7D_CLOSED_TRADES and sample_size_30d < RANKING_MIN_30D_CLOSED_TRADES:
         label = "Unranked"
-    elif score >= 75:
+    elif score >= 80 and elite_eligible:
         label = "Elite"
-    elif score >= 60:
+    elif score >= 65:
         label = "Strong"
-    elif score >= 50:
+    elif score >= 55:
         label = "Balanced"
-    elif score >= 40:
+    elif score >= 45:
         label = "Weak"
     else:
         label = "Cold"
@@ -237,13 +299,26 @@ def build_wallet_quality_rank(hit_rate: float, closed_trade_count: int, pnl_7d: 
         "label": label,
         "score": round(score, 1),
         "winRate": round(normalized_hit_rate, 1),
-        "sampleSize": sample_size,
-        "confidence": round(confidence, 2),
+        "sampleSize": sample_size_7d,
+        "sampleSize30d": sample_size_30d,
+        "confidence": round(confidence_7d, 2),
+        "confidence30d": round(confidence_30d, 2),
         "pnl": round(to_float(pnl_7d), 2),
-        "pnlReturnPct": round(pnl_return_pct, 2),
-        "hitRateScore": round(hit_rate_score, 1),
-        "pnlScore": round(pnl_score, 1),
-        "metric": "7d_hit_rate_pnl",
+        "pnl30d": round(pnl_30d_value, 2),
+        "pnlReturnPct": round(pnl_7d_return_pct, 2),
+        "pnl30dReturnPct": round(pnl_30d_return_pct, 2),
+        "profitFactor": "inf" if profit_factor == float("inf") else round(profit_factor, 2),
+        "expectancyPct": round(expectancy_pct, 3),
+        "maxDrawdownPct": round(to_float(max_drawdown_pct), 2),
+        "marginUsagePct": round(to_float(margin_usage_pct), 2),
+        "openHealthScore": round(open_health_score, 1),
+        "hitRateScore": round(win_rate_score, 1),
+        "pnlScore": round(return_score(pnl_7d_return_pct), 1),
+        "pnl30dScore": round(return_score(pnl_30d_return_pct), 1),
+        "profitFactorScore": round(profit_factor_score(profit_factor), 1),
+        "drawdownScore": round(drawdown_control_score, 1),
+        "eliteEligible": elite_eligible,
+        "metric": "multi_period_quality",
     }
 
 
@@ -266,6 +341,21 @@ def latest_series_value(points: list[Any]) -> float:
     if isinstance(latest, (list, tuple)) and len(latest) > 1:
         return to_float(latest[1])
     return 0.0
+
+
+def max_drawdown_pct(points: list[Any]) -> float:
+    peak: float | None = None
+    worst = 0.0
+    for point in points:
+        if not (isinstance(point, (list, tuple)) and len(point) > 1):
+            continue
+        value = to_float(point[1])
+        if value <= 0:
+            continue
+        peak = value if peak is None else max(peak, value)
+        if peak and peak > 0:
+            worst = max(worst, ((peak - value) / peak) * 100)
+    return round(worst, 2)
 
 
 def current_time_ms() -> int:
@@ -716,6 +806,7 @@ class WalletTrackerService:
                 "pnl": pnl_value,
                 "accountValue": account_value,
                 "volume": to_float(block.get("vlm")),
+                "maxDrawdownPct": max_drawdown_pct(block.get("accountValueHistory", [])),
             }
         return periods
 
@@ -794,8 +885,13 @@ class WalletTrackerService:
 
         recent_fills = []
         recent_realized_pnl = 0.0
+        realized_pnl_30d = 0.0
+        gross_profit_30d = 0.0
+        gross_loss_30d = 0.0
         win_count = 0
         loss_count = 0
+        win_count_30d = 0
+        loss_count_30d = 0
         fills_30d_count = 0
         last_fill_time = 0
         for fill in fills:
@@ -804,6 +900,14 @@ class WalletTrackerService:
             last_fill_time = max(last_fill_time, fill_time)
             if fill_time >= cutoff_30d_ms:
                 fills_30d_count += 1
+                if closed_pnl != 0:
+                    realized_pnl_30d += closed_pnl
+                    if closed_pnl > 0:
+                        gross_profit_30d += closed_pnl
+                        win_count_30d += 1
+                    elif closed_pnl < 0:
+                        gross_loss_30d += abs(closed_pnl)
+                        loss_count_30d += 1
             is_7d_closed_fill = fill_time >= cutoff_7d_ms and closed_pnl != 0
             if is_7d_closed_fill:
                 recent_realized_pnl += closed_pnl
@@ -848,6 +952,7 @@ class WalletTrackerService:
         total_notional = to_float(margin_summary.get("totalNtlPos"))
         margin_used = to_float(margin_summary.get("totalMarginUsed"))
         withdrawable = to_float(state.get("withdrawable"))
+        margin_usage_pct = (margin_used / account_value) * 100 if account_value > 0 else 0.0
         holding_only_30d = bool(positions) and fills_30d_count == 0 and len(open_orders) == 0
         days_since_last_fill = None
         if last_fill_time:
@@ -858,6 +963,13 @@ class WalletTrackerService:
             recent_closed_trade_count,
             recent_realized_pnl,
             account_value,
+            closed_trade_count_30d=win_count_30d + loss_count_30d,
+            pnl_30d=realized_pnl_30d,
+            gross_profit_30d=gross_profit_30d,
+            gross_loss_30d=gross_loss_30d,
+            max_drawdown_pct=performance.get("month", {}).get("maxDrawdownPct", 0.0),
+            margin_usage_pct=margin_usage_pct,
+            unrealized_pnl=unrealized_pnl,
         )
 
         return {
@@ -874,9 +986,13 @@ class WalletTrackerService:
             "unrealizedPnl": unrealized_pnl,
             "realizedPnl": all_time_realized,
             "recentRealizedPnl": recent_realized_pnl,
+            "realizedPnl30d": realized_pnl_30d,
             "recentWins": win_count,
             "recentLosses": loss_count,
             "recentClosedTrades": recent_closed_trade_count,
+            "closedTrades30d": win_count_30d + loss_count_30d,
+            "grossProfit30d": gross_profit_30d,
+            "grossLoss30d": gross_loss_30d,
             "fills30d": fills_30d_count,
             "daysSinceLastFill": days_since_last_fill,
             "holdingOnly30d": holding_only_30d,
@@ -1771,7 +1887,7 @@ class WalletTrackerService:
             reverse=True,
         )
 
-        lines = ["Wallet ranks by 7D hit rate + PnL"]
+        lines = ["Wallet ranks by multi-period quality"]
         ranked_wallets = [
             wallet
             for wallet in wallets
@@ -1784,7 +1900,9 @@ class WalletTrackerService:
                     f'{index}. {wallet_label(wallet.get("alias", ""), wallet.get("address", ""))}: '
                     f'{rank.get("label", "Unranked")} '
                     f'({to_float(rank.get("winRate")):.1f}% 7D WR, {int(rank.get("sampleSize") or 0)} 7D closes, '
-                    f'7D PnL ${to_float(rank.get("pnl")):,.0f}, score {to_float(rank.get("score")):.1f}/100)'
+                    f'{int(rank.get("sampleSize30d") or 0)} 30D closes, 30D PnL ${to_float(rank.get("pnl30d")):,.0f}, '
+                    f'PF {rank.get("profitFactor", 0)}, DD {to_float(rank.get("maxDrawdownPct")):.1f}%, '
+                    f'score {to_float(rank.get("score")):.1f}/100)'
                 )
         else:
             lines.append("- Not enough recent closed trades yet")
@@ -1826,7 +1944,8 @@ class WalletTrackerService:
             lines.append(
                 f'{wallet_label(wallet.get("alias", ""), wallet.get("address", ""))} '
                 f'({to_float(rank.get("score")):.1f}/100, {to_float(rank.get("winRate")):.1f}% 7D WR, '
-                f'{int(rank.get("sampleSize") or 0)} closes)'
+                f'{int(rank.get("sampleSize30d") or 0)} 30D closes, PF {rank.get("profitFactor", 0)}, '
+                f'DD {to_float(rank.get("maxDrawdownPct")):.1f}%)'
             )
             if not positions:
                 lines.append("- No open positions")

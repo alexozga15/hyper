@@ -31,10 +31,43 @@ class SegmentTests(unittest.TestCase):
         self.assertEqual(build_wallet_quality_rank(100, 1, 10_000, 100_000)["label"], "Unranked")
         strong = build_wallet_quality_rank(70, 20, 20_000, 100_000)
         self.assertEqual(strong["label"], "Strong")
-        self.assertEqual(strong["score"], 70.0)
+        self.assertEqual(strong["metric"], "multi_period_quality")
+        self.assertEqual(strong["score"], 71.5)
         losing = build_wallet_quality_rank(80, 20, -50_000, 100_000)
-        self.assertEqual(losing["label"], "Weak")
+        self.assertEqual(losing["label"], "Cold")
         self.assertEqual(losing["pnlReturnPct"], -50.0)
+
+    def test_wallet_quality_rank_requires_drawdown_control_for_elite(self) -> None:
+        elite = build_wallet_quality_rank(
+            90,
+            20,
+            30_000,
+            100_000,
+            closed_trade_count_30d=30,
+            pnl_30d=40_000,
+            gross_profit_30d=60_000,
+            gross_loss_30d=10_000,
+            max_drawdown_pct=5,
+            margin_usage_pct=25,
+            unrealized_pnl=5_000,
+        )
+        self.assertEqual(elite["label"], "Elite")
+        self.assertTrue(elite["eliteEligible"])
+        high_drawdown = build_wallet_quality_rank(
+            90,
+            20,
+            30_000,
+            100_000,
+            closed_trade_count_30d=30,
+            pnl_30d=40_000,
+            gross_profit_30d=60_000,
+            gross_loss_30d=10_000,
+            max_drawdown_pct=25,
+            margin_usage_pct=25,
+            unrealized_pnl=5_000,
+        )
+        self.assertNotEqual(high_drawdown["label"], "Elite")
+        self.assertFalse(high_drawdown["eliteEligible"])
 
     def test_side_from_size(self) -> None:
         self.assertEqual(side_from_size(10), "Long")
@@ -498,9 +531,9 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_wallet_rankings_message(dashboard)
 
-        self.assertIn("Wallet ranks by 7D hit rate + PnL", message)
+        self.assertIn("Wallet ranks by multi-period quality", message)
         self.assertIn("1. Consistent Winner: Strong", message)
-        self.assertIn("2. High WR Losing: Weak", message)
+        self.assertIn("2. High WR Losing: Cold", message)
         self.assertNotIn("Lucky Small Sample", message)
 
     def test_build_elite_wallet_positions_message_lists_only_elite_wallet_positions(self) -> None:
@@ -512,7 +545,19 @@ class AlertSummaryTests(unittest.TestCase):
                     "address": "0x1111111111111111111111111111111111111111",
                     "accountValue": 100_000.0,
                     "totalNotional": 1_250_000.0,
-                    "recentWinRateRank": build_wallet_quality_rank(90.0, 20, 30_000.0, 100_000.0),
+                    "recentWinRateRank": build_wallet_quality_rank(
+                        90.0,
+                        20,
+                        30_000.0,
+                        100_000.0,
+                        closed_trade_count_30d=30,
+                        pnl_30d=40_000.0,
+                        gross_profit_30d=60_000.0,
+                        gross_loss_30d=10_000.0,
+                        max_drawdown_pct=5.0,
+                        margin_usage_pct=25.0,
+                        unrealized_pnl=5_000.0,
+                    ),
                     "positions": [
                         {
                             "coin": "BTC",
@@ -539,7 +584,8 @@ class AlertSummaryTests(unittest.TestCase):
         message = self.service.build_elite_wallet_positions_message(dashboard)
 
         self.assertIn("Elite wallet positions", message)
-        self.assertIn("Elite Trader (86.0/100", message)
+        self.assertIn("Elite Trader (88.8/100", message)
+        self.assertIn("30D closes, PF 6.0, DD 5.0%", message)
         self.assertIn("- BTC long $1,000K, size 10, entry $100,000, uPnL $12,345", message)
         self.assertIn("- ETH short $250K", message)
         self.assertNotIn("Strong Trader", message)
