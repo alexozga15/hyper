@@ -22,7 +22,7 @@ from server import (
 )
 
 
-LIVE_COMMANDS = {"/update", "/sentiment", "/consensus", "/hip3", "/positions", "/ranks"}
+LIVE_COMMANDS = {"/update", "/sentiment", "/consensus", "/signals", "/hip3", "/positions", "/ranks"}
 
 
 def normalize_command(text: str) -> str:
@@ -42,6 +42,7 @@ def build_help_message() -> str:
             "/update - live sentiment plus all open positions",
             "/sentiment - full live sentiment update",
             "/consensus - current consensus only",
+            "/signals - high-conviction trade signals",
             "/hip3 - current HIP-3 consensus only",
             "/positions - all open positions now",
             "/ranks - tracked wallets ranked by 7D hit rate plus 7D PnL",
@@ -139,12 +140,15 @@ def build_reply(
         return "\n\n".join(
             [
                 service.build_summary_message(summary_cache, min_wallets),
+                service.build_signals_message(summary_cache),
                 service.build_wallet_rankings_message(dashboard_cache, limit=10),
                 service.build_positions_message(dashboard_cache),
             ]
         )
     if command == "/sentiment":
         return service.build_summary_message(summary_cache, min_wallets)
+    if command == "/signals":
+        return service.build_signals_message(summary_cache)
     if command == "/consensus":
         return service.build_summary_message(
             summary_cache,
@@ -152,6 +156,7 @@ def build_reply(
             title="Current consensus",
             include_consensus=True,
             include_hip3=False,
+            include_signals=False,
         )
     if command == "/hip3":
         return service.build_summary_message(
@@ -160,6 +165,7 @@ def build_reply(
             title="Current HIP-3 consensus",
             include_consensus=False,
             include_hip3=True,
+            include_signals=False,
         )
     if command == "/positions":
         return service.build_positions_message(dashboard_cache)
