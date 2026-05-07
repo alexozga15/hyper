@@ -39,6 +39,7 @@ MAX_IMPORT_BATCH = 100
 MAX_DISCOVERY_BATCH = 60
 DEFAULT_CONSENSUS_THRESHOLD = 3
 MIN_POSITION_MESSAGE_VALUE = 500_000
+MIN_POSITION_MESSAGE_WALLETS = 2
 NEW_POSITION_ALERT_MIN_VALUE = MIN_POSITION_MESSAGE_VALUE
 POSITION_INCREASE_ALERT_MIN_DELTA = MIN_POSITION_MESSAGE_VALUE
 POSITION_INCREASE_ALERT_MIN_PCT = 0.5
@@ -1416,6 +1417,7 @@ class WalletTrackerService:
         dashboard: dict[str, Any],
         *,
         min_value: float = MIN_POSITION_MESSAGE_VALUE,
+        min_wallets: int = MIN_POSITION_MESSAGE_WALLETS,
         hip3_only: bool | None = None,
         stock_like_only: bool | None = None,
         commodity_like_only: bool | None = None,
@@ -1481,7 +1483,7 @@ class WalletTrackerService:
                     "entryPx": round(item["entryValue"] / item["totalSize"], 8) if item["totalSize"] > 0 else 0.0,
                 }
                 for item in groups.values()
-                if item["totalValue"] >= min_value
+                if item["totalValue"] >= min_value and item["walletCount"] >= min_wallets
             ],
             key=lambda item: (item["walletCount"], item["totalValue"], item["coin"]),
             reverse=True,
@@ -1509,7 +1511,10 @@ class WalletTrackerService:
             lines.append("- No open positions")
         else:
             sections = [
-                (f"By position (>= ${MIN_POSITION_MESSAGE_VALUE:,.0f}):", position_groups),
+                (
+                    f"By position (>= ${MIN_POSITION_MESSAGE_VALUE:,.0f}, {MIN_POSITION_MESSAGE_WALLETS}+ wallets):",
+                    position_groups,
+                ),
                 ("Commodities:", commodity_groups),
                 ("Stocks / indices:", stock_groups),
             ]
