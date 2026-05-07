@@ -108,6 +108,7 @@ function renderStats() {
     ["Unrealized PnL", formatMoney(totals.combinedUnrealizedPnl)],
     ["Money Printers", totals.moneyPrinterWallets],
     ["Signals", state.dashboard.sentiment?.signalCount || 0],
+    ["30D Holders", totals.holdingOnly30dWallets || 0],
   ];
   root.innerHTML = cards
     .map(
@@ -148,6 +149,61 @@ function renderSignals() {
       `
     )
     .join("");
+}
+
+function renderHoldingOnlyWallets() {
+  const root = document.getElementById("holding-wallets-list");
+  const wallets = state.dashboard?.holdingOnly30dWallets || [];
+  if (!wallets.length) {
+    root.className = "table-wrap empty-state";
+    root.textContent = "No wallets are just holding positions for 30D right now.";
+    return;
+  }
+
+  root.className = "table-wrap";
+  root.innerHTML = `
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Wallet</th>
+          <th>Top Position</th>
+          <th>Notional</th>
+          <th>uPnL</th>
+          <th>Last Fill</th>
+          <th>Address</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${wallets
+          .map((wallet) => {
+            const position = wallet.topPosition || {};
+            const lastFill =
+              wallet.daysSinceLastFill === null || wallet.daysSinceLastFill === undefined
+                ? "No fills seen"
+                : `${percentFormatter.format(wallet.daysSinceLastFill)}d ago`;
+            return `
+              <tr data-holder-row="${wallet.address}">
+                <td>${wallet.alias || "Unnamed wallet"}</td>
+                <td>${position.coin || "n/a"} ${position.side || ""}</td>
+                <td>${formatMoney(wallet.totalNotional)}</td>
+                <td class="${wallet.unrealizedPnl >= 0 ? "positive" : "negative"}">${formatMoney(wallet.unrealizedPnl)}</td>
+                <td>${lastFill}</td>
+                <td>${shortAddress(wallet.address)}</td>
+              </tr>
+            `;
+          })
+          .join("")}
+      </tbody>
+    </table>
+  `;
+
+  root.querySelectorAll("[data-holder-row]").forEach((row) => {
+    row.addEventListener("click", () => {
+      state.selectedWalletAddress = row.dataset.holderRow;
+      renderWalletTable();
+      renderWalletDetails();
+    });
+  });
 }
 
 function renderSegments() {
@@ -227,6 +283,7 @@ function getFilteredWallets() {
       wallet.cohorts.walletSize,
       wallet.cohorts.profitability,
       wallet.recentWinRateRank?.label,
+      wallet.holdingOnly30d ? "30d holder holding not trading" : "",
     ]
       .join(" ")
       .toLowerCase()
@@ -255,6 +312,7 @@ function renderWalletTable() {
     ["Exposure", "exposure.net"],
     ["Positions", "positionCount"],
     ["Orders", "openOrderCount"],
+    ["30D Fills", "fills30d"],
     ["7D Hit Rate", "hitRate"],
     ["7D Rank", "recentWinRateRank.score"],
   ];
@@ -292,6 +350,7 @@ function renderWalletTable() {
                 <td>${formatMoney(wallet.exposure.net)}</td>
                 <td>${wallet.positionCount}</td>
                 <td>${wallet.openOrderCount}</td>
+                <td>${wallet.fills30d || 0}${wallet.holdingOnly30d ? " / holder" : ""}</td>
                 <td>${percentFormatter.format(wallet.hitRate)}%</td>
                 <td>${wallet.recentWinRateRank?.label || "Unranked"} (${percentFormatter.format(wallet.recentWinRateRank?.score || 0)})</td>
                 <td>${wallet.cohorts.walletSize} / ${wallet.cohorts.profitability}</td>
@@ -375,6 +434,7 @@ function renderWalletDetails() {
       <div><span>Profitability</span><strong>${wallet.cohorts.profitability}</strong></div>
       <div><span>7D Rank</span><strong>${wallet.recentWinRateRank?.label || "Unranked"} (${percentFormatter.format(wallet.recentWinRateRank?.score || 0)})</strong></div>
       <div><span>7D Hit Rate</span><strong>${percentFormatter.format(wallet.hitRate)}% / ${wallet.recentClosedTrades || 0} closes</strong></div>
+      <div><span>30D Activity</span><strong>${wallet.holdingOnly30d ? "Holding only" : `${wallet.fills30d || 0} fills`}</strong></div>
       <div><span>7D PnL</span><strong class="${wallet.recentRealizedPnl >= 0 ? "positive" : "negative"}">${formatMoney(wallet.recentRealizedPnl)}</strong></div>
       <div><span>Day PnL</span><strong class="${wallet.performance.day.pnl >= 0 ? "positive" : "negative"}">${formatMoney(wallet.performance.day.pnl)}</strong></div>
       <div><span>Week PnL</span><strong class="${wallet.performance.week.pnl >= 0 ? "positive" : "negative"}">${formatMoney(wallet.performance.week.pnl)}</strong></div>
@@ -541,6 +601,7 @@ async function refreshDashboard(showMessage = true) {
     document.getElementById("last-updated").textContent = formatDate(state.dashboard.generatedAt);
     renderStats();
     renderSignals();
+    renderHoldingOnlyWallets();
     renderSegments();
     renderSavedWallets();
     renderWalletTable();

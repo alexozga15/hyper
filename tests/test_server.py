@@ -342,6 +342,48 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("High-conviction signals", message)
         self.assertIn("1. BUY BTC long (3 wallets, $1.2M, conviction 94/100)", message)
 
+    def test_build_holding_only_wallets_returns_30d_holders_by_notional(self) -> None:
+        wallets = [
+            {
+                "address": "0x1111111111111111111111111111111111111111",
+                "alias": "Holder",
+                "accountValue": 500_000.0,
+                "totalNotional": 1_500_000.0,
+                "unrealizedPnl": 25_000.0,
+                "holdingOnly30d": True,
+                "openOrderCount": 0,
+                "fills30d": 0,
+                "daysSinceLastFill": 45.0,
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_500_000.0}],
+            },
+            {
+                "address": "0x2222222222222222222222222222222222222222",
+                "alias": "Bigger Holder",
+                "accountValue": 700_000.0,
+                "totalNotional": 2_000_000.0,
+                "unrealizedPnl": -10_000.0,
+                "holdingOnly30d": True,
+                "openOrderCount": 0,
+                "fills30d": 0,
+                "daysSinceLastFill": None,
+                "positions": [{"coin": "ETH", "side": "Short", "positionValue": 2_000_000.0}],
+            },
+            {
+                "address": "0x3333333333333333333333333333333333333333",
+                "alias": "Trader",
+                "accountValue": 900_000.0,
+                "totalNotional": 3_000_000.0,
+                "holdingOnly30d": False,
+                "positions": [{"coin": "SOL", "side": "Long", "positionValue": 3_000_000.0}],
+            },
+        ]
+
+        holders = self.service.build_holding_only_wallets(wallets)
+
+        self.assertEqual([wallet["alias"] for wallet in holders], ["Bigger Holder", "Holder"])
+        self.assertEqual(holders[0]["fills30d"], 0)
+        self.assertEqual(holders[0]["topPosition"]["coin"], "ETH")
+
     def test_build_sentiment_summary_groups_oil_aliases(self) -> None:
         snapshots = [
             {

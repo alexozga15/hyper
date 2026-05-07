@@ -51,6 +51,7 @@ CONSENSUS_SIZE_ALERT_MIN_PCT = 0.5
 RANKING_MIN_7D_CLOSED_TRADES = 5
 RANKING_FULL_CONFIDENCE_7D_CLOSED_TRADES = 20
 RANKING_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+HOLDING_ONLY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
 OIL_POSITION_ALIASES = {"flx:OIL", "cash:WTI", "xyz:BRENTOIL", "xyz:CL"}
 RAW_OIL_POSITION_NAMES = {"BRENTOIL", "CL", "WTI", "OIL"}
 RAW_COMMODITY_POSITION_NAMES = RAW_OIL_POSITION_NAMES | {"GOLD", "SILVER", "COPPER", "NATGAS"}
@@ -787,10 +788,16 @@ class WalletTrackerService:
         recent_realized_pnl = 0.0
         win_count = 0
         loss_count = 0
+        fills_30d_count = 0
+        last_fill_time = 0
         cutoff_7d_ms = current_time_ms() - RANKING_WINDOW_MS
+        cutoff_30d_ms = current_time_ms() - HOLDING_ONLY_WINDOW_MS
         for fill in fills:
             closed_pnl = to_float(fill.get("closedPnl"))
             fill_time = int(to_float(fill.get("time")))
+            last_fill_time = max(last_fill_time, fill_time)
+            if fill_time >= cutoff_30d_ms:
+                fills_30d_count += 1
             is_7d_closed_fill = fill_time >= cutoff_7d_ms and closed_pnl != 0
             if is_7d_closed_fill:
                 recent_realized_pnl += closed_pnl
@@ -835,6 +842,10 @@ class WalletTrackerService:
         total_notional = to_float(margin_summary.get("totalNtlPos"))
         margin_used = to_float(margin_summary.get("totalMarginUsed"))
         withdrawable = to_float(state.get("withdrawable"))
+        holding_only_30d = bool(positions) and fills_30d_count == 0 and len(open_orders) == 0
+        days_since_last_fill = None
+        if last_fill_time:
+            days_since_last_fill = round(max(0, current_time_ms() - last_fill_time) / (24 * 60 * 60 * 1000), 1)
         discovery_score = account_value + (abs(total_notional) * 0.2) + max(all_time_realized, 0.0)
         recent_win_rate_rank = build_wallet_quality_rank(
             hit_rate,
@@ -860,6 +871,9 @@ class WalletTrackerService:
             "recentWins": win_count,
             "recentLosses": loss_count,
             "recentClosedTrades": recent_closed_trade_count,
+            "fills30d": fills_30d_count,
+            "daysSinceLastFill": days_since_last_fill,
+            "holdingOnly30d": holding_only_30d,
             "recentWinRateRank": recent_win_rate_rank,
             "openOrderCount": len(open_orders),
             "positions": positions,
@@ -880,6 +894,32 @@ class WalletTrackerService:
             "hitRate": hit_rate,
         }
 
+    def build_holding_only_wallets(self, snapshots: list[dict[str, Any]], *, limit: int = 20) -> list[dict[str, Any]]:
+        holders = []
+        for wallet in snapshots:
+            if not wallet.get("holdingOnly30d"):
+                continue
+            positions = wallet.get("positions", [])
+            holders.append(
+                {
+                    "address": wallet.get("address", ""),
+                    "alias": wallet.get("alias", ""),
+                    "accountValue": round(to_float(wallet.get("accountValue")), 2),
+                    "totalNotional": round(to_float(wallet.get("totalNotional")), 2),
+                    "unrealizedPnl": round(to_float(wallet.get("unrealizedPnl")), 2),
+                    "positionCount": len(positions),
+                    "openOrderCount": int(to_float(wallet.get("openOrderCount"))),
+                    "fills30d": int(to_float(wallet.get("fills30d"))),
+                    "daysSinceLastFill": wallet.get("daysSinceLastFill"),
+                    "topPosition": positions[0] if positions else None,
+                }
+            )
+        return sorted(
+            holders,
+            key=lambda item: (abs(item["totalNotional"]), item["accountValue"]),
+            reverse=True,
+        )[: max(1, limit)]
+
     def dashboard(self) -> dict[str, Any]:
         wallets = self.store.list_wallets()
         with ThreadPoolExecutor(max_workers=min(max(len(wallets), 1), 8)) as executor:
@@ -895,6 +935,7 @@ class WalletTrackerService:
             "bullishWallets": sum(1 for item in snapshots if item["exposure"]["net"] > 0),
             "bearishWallets": sum(1 for item in snapshots if item["exposure"]["net"] < 0),
             "moneyPrinterWallets": sum(1 for item in snapshots if item["cohorts"]["profitability"] == "Money Printer"),
+            "holdingOnly30dWallets": sum(1 for item in snapshots if item.get("holdingOnly30d")),
         }
 
         segment_map: dict[str, dict[str, Any]] = {}
@@ -933,6 +974,7 @@ class WalletTrackerService:
         )
 
         sentiment = self.build_sentiment_summary(snapshots, DEFAULT_CONSENSUS_THRESHOLD)
+        holding_only_wallets = self.build_holding_only_wallets(snapshots)
 
         return {
             "generatedAt": now_iso(),
@@ -940,6 +982,7 @@ class WalletTrackerService:
             "totals": totals,
             "segments": segments,
             "sentiment": sentiment,
+            "holdingOnly30dWallets": holding_only_wallets,
             "wallets": snapshots,
             "savedWallets": [wallet.to_dict() for wallet in wallets],
         }
