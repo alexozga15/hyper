@@ -950,6 +950,7 @@ class AlertSummaryTests(unittest.TestCase):
                 "side": "long",
                 "totalValue": 600000.0,
                 "totalSize": 10.0,
+                "entryPx": 75000.0,
             }
         }
         dashboard = {
@@ -958,7 +959,7 @@ class AlertSummaryTests(unittest.TestCase):
                     "address": "0x1111111111111111111111111111111111111111",
                     "alias": "Trader One",
                     "positions": [
-                        {"coin": "BTC", "side": "Long", "positionValue": 1200000.0, "size": 20.0},
+                        {"coin": "BTC", "side": "Long", "positionValue": 1200000.0, "size": 20.0, "entryPx": 78000.0},
                     ],
                 }
             ]
@@ -977,6 +978,7 @@ class AlertSummaryTests(unittest.TestCase):
         sent_message = send_telegram_message.call_args.args[2]
         self.assertIn("Added >$500K", sent_message)
         self.assertIn("Trader One: BTC long $600K->$1.2M (+$600K +10)", sent_message)
+        self.assertNotIn("@$78,000", sent_message)
 
     def test_large_position_increases_notify_on_big_size_add_even_if_pct_small(self) -> None:
         previous = {

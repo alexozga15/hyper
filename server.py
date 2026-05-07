@@ -1541,11 +1541,8 @@ class WalletTrackerService:
                 size_note = ""
                 if to_float(item.get("sizeIncrease")) > 0:
                     size_note = f' +{format_position_size(to_float(item.get("sizeIncrease")))}'
-                entry_note = ""
-                if to_float(item.get("entryPx")) > 0:
-                    entry_note = f' @${format_price(to_float(item.get("entryPx")))}'
                 lines.append(
-                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} {format_money_compact(item["previousValue"])}->{format_money_compact(item["totalValue"])} (+{format_money_compact(item["increaseValue"])}{size_note}{entry_note})'
+                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} {format_money_compact(item["previousValue"])}->{format_money_compact(item["totalValue"])} (+{format_money_compact(item["increaseValue"])}{size_note})'
                 )
 
         return "\n".join(lines)
