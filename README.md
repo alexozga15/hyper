@@ -10,6 +10,7 @@ Hyperwatch Pro is a lightweight Hyperliquid wallet tracker inspired by Hyperdash
 - Use official Hyperliquid WebSocket feeds for live wallet refreshes
 - Discover new wallet candidates automatically by watching public `trades` streams and then scoring discovered addresses
 - Group wallets into familiar cohorts such as `Apex`, `Whale`, and `Money Printer`
+- Generate high-conviction buy/sell signals from consensus positions scoring 80+/100 conviction
 
 ## Run
 
@@ -69,6 +70,7 @@ If you want on-demand bot replies, enable [`.github/workflows/telegram-commands.
   - `/update`
   - `/sentiment`
   - `/consensus`
+  - `/signals`
   - `/hip3`
   - `/positions`
   - `/ranks`

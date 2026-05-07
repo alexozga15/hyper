@@ -38,6 +38,9 @@ HEX_ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 MAX_IMPORT_BATCH = 100
 MAX_DISCOVERY_BATCH = 60
 DEFAULT_CONSENSUS_THRESHOLD = 3
+HIGH_CONVICTION_SIGNAL_THRESHOLD = 80.0
+EXTREME_CONVICTION_SIGNAL_THRESHOLD = 90.0
+SIGNAL_CONVICTION_ALERT_MIN_DELTA = 10.0
 MIN_POSITION_MESSAGE_VALUE = 500_000
 MIN_POSITION_MESSAGE_WALLETS = 2
 NEW_POSITION_ALERT_MIN_VALUE = MIN_POSITION_MESSAGE_VALUE
@@ -196,6 +199,15 @@ def classify_profitability(realized_pnl: float) -> str:
         if realized_pnl >= floor:
             return label
     return "Rekt"
+
+
+def signal_action_from_side(side: str) -> str:
+    normalized = str(side or "").lower()
+    if normalized == "long":
+        return "buy"
+    if normalized == "short":
+        return "sell"
+    return "watch"
 
 
 def build_wallet_quality_rank(hit_rate: float, closed_trade_count: int, pnl_7d: float, account_value: float) -> dict[str, Any]:
@@ -920,11 +932,14 @@ class WalletTrackerService:
             reverse=True,
         )
 
+        sentiment = self.build_sentiment_summary(snapshots, DEFAULT_CONSENSUS_THRESHOLD)
+
         return {
             "generatedAt": now_iso(),
             "markets": self.client.list_markets()[:30],
             "totals": totals,
             "segments": segments,
+            "sentiment": sentiment,
             "wallets": snapshots,
             "savedWallets": [wallet.to_dict() for wallet in wallets],
         }
@@ -1057,6 +1072,44 @@ class WalletTrackerService:
         save_json_file(self.alerts_path, {"config": config, "state": state})
         return self.get_alert_settings()
 
+    def build_high_conviction_signals(
+        self,
+        consensus: list[dict[str, Any]],
+        *,
+        threshold: float = HIGH_CONVICTION_SIGNAL_THRESHOLD,
+    ) -> list[dict[str, Any]]:
+        signals = []
+        for item in consensus:
+            conviction_score = to_float(item.get("convictionScore"))
+            if conviction_score < threshold:
+                continue
+            side = str(item.get("side") or "").lower()
+            action = signal_action_from_side(side)
+            strength = "extreme" if conviction_score >= EXTREME_CONVICTION_SIGNAL_THRESHOLD else "high"
+            signals.append(
+                {
+                    "coin": item.get("coin", "Unknown"),
+                    "side": side,
+                    "action": action,
+                    "strength": strength,
+                    "walletCount": int(to_float(item.get("walletCount"))),
+                    "totalValue": round(to_float(item.get("totalValue")), 2),
+                    "convictionScore": round(conviction_score, 1),
+                    "threshold": round(to_float(threshold), 1),
+                    "wallets": item.get("wallets", [])[:5],
+                    "rationale": (
+                        f'{int(to_float(item.get("walletCount")))} wallets are {side} '
+                        f'with {format_money_compact(to_float(item.get("totalValue")))} notional '
+                        f'and {conviction_score:.0f}/100 conviction.'
+                    ),
+                }
+            )
+        return sorted(
+            signals,
+            key=lambda item: (item["convictionScore"], item["walletCount"], item["totalValue"]),
+            reverse=True,
+        )
+
     def build_sentiment_summary(self, snapshots: list[dict[str, Any]], min_wallets: int) -> dict[str, Any]:
         aggregate: dict[tuple[str, str], dict[str, Any]] = {}
         total_long = 0.0
@@ -1111,6 +1164,7 @@ class WalletTrackerService:
             reverse=True,
         )
         hip3_consensus = [item for item in consensus if str(item.get("coin", "")).startswith("@")]
+        signals = self.build_high_conviction_signals(consensus)
 
         overall_bias = "mixed"
         if total_long > total_short * 1.2:
@@ -1123,6 +1177,8 @@ class WalletTrackerService:
             "overallBias": overall_bias,
             "consensus": consensus,
             "hip3Consensus": hip3_consensus,
+            "signals": signals,
+            "signalCount": len(signals),
             "longExposure": round(total_long, 2),
             "shortExposure": round(total_short, 2),
             "walletCount": len(snapshots),
@@ -1237,6 +1293,62 @@ class WalletTrackerService:
             "newLargePositions": new_large_positions,
             "increasedLargePositions": increased_large_positions,
             "closedLargePositions": closed_large_positions,
+            "addedSignals": [],
+            "removedSignals": [],
+            "changedSignals": [],
+        }
+
+    def signal_key(self, signal: dict[str, Any]) -> str:
+        return f'{signal.get("coin", "Unknown")}:{signal.get("side", "")}'
+
+    def filter_signals_for_alerts(self, signals: list[dict[str, Any]], track_hip3: bool) -> list[dict[str, Any]]:
+        if track_hip3:
+            return signals
+        return [signal for signal in signals if not str(signal.get("coin", "")).startswith("@")]
+
+    def summarize_signal_changes(
+        self,
+        previous: dict[str, Any],
+        current: dict[str, Any],
+        track_hip3: bool,
+    ) -> dict[str, list[dict[str, Any]]]:
+        previous_signals = {
+            self.signal_key(item): item
+            for item in self.filter_signals_for_alerts(previous.get("signals", []), track_hip3)
+        }
+        current_signals = {
+            self.signal_key(item): item
+            for item in self.filter_signals_for_alerts(current.get("signals", []), track_hip3)
+        }
+
+        added = [current_signals[key] for key in current_signals.keys() - previous_signals.keys()]
+        removed = [previous_signals[key] for key in previous_signals.keys() - current_signals.keys()]
+        changed = []
+        for key in current_signals.keys() & previous_signals.keys():
+            old_item = previous_signals[key]
+            new_item = current_signals[key]
+            old_score = to_float(old_item.get("convictionScore"))
+            new_score = to_float(new_item.get("convictionScore"))
+            score_delta = new_score - old_score
+            old_wallet_count = int(to_float(old_item.get("walletCount")))
+            new_wallet_count = int(to_float(new_item.get("walletCount")))
+            if abs(score_delta) < SIGNAL_CONVICTION_ALERT_MIN_DELTA and old_wallet_count == new_wallet_count:
+                continue
+            changed.append(
+                {
+                    **new_item,
+                    "fromConvictionScore": round(old_score, 1),
+                    "toConvictionScore": round(new_score, 1),
+                    "convictionDelta": round(score_delta, 1),
+                    "fromWalletCount": old_wallet_count,
+                    "toWalletCount": new_wallet_count,
+                }
+            )
+
+        return {
+            "addedSignals": sorted(added, key=lambda item: (item["convictionScore"], item["walletCount"]), reverse=True),
+            "removedSignals": sorted(removed, key=lambda item: (item["convictionScore"], item["walletCount"]), reverse=True),
+            "changedSignals": sorted(changed, key=lambda item: (abs(item["convictionDelta"]), item["toWalletCount"]), reverse=True),
         }
 
     def summarize_changes(self, previous: dict[str, Any], current: dict[str, Any], track_hip3: bool) -> dict[str, Any]:
@@ -1284,6 +1396,8 @@ class WalletTrackerService:
             hip3_added = [current_hip3[key] for key in current_hip3.keys() - previous_hip3.keys()]
             hip3_removed = [previous_hip3[key] for key in previous_hip3.keys() - current_hip3.keys()]
 
+        signal_changes = self.summarize_signal_changes(previous, current, track_hip3)
+
         return {
             "biasChanged": previous.get("overallBias") != current.get("overallBias"),
             "addedConsensus": sorted(added, key=lambda item: (item["walletCount"], item["totalValue"]), reverse=True),
@@ -1291,6 +1405,7 @@ class WalletTrackerService:
             "changedConsensus": sorted(changed, key=lambda item: (item["toWalletCount"], item["coin"]), reverse=True),
             "hip3Added": hip3_added,
             "hip3Removed": hip3_removed,
+            **signal_changes,
         }
 
     def build_telegram_message(self, changes: dict[str, Any], summary: dict[str, Any], min_wallets: int) -> str:
@@ -1319,6 +1434,28 @@ class WalletTrackerService:
             lines.append("Consensus gone")
             for item in changes["removedConsensus"][:10]:
                 lines.append(f'- {item["coin"]} {item["side"]}')
+
+        if changes["addedSignals"]:
+            lines.append("")
+            lines.append("High-conviction signals")
+            for item in changes["addedSignals"][:10]:
+                lines.append(
+                    f'- {str(item.get("action", "watch")).upper()} {item["coin"]}: {item["walletCount"]}w, {format_money_compact(item["totalValue"])}, c{to_float(item.get("convictionScore")):.0f}'
+                )
+
+        if changes["changedSignals"]:
+            lines.append("")
+            lines.append("Signal conviction changed")
+            for item in changes["changedSignals"][:10]:
+                lines.append(
+                    f'- {str(item.get("action", "watch")).upper()} {item["coin"]}: c{to_float(item.get("fromConvictionScore")):.0f}->c{to_float(item.get("toConvictionScore")):.0f}, {item.get("fromWalletCount", 0)}->{item.get("toWalletCount", 0)}w'
+                )
+
+        if changes["removedSignals"]:
+            lines.append("")
+            lines.append("Signals cooled")
+            for item in changes["removedSignals"][:10]:
+                lines.append(f'- {str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]}')
 
         if changes["newLargePositions"]:
             lines.append("")
@@ -1372,13 +1509,28 @@ class WalletTrackerService:
         title: str = "Current wallet sentiment",
         include_consensus: bool = True,
         include_hip3: bool = False,
+        include_signals: bool = True,
     ) -> str:
         lines = [
             title,
             f"Bias: {summary.get('overallBias', 'mixed')}",
             f"Consensus threshold: {min_wallets} wallets",
             f'Wallets tracked: {summary.get("walletCount", 0)}',
+            f'High-conviction signals: {summary.get("signalCount", len(summary.get("signals", [])))}',
         ]
+
+        if include_signals:
+            signals = summary.get("signals", [])
+            lines.append("")
+            lines.append("Signals:")
+            if signals:
+                for item in signals[:10]:
+                    lines.append(
+                        f'- {str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]} '
+                        f'({item["walletCount"]} wallets, {format_money_compact(item["totalValue"])}, conviction {to_float(item.get("convictionScore")):.0f}/100)'
+                    )
+            else:
+                lines.append(f'- None at {HIGH_CONVICTION_SIGNAL_THRESHOLD:.0f}+ conviction')
 
         if include_consensus:
             consensus = summary.get("consensus", [])
@@ -1489,6 +1641,21 @@ class WalletTrackerService:
             reverse=True,
         )
 
+    def build_signals_message(self, summary: dict[str, Any], *, title: str = "High-conviction signals") -> str:
+        signals = summary.get("signals", [])
+        lines = [title, f'Threshold: {HIGH_CONVICTION_SIGNAL_THRESHOLD:.0f}/100 conviction']
+        if signals:
+            for index, item in enumerate(signals[:20], start=1):
+                lines.append(
+                    f'{index}. {str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]} '
+                    f'({item["walletCount"]} wallets, {format_money_compact(item["totalValue"])}, conviction {to_float(item.get("convictionScore")):.0f}/100)'
+                )
+        else:
+            lines.append("- No high-conviction signals right now")
+        lines.append("")
+        lines.append(f'Checked at: {summary.get("generatedAt", now_iso())}')
+        return "\n".join(lines)
+
     def build_positions_message(self, dashboard: dict[str, Any], *, title: str = "Open positions now") -> str:
         lines = [title]
         position_groups = self.build_position_groups(
@@ -1580,6 +1747,7 @@ class WalletTrackerService:
         return "\n\n".join(
             [
                 self.build_summary_message(summary, min_wallets, title="Hourly wallet update"),
+                self.build_signals_message(summary),
                 self.build_wallet_rankings_message(dashboard, limit=5),
                 self.build_positions_message(dashboard),
             ]
@@ -1658,6 +1826,9 @@ class WalletTrackerService:
                 changes["addedConsensus"],
                 changes["removedConsensus"],
                 changes["changedConsensus"],
+                changes["addedSignals"],
+                changes["removedSignals"],
+                changes["changedSignals"],
                 changes["newLargePositions"],
                 changes["increasedLargePositions"],
                 changes["closedLargePositions"],
