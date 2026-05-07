@@ -379,7 +379,7 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_positions_message(dashboard)
         self.assertIn("Open positions now", message)
-        self.assertIn("By position (>= $500,000):", message)
+        self.assertIn("By position (>= $500,000, 2+ wallets):", message)
         self.assertIn("BTC long (2 wallets, 2 positions, $550K, size 7, entry $78,286)", message)
         self.assertNotIn("ETH short", message)
         self.assertIn("Position groups: 1", message)
@@ -434,7 +434,7 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_positions_message(dashboard)
         self.assertIn("OIL long (2 wallets, 2 positions, $1,996K)", message)
-        self.assertIn("OIL short (1 wallets, 1 positions, $573K)", message)
+        self.assertNotIn("OIL short", message)
 
     def test_build_positions_message_filters_commodities_below_threshold(self) -> None:
         dashboard = {
@@ -497,7 +497,12 @@ class AlertSummaryTests(unittest.TestCase):
                     "alias": "main-1",
                     "address": "0x1111111111111111111111111111111111111111",
                     "positions": [{"coin": "BTC", "side": "Long", "positionValue": 550000.0}],
-                }
+                },
+                {
+                    "alias": "main-2",
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 550000.0}],
+                },
             ],
         }
 
@@ -514,22 +519,30 @@ class AlertSummaryTests(unittest.TestCase):
                     "alias": "main-1",
                     "address": "0x1111111111111111111111111111111111111111",
                     "positions": [
-                        {"coin": "CL", "side": "Long", "positionValue": 623450.0},
-                        {"coin": "SP500", "side": "Long", "positionValue": 590950.0},
+                        {"coin": "CL", "side": "Long", "positionValue": 323450.0},
+                        {"coin": "SP500", "side": "Long", "positionValue": 290950.0},
                         {"coin": "XYZ100", "side": "Long", "positionValue": 914001.24},
                         {"coin": "SILVER", "side": "Short", "positionValue": 576938.0},
                     ],
-                }
+                },
+                {
+                    "alias": "main-2",
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "positions": [
+                        {"coin": "CL", "side": "Long", "positionValue": 300000.0},
+                        {"coin": "SP500", "side": "Long", "positionValue": 300000.0},
+                    ],
+                },
             ],
         }
 
         message = self.service.build_positions_message(dashboard)
         self.assertIn("Commodities:", message)
-        self.assertIn("OIL long (1 wallets, 1 positions, $623K)", message)
-        self.assertIn("SILVER short (1 wallets, 1 positions, $577K)", message)
+        self.assertIn("OIL long (2 wallets, 2 positions, $623K)", message)
+        self.assertNotIn("SILVER short", message)
         self.assertIn("Stocks / indices:", message)
-        self.assertIn("XYZ100 long (1 wallets, 1 positions, $914K)", message)
-        self.assertIn("SP500 long (1 wallets, 1 positions, $591K)", message)
+        self.assertNotIn("XYZ100 long", message)
+        self.assertIn("SP500 long (2 wallets, 2 positions, $591K)", message)
 
     def test_check_alerts_ignores_hip3_only_changes(self) -> None:
         previous_summary = {
