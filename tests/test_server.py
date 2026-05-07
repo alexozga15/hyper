@@ -503,6 +503,47 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("2. High WR Losing: Weak", message)
         self.assertNotIn("Lucky Small Sample", message)
 
+    def test_build_elite_wallet_positions_message_lists_only_elite_wallet_positions(self) -> None:
+        dashboard = {
+            "generatedAt": "2026-05-07T08:00:00Z",
+            "wallets": [
+                {
+                    "alias": "Elite Trader",
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "accountValue": 100_000.0,
+                    "totalNotional": 1_250_000.0,
+                    "recentWinRateRank": build_wallet_quality_rank(90.0, 20, 30_000.0, 100_000.0),
+                    "positions": [
+                        {
+                            "coin": "BTC",
+                            "side": "Long",
+                            "positionValue": 1_000_000.0,
+                            "size": 10.0,
+                            "entryPx": 100_000.0,
+                            "unrealizedPnl": 12_345.0,
+                        },
+                        {"coin": "ETH", "side": "Short", "positionValue": 250_000.0},
+                    ],
+                },
+                {
+                    "alias": "Strong Trader",
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "accountValue": 100_000.0,
+                    "totalNotional": 2_000_000.0,
+                    "recentWinRateRank": build_wallet_quality_rank(70.0, 20, 25_000.0, 100_000.0),
+                    "positions": [{"coin": "SOL", "side": "Long", "positionValue": 2_000_000.0}],
+                },
+            ],
+        }
+
+        message = self.service.build_elite_wallet_positions_message(dashboard)
+
+        self.assertIn("Elite wallet positions", message)
+        self.assertIn("Elite Trader (86.0/100", message)
+        self.assertIn("- BTC long $1,000K, size 10, entry $100,000, uPnL $12,345", message)
+        self.assertIn("- ETH short $250K", message)
+        self.assertNotIn("Strong Trader", message)
+
     def test_build_positions_message_lists_all_open_positions(self) -> None:
         dashboard = {
             "generatedAt": "2026-04-09T06:00:00Z",
@@ -832,6 +873,8 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertTrue(result["sent"])
         self.assertTrue(result["positionAlertSent"])
         self.assertEqual(send_telegram_message.call_count, 2)
+        hourly_message = send_telegram_message.call_args_list[0].args[2]
+        self.assertNotIn("Wallet ranks by 7D hit rate + PnL", hourly_message)
         alert_message = send_telegram_message.call_args_list[1].args[2]
         self.assertIn("Open >$500K", alert_message)
         self.assertIn("Trader One: BTC long $808K", alert_message)

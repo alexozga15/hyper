@@ -74,6 +74,7 @@ If you want on-demand bot replies, enable [`.github/workflows/telegram-commands.
   - `/hip3`
   - `/positions`
   - `/ranks`
+  - `/elite`
   - `/help`
 
 For near-real-time replies, deploy the Cloudflare Worker bridge in [`worker/`](worker/) and connect Telegram webhooks to it. The worker triggers `repository_dispatch` with the full Telegram update so the workflow runs right away when you message the bot.

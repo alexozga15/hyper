@@ -1792,12 +1792,69 @@ class WalletTrackerService:
         lines.append(f'Checked at: {dashboard.get("generatedAt", now_iso())}')
         return "\n".join(lines)
 
+    def build_elite_wallet_positions_message(self, dashboard: dict[str, Any]) -> str:
+        elite_wallets = sorted(
+            [
+                wallet
+                for wallet in dashboard.get("wallets", [])
+                if str(wallet.get("recentWinRateRank", {}).get("label") or "") == "Elite"
+            ],
+            key=lambda wallet: (
+                to_float(wallet.get("recentWinRateRank", {}).get("score")),
+                abs(to_float(wallet.get("totalNotional"))),
+                to_float(wallet.get("accountValue")),
+            ),
+            reverse=True,
+        )
+
+        lines = ["Elite wallet positions"]
+        if not elite_wallets:
+            lines.append("- No Elite-ranked wallets right now")
+            lines.append("")
+            lines.append(f'Checked at: {dashboard.get("generatedAt", now_iso())}')
+            return "\n".join(lines)
+
+        for wallet in elite_wallets:
+            rank = wallet.get("recentWinRateRank", {})
+            positions = sorted(
+                wallet.get("positions", []),
+                key=lambda item: abs(to_float(item.get("positionValue"))),
+                reverse=True,
+            )
+            lines.append("")
+            lines.append(
+                f'{wallet_label(wallet.get("alias", ""), wallet.get("address", ""))} '
+                f'({to_float(rank.get("score")):.1f}/100, {to_float(rank.get("winRate")):.1f}% 7D WR, '
+                f'{int(rank.get("sampleSize") or 0)} closes)'
+            )
+            if not positions:
+                lines.append("- No open positions")
+                continue
+            for position in positions:
+                size_note = ""
+                if to_float(position.get("size")):
+                    size_note = f', size {format_position_size(abs(to_float(position.get("size"))))}'
+                entry_note = ""
+                if to_float(position.get("entryPx")) > 0:
+                    entry_note = f', entry ${format_price(to_float(position.get("entryPx")))}'
+                pnl_note = ""
+                if to_float(position.get("unrealizedPnl")):
+                    pnl_note = f', uPnL ${to_float(position.get("unrealizedPnl")):,.0f}'
+                lines.append(
+                    f'- {position.get("coin", "Unknown")} {str(position.get("side", "")).lower()} '
+                    f'{format_money_thousands(to_float(position.get("positionValue")))}{size_note}{entry_note}{pnl_note}'
+                )
+
+        lines.append("")
+        lines.append(f"Elite wallets: {len(elite_wallets)}")
+        lines.append(f'Checked at: {dashboard.get("generatedAt", now_iso())}')
+        return "\n".join(lines)
+
     def build_hourly_update_message(self, dashboard: dict[str, Any], summary: dict[str, Any], min_wallets: int) -> str:
         return "\n\n".join(
             [
                 self.build_summary_message(summary, min_wallets, title="Hourly wallet update"),
                 self.build_signals_message(summary),
-                self.build_wallet_rankings_message(dashboard, limit=5),
                 self.build_positions_message(dashboard),
             ]
         )
