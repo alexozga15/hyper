@@ -720,6 +720,9 @@ class WalletTrackerService:
         return periods
 
     def fetch_wallet_snapshot(self, wallet: TrackedWallet) -> dict[str, Any]:
+        now_ms = current_time_ms()
+        cutoff_7d_ms = now_ms - RANKING_WINDOW_MS
+        cutoff_30d_ms = now_ms - HOLDING_ONLY_WINDOW_MS
         with ThreadPoolExecutor(max_workers=5) as executor:
             futures = {
                 "state": executor.submit(
@@ -737,7 +740,12 @@ class WalletTrackerService:
                 "orders": executor.submit(self.client.safe_post, {"type": "openOrders", "user": wallet.address}, []),
                 "fills": executor.submit(
                     self.client.safe_post,
-                    {"type": "userFills", "user": wallet.address, "aggregateByTime": True},
+                    {
+                        "type": "userFillsByTime",
+                        "user": wallet.address,
+                        "startTime": cutoff_30d_ms,
+                        "aggregateByTime": True,
+                    },
                     [],
                 ),
                 "role": executor.submit(self.fetch_wallet_role, wallet.address),
@@ -790,8 +798,6 @@ class WalletTrackerService:
         loss_count = 0
         fills_30d_count = 0
         last_fill_time = 0
-        cutoff_7d_ms = current_time_ms() - RANKING_WINDOW_MS
-        cutoff_30d_ms = current_time_ms() - HOLDING_ONLY_WINDOW_MS
         for fill in fills:
             closed_pnl = to_float(fill.get("closedPnl"))
             fill_time = int(to_float(fill.get("time")))
@@ -845,7 +851,7 @@ class WalletTrackerService:
         holding_only_30d = bool(positions) and fills_30d_count == 0 and len(open_orders) == 0
         days_since_last_fill = None
         if last_fill_time:
-            days_since_last_fill = round(max(0, current_time_ms() - last_fill_time) / (24 * 60 * 60 * 1000), 1)
+            days_since_last_fill = round(max(0, now_ms - last_fill_time) / (24 * 60 * 60 * 1000), 1)
         discovery_score = account_value + (abs(total_notional) * 0.2) + max(all_time_realized, 0.0)
         recent_win_rate_rank = build_wallet_quality_rank(
             hit_rate,
