@@ -140,8 +140,7 @@ def build_reply(
     if command == "/update":
         return "\n\n".join(
             [
-                service.build_summary_message(summary_cache, min_wallets),
-                service.build_signals_message(summary_cache),
+                service.build_summary_message(summary_cache, min_wallets, include_signals=False),
                 service.build_positions_message(dashboard_cache),
             ]
         )

@@ -1695,8 +1695,9 @@ class WalletTrackerService:
             f"Bias: {summary.get('overallBias', 'mixed')}",
             f"Consensus threshold: {min_wallets} wallets",
             f'Wallets tracked: {summary.get("walletCount", 0)}',
-            f'High-conviction signals: {summary.get("signalCount", len(summary.get("signals", [])))}',
         ]
+        if include_signals:
+            lines.append(f'High-conviction signals: {summary.get("signalCount", len(summary.get("signals", [])))}')
 
         if include_signals:
             signals = summary.get("signals", [])
@@ -1986,8 +1987,7 @@ class WalletTrackerService:
     def build_hourly_update_message(self, dashboard: dict[str, Any], summary: dict[str, Any], min_wallets: int) -> str:
         return "\n\n".join(
             [
-                self.build_summary_message(summary, min_wallets, title="Hourly wallet update"),
-                self.build_signals_message(summary),
+                self.build_summary_message(summary, min_wallets, title="Hourly wallet update", include_signals=False),
                 self.build_positions_message(dashboard),
             ]
         )

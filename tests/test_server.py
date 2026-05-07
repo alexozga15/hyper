@@ -925,6 +925,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(send_telegram_message.call_count, 2)
         hourly_message = send_telegram_message.call_args_list[0].args[2]
         self.assertNotIn("Wallet ranks by 7D hit rate + PnL", hourly_message)
+        self.assertNotIn("High-conviction signals", hourly_message)
         alert_message = send_telegram_message.call_args_list[1].args[2]
         self.assertIn("Open >$500K", alert_message)
         self.assertIn("Trader One: BTC long $808K", alert_message)
