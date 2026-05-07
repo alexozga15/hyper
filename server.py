@@ -1426,6 +1426,7 @@ class WalletTrackerService:
             previous_size = to_float(previous_item.get("totalSize"))
             current_size = to_float(current_item.get("totalSize"))
             size_increase = current_size - previous_size
+            current_price = (current_value / current_size) if current_size > 0 else 0.0
             has_size_baseline = previous_size > 0 or current_size > 0
             is_size_add = has_size_baseline and size_increase > 0 and increase_value >= POSITION_INCREASE_ALERT_MIN_DELTA
             is_legacy_value_jump = (
@@ -1443,7 +1444,7 @@ class WalletTrackerService:
                     "increasePct": round(increase_pct, 4),
                     "previousSize": round(previous_size, 8),
                     "sizeIncrease": round(size_increase, 8),
-                    "addPrice": round(increase_value / size_increase, 8) if size_increase > 0 else 0.0,
+                    "addPrice": round(current_price, 8) if size_increase > 0 else 0.0,
                 }
             )
         return (

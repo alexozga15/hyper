@@ -1047,7 +1047,7 @@ class AlertSummaryTests(unittest.TestCase):
                 "alias": "wallet",
                 "coin": "BTC",
                 "side": "long",
-                "totalValue": 8800000.0,
+                "totalValue": 9900000.0,
                 "totalSize": 110.0,
             }
         }
@@ -1057,7 +1057,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(added, [])
         self.assertEqual(len(increased), 1)
         self.assertEqual(increased[0]["sizeIncrease"], 10.0)
-        self.assertEqual(increased[0]["addPrice"], 80000.0)
+        self.assertEqual(increased[0]["addPrice"], 90000.0)
         self.assertEqual(closed, [])
 
     def test_large_position_increases_ignore_small_drift(self) -> None:
