@@ -52,6 +52,10 @@ RANKING_MIN_7D_CLOSED_TRADES = 5
 RANKING_FULL_CONFIDENCE_7D_CLOSED_TRADES = 20
 RANKING_MIN_30D_CLOSED_TRADES = 20
 RANKING_FULL_CONFIDENCE_30D_CLOSED_TRADES = 30
+ELITE_MIN_QUALITY_SCORE = 65.0
+ELITE_MIN_PROFIT_FACTOR = 1.5
+ELITE_MAX_DRAWDOWN_PCT = 35.0
+ELITE_MAX_MARGIN_USAGE_PCT = 70.0
 RANKING_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 HOLDING_ONLY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
 OIL_POSITION_ALIASES = {"flx:OIL", "cash:WTI", "xyz:BRENTOIL", "xyz:CL"}
@@ -277,14 +281,14 @@ def build_wallet_quality_rank(
 
     elite_eligible = (
         sample_size_30d >= RANKING_MIN_30D_CLOSED_TRADES
-        and profit_factor >= 1.5
-        and to_float(max_drawdown_pct) <= 20.0
-        and to_float(margin_usage_pct) <= 60.0
+        and profit_factor >= ELITE_MIN_PROFIT_FACTOR
+        and to_float(max_drawdown_pct) <= ELITE_MAX_DRAWDOWN_PCT
+        and to_float(margin_usage_pct) <= ELITE_MAX_MARGIN_USAGE_PCT
     )
 
     if sample_size_7d < RANKING_MIN_7D_CLOSED_TRADES and sample_size_30d < RANKING_MIN_30D_CLOSED_TRADES:
         label = "Unranked"
-    elif score >= 80 and elite_eligible:
+    elif score >= ELITE_MIN_QUALITY_SCORE and elite_eligible:
         label = "Elite"
     elif score >= 65:
         label = "Strong"

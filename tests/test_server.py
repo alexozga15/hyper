@@ -62,7 +62,7 @@ class SegmentTests(unittest.TestCase):
             pnl_30d=40_000,
             gross_profit_30d=60_000,
             gross_loss_30d=10_000,
-            max_drawdown_pct=25,
+            max_drawdown_pct=40,
             margin_usage_pct=25,
             unrealized_pnl=5_000,
         )
