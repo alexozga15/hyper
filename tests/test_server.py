@@ -238,6 +238,110 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(summary["consensus"][0]["convictionScore"], 100.0)
         self.assertGreater(summary["consensus"][0]["convictionScore"], summary["consensus"][1]["convictionScore"])
 
+    def test_build_sentiment_summary_emits_high_conviction_signals(self) -> None:
+        snapshots = [
+            {
+                "address": "0x1111111111111111111111111111111111111111",
+                "alias": "One",
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 500000}],
+            },
+            {
+                "address": "0x2222222222222222222222222222222222222222",
+                "alias": "Two",
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 400000}],
+            },
+            {
+                "address": "0x3333333333333333333333333333333333333333",
+                "alias": "Three",
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 300000}],
+            },
+            {
+                "address": "0x4444444444444444444444444444444444444444",
+                "alias": "Four",
+                "positions": [{"coin": "ETH", "side": "Short", "positionValue": 100000}],
+            },
+            {
+                "address": "0x5555555555555555555555555555555555555555",
+                "alias": "Five",
+                "positions": [{"coin": "ETH", "side": "Short", "positionValue": 100000}],
+            },
+        ]
+
+        summary = self.service.build_sentiment_summary(snapshots, min_wallets=2)
+
+        self.assertEqual(summary["signalCount"], 1)
+        self.assertEqual(summary["signals"][0]["coin"], "BTC")
+        self.assertEqual(summary["signals"][0]["action"], "buy")
+        self.assertEqual(summary["signals"][0]["strength"], "extreme")
+        self.assertEqual(summary["signals"][0]["convictionScore"], 100.0)
+
+    def test_summarize_changes_detects_signal_changes(self) -> None:
+        previous = {
+            "overallBias": "mixed",
+            "consensus": [],
+            "hip3Consensus": [],
+            "signals": [
+                {
+                    "coin": "BTC",
+                    "side": "long",
+                    "action": "buy",
+                    "walletCount": 3,
+                    "totalValue": 1_000_000.0,
+                    "convictionScore": 82.0,
+                }
+            ],
+        }
+        current = {
+            "overallBias": "mixed",
+            "consensus": [],
+            "hip3Consensus": [],
+            "signals": [
+                {
+                    "coin": "BTC",
+                    "side": "long",
+                    "action": "buy",
+                    "walletCount": 5,
+                    "totalValue": 2_000_000.0,
+                    "convictionScore": 95.0,
+                },
+                {
+                    "coin": "ETH",
+                    "side": "short",
+                    "action": "sell",
+                    "walletCount": 4,
+                    "totalValue": 1_500_000.0,
+                    "convictionScore": 91.0,
+                },
+            ],
+        }
+
+        changes = self.service.summarize_changes(previous, current, track_hip3=False)
+
+        self.assertEqual(changes["addedSignals"][0]["coin"], "ETH")
+        self.assertEqual(changes["changedSignals"][0]["coin"], "BTC")
+        self.assertEqual(changes["changedSignals"][0]["fromConvictionScore"], 82.0)
+        self.assertEqual(changes["changedSignals"][0]["toConvictionScore"], 95.0)
+
+    def test_build_signals_message_formats_signal_actions(self) -> None:
+        summary = {
+            "generatedAt": "2026-05-07T00:00:00Z",
+            "signals": [
+                {
+                    "coin": "BTC",
+                    "side": "long",
+                    "action": "buy",
+                    "walletCount": 3,
+                    "totalValue": 1_250_000.0,
+                    "convictionScore": 94.0,
+                }
+            ],
+        }
+
+        message = self.service.build_signals_message(summary)
+
+        self.assertIn("High-conviction signals", message)
+        self.assertIn("1. BUY BTC long (3 wallets, $1.2M, conviction 94/100)", message)
+
     def test_build_sentiment_summary_groups_oil_aliases(self) -> None:
         snapshots = [
             {

@@ -107,6 +107,7 @@ function renderStats() {
     ["Realized PnL", formatMoney(totals.combinedRealizedPnl)],
     ["Unrealized PnL", formatMoney(totals.combinedUnrealizedPnl)],
     ["Money Printers", totals.moneyPrinterWallets],
+    ["Signals", state.dashboard.sentiment?.signalCount || 0],
   ];
   root.innerHTML = cards
     .map(
@@ -114,6 +115,35 @@ function renderStats() {
         <article class="stat-card">
           <span>${label}</span>
           <strong>${value}</strong>
+        </article>
+      `
+    )
+    .join("");
+}
+
+function renderSignals() {
+  const root = document.getElementById("signals-list");
+  const signals = state.dashboard?.sentiment?.signals || [];
+  if (!signals.length) {
+    root.className = "signal-grid empty-state";
+    root.textContent = "No high-conviction signals yet. Add wallets or refresh when conviction improves.";
+    return;
+  }
+  root.className = "signal-grid";
+  root.innerHTML = signals
+    .slice(0, 6)
+    .map(
+      (signal) => `
+        <article class="signal-card ${signal.action === "sell" ? "short" : "long"}">
+          <div>
+            <span>${signal.strength} conviction</span>
+            <strong>${String(signal.action || "watch").toUpperCase()} ${signal.coin}</strong>
+          </div>
+          <p>${signal.side} from ${signal.walletCount} wallets with ${formatCompactMoney(signal.totalValue)} notional.</p>
+          <div class="signal-meter">
+            <span style="width: ${Math.min(Number(signal.convictionScore || 0), 100)}%"></span>
+          </div>
+          <small>${percentFormatter.format(signal.convictionScore || 0)}/100 conviction</small>
         </article>
       `
     )
@@ -510,6 +540,7 @@ async function refreshDashboard(showMessage = true) {
     state.dashboard = await request("/api/dashboard");
     document.getElementById("last-updated").textContent = formatDate(state.dashboard.generatedAt);
     renderStats();
+    renderSignals();
     renderSegments();
     renderSavedWallets();
     renderWalletTable();
