@@ -4,6 +4,7 @@ from pathlib import Path
 
 from server import (
     ALERTS_FILE,
+    ELITE_WALLET_OVERRIDES,
     HyperliquidClient,
     WalletStore,
     WalletTrackerService,
@@ -102,6 +103,9 @@ class SegmentTests(unittest.TestCase):
 class AlertSummaryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.service = WalletTrackerService(WalletStore(Path(ALERTS_FILE)), HyperliquidClient())
+
+    def test_elite_override_wallet_is_configured(self) -> None:
+        self.assertIn("0xc9e839a529d1a3a46e2b48d20c461d4afecb72e4", ELITE_WALLET_OVERRIDES)
 
     def test_build_sentiment_summary_respects_threshold_and_hip3(self) -> None:
         snapshots = [

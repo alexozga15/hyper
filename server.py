@@ -56,6 +56,7 @@ ELITE_MIN_QUALITY_SCORE = 65.0
 ELITE_MIN_PROFIT_FACTOR = 1.5
 ELITE_MAX_DRAWDOWN_PCT = 35.0
 ELITE_MAX_MARGIN_USAGE_PCT = 70.0
+ELITE_WALLET_OVERRIDES = {"0xc9e839a529d1a3a46e2b48d20c461d4afecb72e4"}
 RANKING_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 HOLDING_ONLY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
 OIL_POSITION_ALIASES = {"flx:OIL", "cash:WTI", "xyz:BRENTOIL", "xyz:CL"}
@@ -975,6 +976,13 @@ class WalletTrackerService:
             margin_usage_pct=margin_usage_pct,
             unrealized_pnl=unrealized_pnl,
         )
+        if wallet.address.lower() in ELITE_WALLET_OVERRIDES:
+            recent_win_rate_rank = {
+                **recent_win_rate_rank,
+                "label": "Elite",
+                "eliteOverride": True,
+                "eliteEligible": True,
+            }
 
         return {
             "address": wallet.address,
