@@ -879,7 +879,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(len(result["changes"]["closedLargePositions"]), 1)
         sent_message = send_telegram_message.call_args.args[2]
         self.assertIn("Closed >$500K", sent_message)
-        self.assertIn("Trader One: ETH short $900K sz 300", sent_message)
+        self.assertIn("Trader One: ETH short $900K sz 300 close ~$3,000", sent_message)
 
     def test_send_hourly_update_syncs_alert_baseline(self) -> None:
         summary = {

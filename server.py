@@ -1414,7 +1414,13 @@ class WalletTrackerService:
         previous_map = previous_positions if isinstance(previous_positions, dict) else {}
         current_map = current_positions if isinstance(current_positions, dict) else {}
         added = [current_map[key] for key in current_map.keys() - previous_map.keys()]
-        closed = [previous_map[key] for key in previous_map.keys() - current_map.keys()]
+        closed = []
+        for key in previous_map.keys() - current_map.keys():
+            item = dict(previous_map[key])
+            total_value = to_float(item.get("totalValue"))
+            total_size = to_float(item.get("totalSize"))
+            item["closePrice"] = round(total_value / total_size, 8) if total_size > 0 else 0.0
+            closed.append(item)
         increased = []
         for key in current_map.keys() & previous_map.keys():
             current_item = current_map[key]
@@ -1657,11 +1663,11 @@ class WalletTrackerService:
                 size_note = ""
                 if to_float(item.get("totalSize")) > 0:
                     size_note = f' sz {format_position_size(to_float(item.get("totalSize")))}'
-                entry_note = ""
-                if to_float(item.get("entryPx")) > 0:
-                    entry_note = f' @${format_price(to_float(item.get("entryPx")))}'
+                close_note = ""
+                if to_float(item.get("closePrice")) > 0:
+                    close_note = f' close ~${format_price(to_float(item.get("closePrice")))}'
                 lines.append(
-                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} {format_money_compact(item["totalValue"])}{size_note}{entry_note}'
+                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} {format_money_compact(item["totalValue"])}{size_note}{close_note}'
                 )
 
         if changes["increasedLargePositions"]:
