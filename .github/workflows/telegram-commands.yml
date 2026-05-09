@@ -5,7 +5,7 @@ on:
   repository_dispatch:
     types: [telegram_update]
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "*/5 * * * *"
 
 permissions:
   contents: write
