@@ -1276,23 +1276,24 @@ class WalletTrackerService:
                     "wallets": item.get("wallets", [])[:5],
                     "rationale": (
                         f'{int(to_float(item.get("walletCount")))} wallets are {side} '
-                        f'with {format_money_compact(to_float(item.get("totalValue")))} notional '
-                        f'and {conviction_score:.0f}/100 conviction.'
+                        f'with {conviction_score:.0f}/100 count-based conviction.'
                     ),
                 }
             )
         return sorted(
             signals,
-            key=lambda item: (item["convictionScore"], item["walletCount"], item["totalValue"]),
-            reverse=True,
+            key=lambda item: (-item["convictionScore"], -item["walletCount"], item["coin"], item["side"]),
         )
 
     def build_sentiment_summary(self, snapshots: list[dict[str, Any]], min_wallets: int) -> dict[str, Any]:
         aggregate: dict[tuple[str, str], dict[str, Any]] = {}
         total_long = 0.0
         total_short = 0.0
+        long_wallets: set[str] = set()
+        short_wallets: set[str] = set()
 
         for snapshot in snapshots:
+            address = str(snapshot.get("address") or "")
             for position in snapshot.get("positions", []):
                 coin = normalize_position_coin(position.get("coin"))
                 side = str(position.get("side") or "Flat").lower()
@@ -1303,26 +1304,41 @@ class WalletTrackerService:
                 key = (coin, side)
                 bucket = aggregate.setdefault(
                     key,
-                    {"coin": coin, "side": side, "walletCount": 0, "totalValue": 0.0, "wallets": []},
-                )
-                bucket["walletCount"] += 1
-                bucket["totalValue"] += position_value
-                bucket["wallets"].append(
                     {
-                        "address": snapshot["address"],
-                        "alias": snapshot.get("alias", ""),
-                        "value": round(position_value, 2),
-                    }
+                        "coin": coin,
+                        "side": side,
+                        "walletCount": 0,
+                        "totalValue": 0.0,
+                        "wallets": [],
+                        "walletAddresses": set(),
+                    },
                 )
+                bucket["totalValue"] += position_value
+                if address and address not in bucket["walletAddresses"]:
+                    bucket["walletAddresses"].add(address)
+                    bucket["walletCount"] += 1
+                    bucket["wallets"].append(
+                        {
+                            "address": address,
+                            "alias": snapshot.get("alias", ""),
+                            "value": round(position_value, 2),
+                        }
+                    )
 
                 if side == "long":
                     total_long += position_value
+                    if address:
+                        long_wallets.add(address)
                 else:
                     total_short += position_value
+                    if address:
+                        short_wallets.add(address)
 
         consensus = [
             {
-                **bucket,
+                "coin": bucket["coin"],
+                "side": bucket["side"],
+                "walletCount": bucket["walletCount"],
                 "totalValue": round(bucket["totalValue"], 2),
                 "wallets": sorted(bucket["wallets"], key=lambda item: item["value"], reverse=True),
             }
@@ -1330,23 +1346,22 @@ class WalletTrackerService:
             if bucket["walletCount"] >= min_wallets
         ]
         max_wallet_count = max((item["walletCount"] for item in consensus), default=0)
-        max_total_value = max((item["totalValue"] for item in consensus), default=0.0)
         for item in consensus:
             wallet_score = (item["walletCount"] / max_wallet_count) if max_wallet_count else 0.0
-            value_score = (item["totalValue"] / max_total_value) if max_total_value else 0.0
-            item["convictionScore"] = round(((wallet_score * 0.6) + (value_score * 0.4)) * 100, 1)
+            item["convictionScore"] = round(wallet_score * 100, 1)
         consensus = sorted(
             consensus,
-            key=lambda item: (item["convictionScore"], item["walletCount"], item["totalValue"]),
-            reverse=True,
+            key=lambda item: (-item["walletCount"], str(item.get("coin", "")).startswith("@"), item["coin"], item["side"]),
         )
         hip3_consensus = [item for item in consensus if str(item.get("coin", "")).startswith("@")]
         signals = self.build_high_conviction_signals(consensus)
 
         overall_bias = "mixed"
-        if total_long > total_short * 1.2:
+        long_wallet_count = len(long_wallets)
+        short_wallet_count = len(short_wallets)
+        if long_wallet_count > short_wallet_count * 1.2:
             overall_bias = "bullish"
-        elif total_short > total_long * 1.2:
+        elif short_wallet_count > long_wallet_count * 1.2:
             overall_bias = "bearish"
 
         return {
@@ -1358,6 +1373,8 @@ class WalletTrackerService:
             "signalCount": len(signals),
             "longExposure": round(total_long, 2),
             "shortExposure": round(total_short, 2),
+            "longWalletCount": long_wallet_count,
+            "shortWalletCount": short_wallet_count,
             "walletCount": len(snapshots),
         }
 
@@ -1603,7 +1620,7 @@ class WalletTrackerService:
             lines.append("New consensus")
             for item in changes["addedConsensus"][:10]:
                 lines.append(
-                    f'- {item["coin"]} {item["side"]}: {item["walletCount"]}w, {format_money_compact(item["totalValue"])}, c{item.get("convictionScore", 0):.0f}'
+                    f'- {item["coin"]} {item["side"]}: {item["walletCount"]}w, c{item.get("convictionScore", 0):.0f}'
                 )
 
         if changes["changedConsensus"]:
@@ -1619,28 +1636,6 @@ class WalletTrackerService:
             lines.append("Consensus gone")
             for item in changes["removedConsensus"][:10]:
                 lines.append(f'- {item["coin"]} {item["side"]}')
-
-        if changes["addedSignals"]:
-            lines.append("")
-            lines.append("High-conviction signals")
-            for item in changes["addedSignals"][:10]:
-                lines.append(
-                    f'- {str(item.get("action", "watch")).upper()} {item["coin"]}: {item["walletCount"]}w, {format_money_compact(item["totalValue"])}, c{to_float(item.get("convictionScore")):.0f}'
-                )
-
-        if changes["changedSignals"]:
-            lines.append("")
-            lines.append("Signal conviction changed")
-            for item in changes["changedSignals"][:10]:
-                lines.append(
-                    f'- {str(item.get("action", "watch")).upper()} {item["coin"]}: c{to_float(item.get("fromConvictionScore")):.0f}->c{to_float(item.get("toConvictionScore")):.0f}, {item.get("fromWalletCount", 0)}->{item.get("toWalletCount", 0)}w'
-                )
-
-        if changes["removedSignals"]:
-            lines.append("")
-            lines.append("Signals cooled")
-            for item in changes["removedSignals"][:10]:
-                lines.append(f'- {str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]}')
 
         if changes["newLargePositions"]:
             lines.append("")
@@ -1713,7 +1708,7 @@ class WalletTrackerService:
                 for item in signals[:10]:
                     lines.append(
                         f'- {str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]} '
-                        f'({item["walletCount"]} wallets, {format_money_compact(item["totalValue"])}, conviction {to_float(item.get("convictionScore")):.0f}/100)'
+                        f'({item["walletCount"]} wallets, conviction {to_float(item.get("convictionScore")):.0f}/100)'
                     )
             else:
                 lines.append(f'- None at {HIGH_CONVICTION_SIGNAL_THRESHOLD:.0f}+ conviction')
@@ -1725,7 +1720,7 @@ class WalletTrackerService:
             if consensus:
                 for item in consensus[:10]:
                     lines.append(
-                        f'- {item["coin"]} {item["side"]} ({item["walletCount"]} wallets, ${item["totalValue"]:,.0f}, conviction {item.get("convictionScore", 0):.0f}/100)'
+                        f'- {item["coin"]} {item["side"]} ({item["walletCount"]} wallets, conviction {item.get("convictionScore", 0):.0f}/100)'
                     )
             else:
                 lines.append("- None")
@@ -1737,7 +1732,7 @@ class WalletTrackerService:
             if hip3_consensus:
                 for item in hip3_consensus[:10]:
                     lines.append(
-                        f'- {item["coin"]} {item["side"]} ({item["walletCount"]} wallets, ${item["totalValue"]:,.0f})'
+                        f'- {item["coin"]} {item["side"]} ({item["walletCount"]} wallets)'
                     )
             else:
                 lines.append("- None")
@@ -1796,6 +1791,8 @@ class WalletTrackerService:
                         "totalValue": 0.0,
                         "totalSize": 0.0,
                         "entryValue": 0.0,
+                        "entrySum": 0.0,
+                        "entryCount": 0,
                         "walletAddresses": set(),
                     },
                 )
@@ -1808,6 +1805,10 @@ class WalletTrackerService:
                 if address and address not in bucket["walletAddresses"]:
                     bucket["walletAddresses"].add(address)
                     bucket["walletCount"] += 1
+                    entry_px = to_float(position.get("entryPx"))
+                    if entry_px > 0:
+                        bucket["entrySum"] += entry_px
+                        bucket["entryCount"] += 1
 
         return sorted(
             [
@@ -1818,13 +1819,12 @@ class WalletTrackerService:
                     "positionCount": item["positionCount"],
                     "totalValue": round(item["totalValue"], 2),
                     "totalSize": round(item["totalSize"], 8),
-                    "entryPx": round(item["entryValue"] / item["totalSize"], 8) if item["totalSize"] > 0 else 0.0,
+                    "entryPx": round(item["entrySum"] / item["entryCount"], 8) if item["entryCount"] > 0 else 0.0,
                 }
                 for item in groups.values()
-                if item["totalValue"] >= min_value and item["walletCount"] >= min_wallets
+                if item["walletCount"] >= min_wallets
             ],
-            key=lambda item: (item["walletCount"], item["totalValue"], item["coin"]),
-            reverse=True,
+            key=lambda item: (-item["walletCount"], item["coin"], item["side"]),
         )
 
     def build_signals_message(self, summary: dict[str, Any], *, title: str = "High-conviction signals") -> str:
@@ -1834,7 +1834,7 @@ class WalletTrackerService:
             for index, item in enumerate(signals[:20], start=1):
                 lines.append(
                     f'{index}. {str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]} '
-                    f'({item["walletCount"]} wallets, {format_money_compact(item["totalValue"])}, conviction {to_float(item.get("convictionScore")):.0f}/100)'
+                    f'({item["walletCount"]} wallets, conviction {to_float(item.get("convictionScore")):.0f}/100)'
                 )
         else:
             lines.append("- No high-conviction signals right now")
@@ -1865,7 +1865,7 @@ class WalletTrackerService:
         else:
             sections = [
                 (
-                    f"By position (>= ${MIN_POSITION_MESSAGE_VALUE:,.0f}, {MIN_POSITION_MESSAGE_WALLETS}+ wallets):",
+                    f"By wallet count ({MIN_POSITION_MESSAGE_WALLETS}+ wallets):",
                     position_groups,
                 ),
                 ("Commodities:", commodity_groups),
@@ -1876,15 +1876,12 @@ class WalletTrackerService:
                 lines.append(heading)
                 if groups:
                     for item in groups[:50]:
-                        size_note = ""
-                        if to_float(item.get("totalSize")) > 0:
-                            size_note = f', size {format_position_size(to_float(item.get("totalSize")))}'
                         entry_note = ""
                         if to_float(item.get("entryPx")) > 0:
-                            entry_note = f', entry ${format_price(to_float(item.get("entryPx")))}'
+                            entry_note = f', avg entry ${format_price(to_float(item.get("entryPx")))}'
                         lines.append(
                             f'- {item["coin"]} {item["side"]} '
-                            f'({item["walletCount"]} wallets, {item["positionCount"]} positions, {format_money_thousands(item["totalValue"])}{size_note}{entry_note})'
+                            f'({item["walletCount"]} wallets, {item["positionCount"]} positions{entry_note})'
                         )
                 else:
                     lines.append("- None")
@@ -2071,9 +2068,6 @@ class WalletTrackerService:
                 changes["addedConsensus"],
                 changes["removedConsensus"],
                 changes["changedConsensus"],
-                changes["addedSignals"],
-                changes["removedSignals"],
-                changes["changedSignals"],
                 changes["newLargePositions"],
                 changes["increasedLargePositions"],
                 changes["closedLargePositions"],
