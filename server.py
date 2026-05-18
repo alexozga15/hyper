@@ -1879,9 +1879,10 @@ class WalletTrackerService:
                         entry_note = ""
                         if to_float(item.get("entryPx")) > 0:
                             entry_note = f', avg entry ${format_price(to_float(item.get("entryPx")))}'
+                        value_note = f', {format_money_thousands(to_float(item.get("totalValue")))}'
                         lines.append(
                             f'- {item["coin"]} {item["side"]} '
-                            f'({item["walletCount"]} wallets, {item["positionCount"]} positions{entry_note})'
+                            f'({item["walletCount"]} wallets, {item["positionCount"]} positions{value_note}{entry_note})'
                         )
                 else:
                     lines.append("- None")

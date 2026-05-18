@@ -627,7 +627,7 @@ class AlertSummaryTests(unittest.TestCase):
         message = self.service.build_positions_message(dashboard)
         self.assertIn("Open positions now", message)
         self.assertIn("By wallet count (3+ wallets):", message)
-        self.assertIn("BTC long (3 wallets, 3 positions, avg entry $77,667)", message)
+        self.assertIn("BTC long (3 wallets, 3 positions, $675K, avg entry $77,667)", message)
         self.assertNotIn("ETH short", message)
         self.assertIn("Position groups: 1", message)
 
@@ -685,7 +685,7 @@ class AlertSummaryTests(unittest.TestCase):
         }
 
         message = self.service.build_positions_message(dashboard)
-        self.assertIn("OIL long (3 wallets, 3 positions)", message)
+        self.assertIn("OIL long (3 wallets, 3 positions, $2,601K)", message)
         self.assertNotIn("OIL short", message)
 
     def test_build_positions_message_groups_commodities_by_wallet_count(self) -> None:
@@ -715,7 +715,7 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_positions_message(dashboard)
         self.assertIn("Commodities:", message)
-        self.assertIn("GOLD long (3 wallets, 3 positions)", message)
+        self.assertIn("GOLD long (3 wallets, 3 positions, $139K)", message)
         self.assertNotIn("SILVER short", message)
         self.assertNotIn("xyz:GOLD", message)
         self.assertNotIn("xyz:SILVER", message)
@@ -747,7 +747,7 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_positions_message(dashboard)
         self.assertIn("Stocks / indices:", message)
-        self.assertIn("NVDA long (3 wallets, 3 positions)", message)
+        self.assertIn("NVDA long (3 wallets, 3 positions, $135K)", message)
         self.assertNotIn("SPACEX short", message)
         self.assertNotIn("xyz:NVDA", message)
 
@@ -813,11 +813,11 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_positions_message(dashboard)
         self.assertIn("Commodities:", message)
-        self.assertIn("OIL long (3 wallets, 3 positions)", message)
+        self.assertIn("OIL long (3 wallets, 3 positions, $823K)", message)
         self.assertNotIn("SILVER short", message)
         self.assertIn("Stocks / indices:", message)
         self.assertNotIn("XYZ100 long", message)
-        self.assertIn("SP500 long (3 wallets, 3 positions)", message)
+        self.assertIn("SP500 long (3 wallets, 3 positions, $791K)", message)
 
     def test_check_alerts_ignores_hip3_only_changes(self) -> None:
         previous_summary = {
