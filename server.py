@@ -1826,7 +1826,7 @@ class WalletTrackerService:
                     else 0.0,
                 }
                 for item in groups.values()
-                if item["walletCount"] >= min_wallets
+                if item["walletCount"] >= min_wallets and item["totalValue"] >= min_value
             ],
             key=lambda item: (-item["walletCount"], item["coin"], item["side"]),
         )
@@ -1869,7 +1869,8 @@ class WalletTrackerService:
         else:
             sections = [
                 (
-                    f"By wallet count ({MIN_POSITION_MESSAGE_WALLETS}+ wallets):",
+                    f"By wallet count ({MIN_POSITION_MESSAGE_WALLETS}+ wallets, "
+                    f"{format_money_compact(MIN_POSITION_MESSAGE_VALUE)}+):",
                     position_groups,
                 ),
                 ("Commodities:", commodity_groups),

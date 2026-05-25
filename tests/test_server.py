@@ -626,10 +626,37 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_positions_message(dashboard)
         self.assertIn("Open positions now", message)
-        self.assertIn("By wallet count (3+ wallets):", message)
+        self.assertIn("By wallet count (3+ wallets, $500K+):", message)
         self.assertIn("BTC long (3 wallets, 3 positions, $675K, avg entry $78,000)", message)
         self.assertNotIn("ETH short", message)
         self.assertIn("Position groups: 1", message)
+
+    def test_build_positions_message_filters_groups_below_value_threshold(self) -> None:
+        dashboard = {
+            "generatedAt": "2026-04-09T06:00:00Z",
+            "wallets": [
+                {
+                    "alias": "main-1",
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "positions": [{"coin": "CHIP", "side": "Short", "positionValue": 10000.0}],
+                },
+                {
+                    "alias": "main-2",
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "positions": [{"coin": "CHIP", "side": "Short", "positionValue": 8000.0}],
+                },
+                {
+                    "alias": "main-3",
+                    "address": "0x3333333333333333333333333333333333333333",
+                    "positions": [{"coin": "CHIP", "side": "Short", "positionValue": 5000.0}],
+                },
+            ],
+        }
+
+        message = self.service.build_positions_message(dashboard)
+        self.assertIn("- No open positions", message)
+        self.assertNotIn("CHIP short", message)
+        self.assertIn("Position groups: 0", message)
 
     def test_build_positions_message_filters_hip3_positions_below_threshold(self) -> None:
         dashboard = {
@@ -696,26 +723,26 @@ class AlertSummaryTests(unittest.TestCase):
                     "alias": "main-1",
                     "address": "0x1111111111111111111111111111111111111111",
                     "positions": [
-                        {"coin": "xyz:GOLD", "side": "Long", "positionValue": 96322.0},
+                        {"coin": "xyz:GOLD", "side": "Long", "positionValue": 300000.0},
                         {"coin": "xyz:SILVER", "side": "Short", "positionValue": 76938.0},
                     ],
                 },
                 {
                     "alias": "main-2",
                     "address": "0x2222222222222222222222222222222222222222",
-                    "positions": [{"coin": "cash:GOLD", "side": "Long", "positionValue": 17206.81}],
+                    "positions": [{"coin": "cash:GOLD", "side": "Long", "positionValue": 150000.0}],
                 },
                 {
                     "alias": "main-3",
                     "address": "0x3333333333333333333333333333333333333333",
-                    "positions": [{"coin": "GOLD", "side": "Long", "positionValue": 25206.81}],
+                    "positions": [{"coin": "GOLD", "side": "Long", "positionValue": 100000.0}],
                 },
             ],
         }
 
         message = self.service.build_positions_message(dashboard)
         self.assertIn("Commodities:", message)
-        self.assertIn("GOLD long (3 wallets, 3 positions, $139K)", message)
+        self.assertIn("GOLD long (3 wallets, 3 positions, $550K)", message)
         self.assertNotIn("SILVER short", message)
         self.assertNotIn("xyz:GOLD", message)
         self.assertNotIn("xyz:SILVER", message)
@@ -728,26 +755,26 @@ class AlertSummaryTests(unittest.TestCase):
                     "alias": "main-1",
                     "address": "0x1111111111111111111111111111111111111111",
                     "positions": [
-                        {"coin": "xyz:NVDA", "side": "Long", "positionValue": 75250.0},
+                        {"coin": "xyz:NVDA", "side": "Long", "positionValue": 300000.0},
                         {"coin": "vntl:SPACEX", "side": "Short", "positionValue": 2500.0},
                     ],
                 },
                 {
                     "alias": "main-2",
                     "address": "0x2222222222222222222222222222222222222222",
-                    "positions": [{"coin": "xyz:NVDA", "side": "Long", "positionValue": 25000.0}],
+                    "positions": [{"coin": "xyz:NVDA", "side": "Long", "positionValue": 150000.0}],
                 },
                 {
                     "alias": "main-3",
                     "address": "0x3333333333333333333333333333333333333333",
-                    "positions": [{"coin": "xyz:NVDA", "side": "Long", "positionValue": 35000.0}],
+                    "positions": [{"coin": "xyz:NVDA", "side": "Long", "positionValue": 100000.0}],
                 },
             ],
         }
 
         message = self.service.build_positions_message(dashboard)
         self.assertIn("Stocks / indices:", message)
-        self.assertIn("NVDA long (3 wallets, 3 positions, $135K)", message)
+        self.assertIn("NVDA long (3 wallets, 3 positions, $550K)", message)
         self.assertNotIn("SPACEX short", message)
         self.assertNotIn("xyz:NVDA", message)
 
