@@ -919,6 +919,102 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("Closed >$500K", sent_message)
         self.assertIn("Trader One: ETH short $900K sz 300 close ~$3,000", sent_message)
 
+    def test_check_alerts_preview_does_not_sync_alert_baseline(self) -> None:
+        previous_summary = {
+            "overallBias": "mixed",
+            "consensus": [],
+            "hip3Consensus": [],
+        }
+        current_summary = {
+            "overallBias": "mixed",
+            "consensus": [],
+            "hip3Consensus": [],
+        }
+        dashboard = {
+            "wallets": [
+                {
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "alias": "Trader One",
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 750000.0}],
+                }
+            ]
+        }
+
+        with patch(
+            "server.load_json_file",
+            return_value={
+                "config": {"enabled": True, "botToken": "token", "chatId": "chat"},
+                "state": {"summary": previous_summary, "largePositions": {}},
+            },
+        ), patch("server.save_json_file") as save_json_file, patch.object(
+            self.service, "dashboard", return_value=dashboard
+        ), patch.object(
+            self.service, "build_sentiment_summary", return_value=current_summary
+        ), patch.object(
+            self.service, "send_telegram_message"
+        ) as send_telegram_message:
+            result = self.service.check_alerts(send_notification=False)
+
+        self.assertTrue(result["shouldNotify"])
+        self.assertFalse(result["sent"])
+        save_json_file.assert_not_called()
+        send_telegram_message.assert_not_called()
+
+    def test_check_alerts_does_not_sync_failed_telegram_alert(self) -> None:
+        previous_summary = {
+            "overallBias": "mixed",
+            "consensus": [{"coin": "BTC", "side": "long", "walletCount": 3, "totalValue": 30_000_000.0}],
+            "hip3Consensus": [],
+        }
+        current_summary = {
+            "overallBias": "mixed",
+            "consensus": [{"coin": "ETH", "side": "short", "walletCount": 3, "totalValue": 40_000_000.0}],
+            "hip3Consensus": [],
+        }
+        previous_positions = {
+            "0x2222222222222222222222222222222222222222:BTC:long": {
+                "address": "0x2222222222222222222222222222222222222222",
+                "alias": "Old Trader",
+                "coin": "BTC",
+                "side": "long",
+                "totalValue": 700000.0,
+                "totalSize": 7.0,
+            }
+        }
+        dashboard = {
+            "wallets": [
+                {
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "alias": "Trader One",
+                    "positions": [{"coin": "ETH", "side": "Short", "positionValue": 900000.0}],
+                }
+            ]
+        }
+
+        with patch(
+            "server.load_json_file",
+            return_value={
+                "config": {"enabled": True, "botToken": "token", "chatId": "chat"},
+                "state": {"summary": previous_summary, "largePositions": previous_positions},
+            },
+        ), patch("server.save_json_file") as save_json_file, patch.object(
+            self.service, "dashboard", return_value=dashboard
+        ), patch.object(
+            self.service, "build_sentiment_summary", return_value=current_summary
+        ), patch.object(
+            self.service,
+            "send_telegram_message",
+            side_effect=ValueError("telegram down"),
+        ):
+            result = self.service.check_alerts(send_notification=True)
+
+        self.assertTrue(result["shouldNotify"])
+        self.assertFalse(result["sent"])
+        self.assertIn("telegram down", result["error"])
+        saved_state = save_json_file.call_args.args[1]["state"]
+        self.assertEqual(saved_state["summary"], previous_summary)
+        self.assertEqual(saved_state["largePositions"], previous_positions)
+
     def test_send_hourly_update_syncs_alert_baseline(self) -> None:
         summary = {
             "overallBias": "mixed",

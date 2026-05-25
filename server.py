@@ -2081,31 +2081,41 @@ class WalletTrackerService:
 
         sent = False
         error_message = ""
-        if (
-            send_notification
-            and should_notify
-            and config.get("enabled")
-            and config.get("botToken")
-            and config.get("chatId")
-        ):
-            try:
-                self.send_telegram_message(
-                    str(config["botToken"]),
-                    str(config["chatId"]),
-                    self.build_telegram_message(changes, summary, min_wallets),
-                )
-                sent = True
-            except (urllib.error.URLError, TimeoutError, ValueError) as exc:
-                error_message = str(exc)
+        if send_notification and should_notify and config.get("enabled"):
+            if not config.get("botToken") or not config.get("chatId"):
+                error_message = "Missing Telegram bot token or chat id"
+            else:
+                try:
+                    self.send_telegram_message(
+                        str(config["botToken"]),
+                        str(config["chatId"]),
+                        self.build_telegram_message(changes, summary, min_wallets),
+                    )
+                    sent = True
+                except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+                    error_message = str(exc)
+
+        if not send_notification:
+            return {
+                "enabled": bool(config.get("enabled")),
+                "hasBotToken": bool(config.get("botToken")),
+                "chatId": config.get("chatId", ""),
+                "sent": sent,
+                "shouldNotify": should_notify,
+                "error": error_message,
+                "changes": changes,
+                "summary": summary,
+            }
 
         checked_at = now_iso()
         new_state = {
             **state,
-            "summary": summary,
-            "largePositions": current_positions,
             "lastCheckedAt": checked_at,
             "lastSentAt": checked_at if sent else state.get("lastSentAt"),
         }
+        if not should_notify or sent or not config.get("enabled"):
+            new_state["summary"] = summary
+            new_state["largePositions"] = current_positions
         save_json_file(self.alerts_path, {"config": stored_config, "state": new_state})
 
         return {
