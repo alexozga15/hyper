@@ -1819,7 +1819,11 @@ class WalletTrackerService:
                     "positionCount": item["positionCount"],
                     "totalValue": round(item["totalValue"], 2),
                     "totalSize": round(item["totalSize"], 8),
-                    "entryPx": round(item["entrySum"] / item["entryCount"], 8) if item["entryCount"] > 0 else 0.0,
+                    "entryPx": round(item["entryValue"] / item["totalSize"], 8)
+                    if item["totalSize"] > 0
+                    else round(item["entrySum"] / item["entryCount"], 8)
+                    if item["entryCount"] > 0
+                    else 0.0,
                 }
                 for item in groups.values()
                 if item["walletCount"] >= min_wallets
