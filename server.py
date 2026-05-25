@@ -88,6 +88,18 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def iso_to_ms(value: Any) -> int:
+    if not value:
+        return 0
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return 0
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return int(parsed.timestamp() * 1000)
+
+
 def env_flag(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -1393,8 +1405,6 @@ class WalletTrackerService:
                 if side not in {"long", "short"}:
                     continue
                 position_value = to_float(position.get("positionValue"))
-                if position_value < min_value:
-                    continue
                 coin = normalize_position_coin(position.get("coin"))
                 key = f"{address}:{coin}:{side}"
                 bucket = positions.setdefault(
@@ -1421,22 +1431,101 @@ class WalletTrackerService:
                 "entryPx": round(item["entryValue"] / item["totalSize"], 8) if item["totalSize"] > 0 else 0.0,
             }
             for key, item in positions.items()
+            if item["totalValue"] >= min_value
+        }
+
+    def fill_price_key(self, address: str, coin: str, side: str, event: str) -> str:
+        return f"{address}:{coin}:{side}:{event}"
+
+    def classify_fill_direction(self, direction: Any) -> tuple[str, str] | None:
+        normalized = str(direction or "").strip().lower()
+        if not normalized:
+            return None
+        if "long" in normalized:
+            side = "long"
+        elif "short" in normalized:
+            side = "short"
+        else:
+            return None
+
+        if "close" in normalized:
+            return side, "close"
+        if "open" in normalized or "increase" in normalized:
+            return side, "add"
+        return None
+
+    def build_recent_fill_price_map(
+        self,
+        dashboard: dict[str, Any],
+        *,
+        since_ms: int = 0,
+    ) -> dict[str, dict[str, Any]]:
+        buckets: dict[str, dict[str, Any]] = {}
+        for wallet in dashboard.get("wallets", []):
+            address = str(wallet.get("address") or "")
+            if not address:
+                continue
+            for fill in wallet.get("recentFills", []):
+                classified = self.classify_fill_direction(fill.get("direction"))
+                if not classified:
+                    continue
+                fill_time = int(to_float(fill.get("time")))
+                if since_ms and fill_time <= since_ms:
+                    continue
+                side, event = classified
+                price = to_float(fill.get("price"))
+                size = abs(to_float(fill.get("size")))
+                if price <= 0 or size <= 0:
+                    continue
+                coin = normalize_position_coin(fill.get("coin"))
+                key = self.fill_price_key(address, coin, side, event)
+                bucket = buckets.setdefault(key, {"priceValue": 0.0, "size": 0.0, "latestTime": 0})
+                bucket["priceValue"] += price * size
+                bucket["size"] += size
+                bucket["latestTime"] = max(int(bucket["latestTime"]), fill_time)
+
+        return {
+            key: {
+                "price": round(item["priceValue"] / item["size"], 8) if item["size"] > 0 else 0.0,
+                "size": round(item["size"], 8),
+                "notional": round(item["priceValue"], 2),
+                "latestTime": item["latestTime"],
+            }
+            for key, item in buckets.items()
+            if item["size"] > 0
         }
 
     def summarize_large_position_changes(
         self,
         previous_positions: dict[str, Any],
         current_positions: dict[str, Any],
+        fill_prices: dict[str, Any] | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
         previous_map = previous_positions if isinstance(previous_positions, dict) else {}
         current_map = current_positions if isinstance(current_positions, dict) else {}
-        added = [current_map[key] for key in current_map.keys() - previous_map.keys()]
+        fill_price_map = fill_prices if isinstance(fill_prices, dict) else {}
+        added = []
+        for key in current_map.keys() - previous_map.keys():
+            item = dict(current_map[key])
+            fill_price = fill_price_map.get(f"{key}:add", {})
+            open_price = to_float(fill_price.get("price")) if isinstance(fill_price, dict) else 0.0
+            if open_price > 0:
+                item["entryPx"] = open_price
+                item["entryPriceSource"] = "fill"
+            added.append(item)
         closed = []
         for key in previous_map.keys() - current_map.keys():
             item = dict(previous_map[key])
             total_value = to_float(item.get("totalValue"))
             total_size = to_float(item.get("totalSize"))
-            item["closePrice"] = round(total_value / total_size, 8) if total_size > 0 else 0.0
+            fill_price = fill_price_map.get(f"{key}:close", {})
+            close_price = to_float(fill_price.get("price")) if isinstance(fill_price, dict) else 0.0
+            if close_price > 0:
+                item["closePrice"] = round(close_price, 8)
+                item["closePriceSource"] = "fill"
+            else:
+                item["closePrice"] = round(total_value / total_size, 8) if total_size > 0 else 0.0
+                item["closePriceSource"] = "snapshot"
             closed.append(item)
         increased = []
         for key in current_map.keys() & previous_map.keys():
@@ -1449,9 +1538,13 @@ class WalletTrackerService:
             previous_size = to_float(previous_item.get("totalSize"))
             current_size = to_float(current_item.get("totalSize"))
             size_increase = current_size - previous_size
+            fill_price = fill_price_map.get(f"{key}:add", {})
+            fill_add_price = to_float(fill_price.get("price")) if isinstance(fill_price, dict) else 0.0
             current_price = (current_value / current_size) if current_size > 0 else 0.0
+            add_price = fill_add_price if fill_add_price > 0 else current_price
+            add_value = (size_increase * add_price) if size_increase > 0 and add_price > 0 else increase_value
             has_size_baseline = previous_size > 0 or current_size > 0
-            is_size_add = has_size_baseline and size_increase > 0 and increase_value >= POSITION_INCREASE_ALERT_MIN_DELTA
+            is_size_add = has_size_baseline and size_increase > 0 and add_value >= POSITION_INCREASE_ALERT_MIN_DELTA
             is_legacy_value_jump = (
                 not has_size_baseline
                 and increase_value >= POSITION_INCREASE_ALERT_MIN_DELTA
@@ -1467,12 +1560,14 @@ class WalletTrackerService:
                     "increasePct": round(increase_pct, 4),
                     "previousSize": round(previous_size, 8),
                     "sizeIncrease": round(size_increase, 8),
-                    "addPrice": round(current_price, 8) if size_increase > 0 else 0.0,
+                    "addValue": round(add_value, 2),
+                    "addPrice": round(add_price, 8) if size_increase > 0 else 0.0,
+                    "addPriceSource": "fill" if fill_add_price > 0 else "snapshot",
                 }
             )
         return (
             sorted(added, key=lambda item: item["totalValue"], reverse=True),
-            sorted(increased, key=lambda item: item["increaseValue"], reverse=True),
+            sorted(increased, key=lambda item: item.get("addValue", item["increaseValue"]), reverse=True),
             sorted(closed, key=lambda item: item["totalValue"], reverse=True),
         )
 
@@ -1480,10 +1575,12 @@ class WalletTrackerService:
         self,
         previous_positions: dict[str, Any],
         current_positions: dict[str, Any],
+        fill_prices: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         new_large_positions, increased_large_positions, closed_large_positions = self.summarize_large_position_changes(
             previous_positions,
             current_positions,
+            fill_prices,
         )
         return {
             "biasChanged": False,
@@ -1646,7 +1743,8 @@ class WalletTrackerService:
                     size_note = f' sz {format_position_size(to_float(item.get("totalSize")))}'
                 entry_note = ""
                 if to_float(item.get("entryPx")) > 0:
-                    entry_note = f' @${format_price(to_float(item.get("entryPx")))}'
+                    entry_label = "open" if item.get("entryPriceSource") == "fill" else ""
+                    entry_note = f' {entry_label + " " if entry_label else ""}@${format_price(to_float(item.get("entryPx")))}'
                 lines.append(
                     f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} {format_money_compact(item["totalValue"])}{size_note}{entry_note}'
                 )
@@ -1660,7 +1758,11 @@ class WalletTrackerService:
                     size_note = f' sz {format_position_size(to_float(item.get("totalSize")))}'
                 close_note = ""
                 if to_float(item.get("closePrice")) > 0:
-                    close_note = f' close ~${format_price(to_float(item.get("closePrice")))}'
+                    price_marker = "@" if item.get("closePriceSource") == "fill" else "~$"
+                    if price_marker == "@":
+                        close_note = f' close @${format_price(to_float(item.get("closePrice")))}'
+                    else:
+                        close_note = f' last ~${format_price(to_float(item.get("closePrice")))}'
                 lines.append(
                     f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} {format_money_compact(item["totalValue"])}{size_note}{close_note}'
                 )
@@ -1674,9 +1776,11 @@ class WalletTrackerService:
                     size_note = f' +{format_position_size(to_float(item.get("sizeIncrease")))}'
                 add_price_note = ""
                 if to_float(item.get("addPrice")) > 0:
-                    add_price_note = f' add @${format_price(to_float(item.get("addPrice")))}'
+                    price_marker = "@" if item.get("addPriceSource") == "fill" else "~$"
+                    add_price_note = f' add {price_marker}{format_price(to_float(item.get("addPrice")))}'
+                add_value = to_float(item.get("addValue", item.get("increaseValue")))
                 lines.append(
-                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} {format_money_compact(item["previousValue"])}->{format_money_compact(item["totalValue"])} (+{format_money_compact(item["increaseValue"])}{size_note}{add_price_note})'
+                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} {format_money_compact(item["previousValue"])}->{format_money_compact(item["totalValue"])} (+{format_money_compact(add_value)}{size_note}{add_price_note})'
                 )
 
         return "\n".join(lines)
@@ -2060,10 +2164,11 @@ class WalletTrackerService:
         previous_summary = state.get("summary", {}) if isinstance(state, dict) else {}
         previous_positions = state.get("largePositions", {}) if isinstance(state, dict) else {}
         current_positions = self.build_large_position_snapshot(dashboard)
+        fill_prices = self.build_recent_fill_price_map(dashboard, since_ms=iso_to_ms(state.get("lastCheckedAt")))
         # Keep HIP-3 available for explicit commands like /hip3, but exclude it
         # from automatic Telegram alerts and change-trigger decisions.
         changes = self.summarize_changes(previous_summary, summary, track_hip3=False)
-        position_changes = self.build_large_position_alert_changes(previous_positions, current_positions)
+        position_changes = self.build_large_position_alert_changes(previous_positions, current_positions, fill_prices)
         changes["newLargePositions"] = position_changes["newLargePositions"]
         changes["increasedLargePositions"] = position_changes["increasedLargePositions"]
         changes["closedLargePositions"] = position_changes["closedLargePositions"]
@@ -2144,7 +2249,8 @@ class WalletTrackerService:
         config = self.resolve_alert_config(stored_config)
         state = raw.get("state", {}) if isinstance(raw, dict) else {}
         previous_positions = state.get("largePositions", {}) if isinstance(state, dict) else {}
-        position_changes = self.build_large_position_alert_changes(previous_positions, current_positions)
+        fill_prices = self.build_recent_fill_price_map(dashboard, since_ms=iso_to_ms(state.get("lastCheckedAt")))
+        position_changes = self.build_large_position_alert_changes(previous_positions, current_positions, fill_prices)
         should_send_position_alert = any(
             [
                 position_changes["newLargePositions"],

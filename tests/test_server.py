@@ -944,7 +944,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(len(result["changes"]["closedLargePositions"]), 1)
         sent_message = send_telegram_message.call_args.args[2]
         self.assertIn("Closed >$500K", sent_message)
-        self.assertIn("Trader One: ETH short $900K sz 300 close ~$3,000", sent_message)
+        self.assertIn("Trader One: ETH short $900K sz 300 last ~$3,000", sent_message)
 
     def test_check_alerts_preview_does_not_sync_alert_baseline(self) -> None:
         previous_summary = {
@@ -1189,8 +1189,105 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(len(result["changes"]["increasedLargePositions"]), 1)
         sent_message = send_telegram_message.call_args.args[2]
         self.assertIn("Added >$500K", sent_message)
-        self.assertIn("Trader One: BTC long $600K->$1.2M (+$600K +10 add @$60,000)", sent_message)
+        self.assertIn("Trader One: BTC long $600K->$1.2M (+$600K +10 add ~$60,000)", sent_message)
         self.assertNotIn("@$78,000", sent_message)
+
+    def test_large_position_snapshot_filters_after_aggregation(self) -> None:
+        dashboard = {
+            "wallets": [
+                {
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "alias": "Trader One",
+                    "positions": [
+                        {"coin": "BTC", "side": "Long", "positionValue": 300000.0, "size": 3.0, "entryPx": 75000.0},
+                        {"coin": "BTC", "side": "Long", "positionValue": 260000.0, "size": 2.0, "entryPx": 76000.0},
+                    ],
+                }
+            ]
+        }
+
+        snapshot = self.service.build_large_position_snapshot(dashboard)
+
+        self.assertIn("0x1111111111111111111111111111111111111111:BTC:long", snapshot)
+        self.assertEqual(snapshot["0x1111111111111111111111111111111111111111:BTC:long"]["totalValue"], 560000.0)
+
+    def test_large_position_changes_use_recent_fill_add_price(self) -> None:
+        previous = {
+            "wallet:BTC:long": {
+                "address": "wallet",
+                "alias": "wallet",
+                "coin": "BTC",
+                "side": "long",
+                "totalValue": 8000000.0,
+                "totalSize": 100.0,
+            }
+        }
+        current = {
+            "wallet:BTC:long": {
+                "address": "wallet",
+                "alias": "wallet",
+                "coin": "BTC",
+                "side": "long",
+                "totalValue": 9900000.0,
+                "totalSize": 110.0,
+            }
+        }
+
+        added, increased, closed = self.service.summarize_large_position_changes(
+            previous,
+            current,
+            {"wallet:BTC:long:add": {"price": 72909.0, "size": 10.0}},
+        )
+
+        self.assertEqual(added, [])
+        self.assertEqual(len(increased), 1)
+        self.assertEqual(increased[0]["addPrice"], 72909.0)
+        self.assertEqual(increased[0]["addValue"], 729090.0)
+        self.assertEqual(increased[0]["addPriceSource"], "fill")
+        self.assertEqual(closed, [])
+
+    def test_large_position_changes_use_recent_fill_close_price(self) -> None:
+        previous = {
+            "wallet:ETH:short": {
+                "address": "wallet",
+                "alias": "wallet",
+                "coin": "ETH",
+                "side": "short",
+                "totalValue": 900000.0,
+                "totalSize": 300.0,
+            }
+        }
+
+        added, increased, closed = self.service.summarize_large_position_changes(
+            previous,
+            {},
+            {"wallet:ETH:short:close": {"price": 2345.0, "size": 300.0}},
+        )
+
+        self.assertEqual(added, [])
+        self.assertEqual(increased, [])
+        self.assertEqual(len(closed), 1)
+        self.assertEqual(closed[0]["closePrice"], 2345.0)
+        self.assertEqual(closed[0]["closePriceSource"], "fill")
+
+    def test_recent_fill_price_map_filters_before_last_check(self) -> None:
+        dashboard = {
+            "wallets": [
+                {
+                    "address": "wallet",
+                    "recentFills": [
+                        {"coin": "BTC", "direction": "Open Long", "price": 70000.0, "size": 1.0, "time": 10},
+                        {"coin": "BTC", "direction": "Open Long", "price": 73000.0, "size": 2.0, "time": 20},
+                        {"coin": "ETH", "direction": "Close Short", "price": 2400.0, "size": 3.0, "time": 20},
+                    ],
+                }
+            ]
+        }
+
+        fill_prices = self.service.build_recent_fill_price_map(dashboard, since_ms=10)
+
+        self.assertEqual(fill_prices["wallet:BTC:long:add"]["price"], 73000.0)
+        self.assertEqual(fill_prices["wallet:ETH:short:close"]["price"], 2400.0)
 
     def test_large_position_increases_notify_on_big_size_add_even_if_pct_small(self) -> None:
         previous = {

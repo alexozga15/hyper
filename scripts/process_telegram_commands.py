@@ -194,19 +194,21 @@ def main() -> int:
 
     for update in updates:
         update_id = parse_update_id(update.get("update_id"))
-        latest_seen = max(latest_seen, update_id)
 
         message = update.get("message", {})
         if not isinstance(message, dict):
+            latest_seen = max(latest_seen, update_id)
             continue
 
         chat = message.get("chat", {})
         chat_id = str(chat.get("id", "")).strip()
         if chat_id != allowed_chat_id:
+            latest_seen = max(latest_seen, update_id)
             continue
 
         command = normalize_command(str(message.get("text", "")))
         if not command:
+            latest_seen = max(latest_seen, update_id)
             continue
 
         if command in LIVE_COMMANDS:
@@ -218,6 +220,10 @@ def main() -> int:
         reply = build_reply(service, command, summary_cache, dashboard_cache, min_wallets)
 
         service.send_telegram_message(bot_token, chat_id, reply)
+        latest_seen = max(latest_seen, update_id)
+        if latest_seen != last_update_id:
+            save_json_file(TELEGRAM_STATE_FILE, {"lastUpdateId": latest_seen})
+            last_update_id = latest_seen
 
     if latest_seen != last_update_id:
         save_json_file(TELEGRAM_STATE_FILE, {"lastUpdateId": latest_seen})
