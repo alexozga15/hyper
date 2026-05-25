@@ -121,6 +121,11 @@ def load_updates(service: WalletTrackerService, bot_token: str, last_update_id: 
         updates = [update for update in dispatch_updates if parse_update_id(update.get("update_id")) > last_update_id]
         return updates, "repository_dispatch"
 
+    polling_backup_enabled = os.environ.get("TELEGRAM_POLLING_BACKUP", "").strip().lower() in {"1", "true", "yes", "on"}
+    if not polling_backup_enabled:
+        print("Telegram polling backup disabled; waiting for webhook dispatch.")
+        return [], "polling_disabled"
+
     try:
         return service.fetch_telegram_updates(bot_token, offset=last_update_id + 1), "getUpdates"
     except urllib.error.HTTPError as exc:

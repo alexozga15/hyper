@@ -41,11 +41,15 @@ DEFAULT_CONSENSUS_THRESHOLD = 3
 HIGH_CONVICTION_SIGNAL_THRESHOLD = 80.0
 EXTREME_CONVICTION_SIGNAL_THRESHOLD = 90.0
 SIGNAL_CONVICTION_ALERT_MIN_DELTA = 10.0
-MIN_POSITION_MESSAGE_VALUE = 500_000
+POSITION_GROUP_DISPLAY_MIN_VALUE = 500_000
 MIN_POSITION_MESSAGE_WALLETS = 3
-NEW_POSITION_ALERT_MIN_VALUE = MIN_POSITION_MESSAGE_VALUE
-POSITION_INCREASE_ALERT_MIN_DELTA = MIN_POSITION_MESSAGE_VALUE
+LARGE_POSITION_ALERT_MIN_VALUE = 500_000
+MIN_POSITION_MESSAGE_VALUE = POSITION_GROUP_DISPLAY_MIN_VALUE
+NEW_POSITION_ALERT_MIN_VALUE = LARGE_POSITION_ALERT_MIN_VALUE
+POSITION_INCREASE_ALERT_MIN_DELTA = LARGE_POSITION_ALERT_MIN_VALUE
 POSITION_INCREASE_ALERT_MIN_PCT = 0.5
+ALERT_DEDUPE_COOLDOWN_MS = 30 * 60 * 1000
+RECENT_FILL_ALERT_LIMIT = 100
 CONSENSUS_SIZE_ALERT_MIN_DELTA = 2
 CONSENSUS_SIZE_ALERT_MIN_PCT = 0.5
 RANKING_MIN_7D_CLOSED_TRADES = 5
@@ -933,7 +937,7 @@ class WalletTrackerService:
                 elif closed_pnl < 0:
                     loss_count += 1
 
-            if len(recent_fills) < 30:
+            if len(recent_fills) < RECENT_FILL_ALERT_LIMIT:
                 recent_fills.append(
                     {
                         "coin": fill.get("coin", "Unknown"),
@@ -1597,6 +1601,125 @@ class WalletTrackerService:
             "changedSignals": [],
         }
 
+    def alert_bucket(self, value: Any) -> str:
+        numeric = abs(to_float(value))
+        if numeric == 0:
+            return "0"
+        if numeric >= 1_000_000:
+            step = 100_000
+        elif numeric >= 100_000:
+            step = 10_000
+        elif numeric >= 1_000:
+            step = 100
+        elif numeric >= 10:
+            step = 1
+        elif numeric >= 1:
+            step = 0.1
+        else:
+            step = 0.001
+        return str(int(round(numeric / step)))
+
+    def large_position_event_key(self, event: str, item: dict[str, Any]) -> str:
+        address = str(item.get("address") or "")
+        coin = str(item.get("coin") or "Unknown")
+        side = str(item.get("side") or "")
+        size_value = item.get("sizeIncrease") if event == "add" else item.get("totalSize")
+        notional_value = item.get("addValue") if event == "add" else item.get("totalValue")
+        return (
+            f"position:{event}:{address}:{coin}:{side}:"
+            f"s{self.alert_bucket(size_value)}:v{self.alert_bucket(notional_value)}"
+        )
+
+    def consensus_event_key(self, event: str, item: dict[str, Any]) -> str:
+        return (
+            f'consensus:{event}:{item.get("coin", "Unknown")}:{item.get("side", "")}:'
+            f'{item.get("walletCount", item.get("toWalletCount", ""))}'
+        )
+
+    def collect_alert_event_keys(self, changes: dict[str, Any]) -> list[str]:
+        keys: list[str] = []
+        if changes.get("biasChanged"):
+            keys.append("bias:changed")
+        for event, field in (
+            ("added", "addedConsensus"),
+            ("removed", "removedConsensus"),
+            ("changed", "changedConsensus"),
+        ):
+            keys.extend(self.consensus_event_key(event, item) for item in changes.get(field, []))
+        keys.extend(self.large_position_event_key("open", item) for item in changes.get("newLargePositions", []))
+        keys.extend(self.large_position_event_key("add", item) for item in changes.get("increasedLargePositions", []))
+        keys.extend(self.large_position_event_key("close", item) for item in changes.get("closedLargePositions", []))
+        return keys
+
+    def filter_deduped_alert_changes(
+        self,
+        changes: dict[str, Any],
+        dedupe_state: dict[str, Any],
+        *,
+        now_ms: int,
+        cooldown_ms: int = ALERT_DEDUPE_COOLDOWN_MS,
+    ) -> tuple[dict[str, Any], list[str]]:
+        active_dedupe = dedupe_state if isinstance(dedupe_state, dict) else {}
+        filtered = {**changes}
+        suppressed: list[str] = []
+
+        def is_suppressed(key: str) -> bool:
+            last_sent_ms = int(to_float(active_dedupe.get(key)))
+            return last_sent_ms > 0 and now_ms - last_sent_ms < cooldown_ms
+
+        if filtered.get("biasChanged") and is_suppressed("bias:changed"):
+            filtered["biasChanged"] = False
+            suppressed.append("bias:changed")
+
+        for event, field in (
+            ("added", "addedConsensus"),
+            ("removed", "removedConsensus"),
+            ("changed", "changedConsensus"),
+        ):
+            kept = []
+            for item in changes.get(field, []):
+                key = self.consensus_event_key(event, item)
+                if is_suppressed(key):
+                    suppressed.append(key)
+                else:
+                    kept.append(item)
+            filtered[field] = kept
+
+        for event, field in (
+            ("open", "newLargePositions"),
+            ("add", "increasedLargePositions"),
+            ("close", "closedLargePositions"),
+        ):
+            kept = []
+            for item in changes.get(field, []):
+                key = self.large_position_event_key(event, item)
+                if is_suppressed(key):
+                    suppressed.append(key)
+                else:
+                    kept.append(item)
+            filtered[field] = kept
+
+        return filtered, suppressed
+
+    def update_alert_dedupe(
+        self,
+        dedupe_state: dict[str, Any],
+        sent_keys: list[str],
+        *,
+        now_ms: int,
+        cooldown_ms: int = ALERT_DEDUPE_COOLDOWN_MS,
+    ) -> dict[str, int]:
+        active_dedupe = dedupe_state if isinstance(dedupe_state, dict) else {}
+        cutoff_ms = now_ms - cooldown_ms
+        updated = {
+            str(key): int(to_float(value))
+            for key, value in active_dedupe.items()
+            if int(to_float(value)) >= cutoff_ms
+        }
+        for key in sent_keys:
+            updated[key] = now_ms
+        return updated
+
     def signal_key(self, signal: dict[str, Any]) -> str:
         return f'{signal.get("coin", "Unknown")}:{signal.get("side", "")}'
 
@@ -2163,6 +2286,7 @@ class WalletTrackerService:
         summary = self.build_sentiment_summary(dashboard["wallets"], min_wallets)
         previous_summary = state.get("summary", {}) if isinstance(state, dict) else {}
         previous_positions = state.get("largePositions", {}) if isinstance(state, dict) else {}
+        previous_dedupe = state.get("alertDedupe", {}) if isinstance(state, dict) else {}
         current_positions = self.build_large_position_snapshot(dashboard)
         fill_prices = self.build_recent_fill_price_map(dashboard, since_ms=iso_to_ms(state.get("lastCheckedAt")))
         # Keep HIP-3 available for explicit commands like /hip3, but exclude it
@@ -2172,6 +2296,13 @@ class WalletTrackerService:
         changes["newLargePositions"] = position_changes["newLargePositions"]
         changes["increasedLargePositions"] = position_changes["increasedLargePositions"]
         changes["closedLargePositions"] = position_changes["closedLargePositions"]
+        dedupe_now_ms = current_time_ms()
+        changes, suppressed_alert_keys = self.filter_deduped_alert_changes(
+            changes,
+            previous_dedupe,
+            now_ms=dedupe_now_ms,
+        )
+        alert_event_keys = self.collect_alert_event_keys(changes)
 
         should_notify = any(
             [
@@ -2209,6 +2340,7 @@ class WalletTrackerService:
                 "sent": sent,
                 "shouldNotify": should_notify,
                 "error": error_message,
+                "suppressedAlertCount": len(suppressed_alert_keys),
                 "changes": changes,
                 "summary": summary,
             }
@@ -2222,6 +2354,12 @@ class WalletTrackerService:
         if not should_notify or sent or not config.get("enabled"):
             new_state["summary"] = summary
             new_state["largePositions"] = current_positions
+        if sent:
+            new_state["alertDedupe"] = self.update_alert_dedupe(
+                previous_dedupe,
+                alert_event_keys,
+                now_ms=dedupe_now_ms,
+            )
         save_json_file(self.alerts_path, {"config": stored_config, "state": new_state})
 
         return {
@@ -2231,6 +2369,7 @@ class WalletTrackerService:
             "sent": sent,
             "shouldNotify": should_notify,
             "error": error_message,
+            "suppressedAlertCount": len(suppressed_alert_keys),
             "changes": changes,
             "summary": summary,
         }
@@ -2249,8 +2388,16 @@ class WalletTrackerService:
         config = self.resolve_alert_config(stored_config)
         state = raw.get("state", {}) if isinstance(raw, dict) else {}
         previous_positions = state.get("largePositions", {}) if isinstance(state, dict) else {}
+        previous_dedupe = state.get("alertDedupe", {}) if isinstance(state, dict) else {}
         fill_prices = self.build_recent_fill_price_map(dashboard, since_ms=iso_to_ms(state.get("lastCheckedAt")))
         position_changes = self.build_large_position_alert_changes(previous_positions, current_positions, fill_prices)
+        dedupe_now_ms = current_time_ms()
+        position_changes, suppressed_alert_keys = self.filter_deduped_alert_changes(
+            position_changes,
+            previous_dedupe,
+            now_ms=dedupe_now_ms,
+        )
+        alert_event_keys = self.collect_alert_event_keys(position_changes)
         should_send_position_alert = any(
             [
                 position_changes["newLargePositions"],
@@ -2282,11 +2429,17 @@ class WalletTrackerService:
             new_state["largePositions"] = current_positions
         if position_alert_sent:
             new_state["lastSentAt"] = synced_at
+            new_state["alertDedupe"] = self.update_alert_dedupe(
+                previous_dedupe,
+                alert_event_keys,
+                now_ms=dedupe_now_ms,
+            )
         save_json_file(self.alerts_path, {"config": stored_config, "state": new_state})
         return {
             "sent": True,
             "positionAlertSent": position_alert_sent,
             "positionAlertError": position_alert_error,
+            "suppressedAlertCount": len(suppressed_alert_keys),
             "summary": summary,
         }
 

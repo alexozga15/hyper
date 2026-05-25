@@ -987,6 +987,104 @@ class AlertSummaryTests(unittest.TestCase):
         save_json_file.assert_not_called()
         send_telegram_message.assert_not_called()
 
+    def test_check_alerts_suppresses_recent_duplicate_position_alert(self) -> None:
+        previous_summary = {
+            "overallBias": "mixed",
+            "consensus": [],
+            "hip3Consensus": [],
+        }
+        current_summary = {
+            "overallBias": "mixed",
+            "consensus": [],
+            "hip3Consensus": [],
+        }
+        address = "0x1111111111111111111111111111111111111111"
+        dashboard = {
+            "wallets": [
+                {
+                    "address": address,
+                    "alias": "Trader One",
+                    "positions": [
+                        {"coin": "BTC", "side": "Long", "positionValue": 750000.0, "size": 10.0, "entryPx": 75000.0},
+                    ],
+                }
+            ]
+        }
+        duplicate_key = self.service.large_position_event_key(
+            "open",
+            {"address": address, "coin": "BTC", "side": "long", "totalValue": 750000.0, "totalSize": 10.0},
+        )
+
+        with patch(
+            "server.load_json_file",
+            return_value={
+                "config": {"enabled": True, "botToken": "token", "chatId": "chat"},
+                "state": {
+                    "summary": previous_summary,
+                    "largePositions": {},
+                    "alertDedupe": {duplicate_key: 9_999_999_000_000},
+                },
+            },
+        ), patch("server.save_json_file") as save_json_file, patch.object(
+            self.service, "dashboard", return_value=dashboard
+        ), patch.object(
+            self.service, "build_sentiment_summary", return_value=current_summary
+        ), patch.object(
+            self.service, "send_telegram_message"
+        ) as send_telegram_message:
+            result = self.service.check_alerts(send_notification=True)
+
+        self.assertFalse(result["shouldNotify"])
+        self.assertFalse(result["sent"])
+        self.assertEqual(result["suppressedAlertCount"], 1)
+        send_telegram_message.assert_not_called()
+        saved_state = save_json_file.call_args.args[1]["state"]
+        self.assertEqual(saved_state["summary"], current_summary)
+        self.assertIn(f"{address}:BTC:long", saved_state["largePositions"])
+
+    def test_check_alerts_records_dedupe_after_successful_alert(self) -> None:
+        previous_summary = {
+            "overallBias": "mixed",
+            "consensus": [],
+            "hip3Consensus": [],
+        }
+        current_summary = {
+            "overallBias": "mixed",
+            "consensus": [],
+            "hip3Consensus": [],
+        }
+        dashboard = {
+            "wallets": [
+                {
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "alias": "Trader One",
+                    "positions": [
+                        {"coin": "BTC", "side": "Long", "positionValue": 750000.0, "size": 10.0, "entryPx": 75000.0},
+                    ],
+                }
+            ]
+        }
+
+        with patch(
+            "server.load_json_file",
+            return_value={
+                "config": {"enabled": True, "botToken": "token", "chatId": "chat"},
+                "state": {"summary": previous_summary, "largePositions": {}, "alertDedupe": {}},
+            },
+        ), patch("server.save_json_file") as save_json_file, patch.object(
+            self.service, "dashboard", return_value=dashboard
+        ), patch.object(
+            self.service, "build_sentiment_summary", return_value=current_summary
+        ), patch.object(
+            self.service, "send_telegram_message"
+        ):
+            result = self.service.check_alerts(send_notification=True)
+
+        self.assertTrue(result["sent"])
+        saved_dedupe = save_json_file.call_args.args[1]["state"]["alertDedupe"]
+        self.assertEqual(len(saved_dedupe), 1)
+        self.assertTrue(next(iter(saved_dedupe)).startswith("position:open:"))
+
     def test_check_alerts_does_not_sync_failed_telegram_alert(self) -> None:
         previous_summary = {
             "overallBias": "mixed",

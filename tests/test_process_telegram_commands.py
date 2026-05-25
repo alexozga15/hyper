@@ -132,11 +132,22 @@ class DispatchUpdateTests(unittest.TestCase):
                     fp=None,
                 )
 
-        with patch.dict("os.environ", {}, clear=True):
+        with patch.dict("os.environ", {"TELEGRAM_POLLING_BACKUP": "true"}, clear=True):
             updates, source = load_updates(FakeService(), "token", last_update_id=10)
 
         self.assertEqual(updates, [])
         self.assertEqual(source, "getUpdates")
+
+    def test_load_updates_skips_polling_unless_backup_enabled(self) -> None:
+        class FakeService:
+            def fetch_telegram_updates(self, bot_token: str, offset: int = 0) -> list[dict]:
+                raise AssertionError("Polling should require an explicit backup flag")
+
+        with patch.dict("os.environ", {}, clear=True):
+            updates, source = load_updates(FakeService(), "token", last_update_id=10)
+
+        self.assertEqual(updates, [])
+        self.assertEqual(source, "polling_disabled")
 
     def test_main_persists_successful_update_before_later_send_failure(self) -> None:
         class FakeService:
