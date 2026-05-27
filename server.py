@@ -2077,6 +2077,11 @@ class WalletTrackerService:
                     else round(item["entrySum"] / item["entryCount"], 8)
                     if item["entryCount"] > 0
                     else 0.0,
+                    "entryType": "size_weighted"
+                    if item["totalSize"] > 0
+                    else "simple_average"
+                    if item["entryCount"] > 0
+                    else "",
                 }
                 for item in groups.values()
                 if item["walletCount"] >= min_wallets and item["totalValue"] >= min_value
@@ -2136,7 +2141,8 @@ class WalletTrackerService:
                     for item in groups[:50]:
                         entry_note = ""
                         if to_float(item.get("entryPx")) > 0:
-                            entry_note = f', avg entry ${format_price(to_float(item.get("entryPx")))}'
+                            entry_label = "size-w entry" if item.get("entryType") == "size_weighted" else "avg entry"
+                            entry_note = f', {entry_label} ${format_price(to_float(item.get("entryPx")))}'
                         value_note = f', {format_money_thousands(to_float(item.get("totalValue")))}'
                         lines.append(
                             f'- {item["coin"]} {item["side"]} '
