@@ -52,6 +52,10 @@ ALERT_DEDUPE_COOLDOWN_MS = 30 * 60 * 1000
 RECENT_FILL_ALERT_LIMIT = 100
 CONSENSUS_SIZE_ALERT_MIN_DELTA = 2
 CONSENSUS_SIZE_ALERT_MIN_PCT = 0.5
+LORACLE_WALLET_ADDRESS = "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae"
+EXCLUDED_COUNTED_POSITIONS = {
+    (LORACLE_WALLET_ADDRESS, "HYPE"),
+}
 RANKING_MIN_7D_CLOSED_TRADES = 5
 RANKING_FULL_CONFIDENCE_7D_CLOSED_TRADES = 20
 RANKING_MIN_30D_CLOSED_TRADES = 20
@@ -132,6 +136,12 @@ def normalize_position_coin(coin: Any) -> str:
     if separator and prefix in STOCK_POSITION_PREFIXES and suffix and suffix not in NON_STOCK_MARKET_SUFFIXES:
         return suffix
     return label
+
+
+def should_count_position(address: Any, coin: Any) -> bool:
+    normalized_address = str(address or "").strip().lower()
+    normalized_coin = normalize_position_coin(coin)
+    return (normalized_address, normalized_coin) not in EXCLUDED_COUNTED_POSITIONS
 
 
 def is_stock_like_position(coin: Any) -> bool:
@@ -1312,6 +1322,8 @@ class WalletTrackerService:
             address = str(snapshot.get("address") or "")
             for position in snapshot.get("positions", []):
                 coin = normalize_position_coin(position.get("coin"))
+                if not should_count_position(address, coin):
+                    continue
                 side = str(position.get("side") or "Flat").lower()
                 position_value = to_float(position.get("positionValue"))
                 if side not in {"long", "short"}:
@@ -1410,6 +1422,8 @@ class WalletTrackerService:
                     continue
                 position_value = to_float(position.get("positionValue"))
                 coin = normalize_position_coin(position.get("coin"))
+                if not should_count_position(address, coin):
+                    continue
                 key = f"{address}:{coin}:{side}"
                 bucket = positions.setdefault(
                     key,
@@ -1581,6 +1595,8 @@ class WalletTrackerService:
         current_positions: dict[str, Any],
         fill_prices: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        previous_positions = self.filter_counted_large_positions(previous_positions)
+        current_positions = self.filter_counted_large_positions(current_positions)
         new_large_positions, increased_large_positions, closed_large_positions = self.summarize_large_position_changes(
             previous_positions,
             current_positions,
@@ -1599,6 +1615,14 @@ class WalletTrackerService:
             "addedSignals": [],
             "removedSignals": [],
             "changedSignals": [],
+        }
+
+    def filter_counted_large_positions(self, positions: dict[str, Any]) -> dict[str, Any]:
+        position_map = positions if isinstance(positions, dict) else {}
+        return {
+            key: item
+            for key, item in position_map.items()
+            if isinstance(item, dict) and should_count_position(item.get("address"), item.get("coin"))
         }
 
     def alert_bucket(self, value: Any) -> str:
@@ -1985,10 +2009,13 @@ class WalletTrackerService:
         groups: dict[tuple[str, str], dict[str, Any]] = {}
 
         for wallet in dashboard.get("wallets", []):
+            address = str(wallet.get("address") or "")
             for position in wallet.get("positions", []):
                 position_value = to_float(position.get("positionValue"))
                 raw_coin = str(position.get("coin") or "Unknown")
                 coin = normalize_position_coin(raw_coin)
+                if not should_count_position(address, coin):
+                    continue
                 is_hip3 = raw_coin.startswith("@")
                 is_stock_like = is_stock_like_position(raw_coin)
                 is_commodity_like = is_commodity_like_position(raw_coin)
@@ -2028,7 +2055,6 @@ class WalletTrackerService:
                 bucket["totalValue"] += position_value
                 bucket["totalSize"] += size
                 bucket["entryValue"] += to_float(position.get("entryPx")) * size
-                address = str(wallet.get("address") or "")
                 if address and address not in bucket["walletAddresses"]:
                     bucket["walletAddresses"].add(address)
                     bucket["walletCount"] += 1

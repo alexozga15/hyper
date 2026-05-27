@@ -146,6 +146,41 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(summary["hip3Consensus"][0]["coin"], "@123")
         self.assertEqual(summary["hip3Consensus"][0]["walletCount"], 3)
 
+    def test_loracle_hype_positions_are_excluded_from_sentiment_counts(self) -> None:
+        snapshots = [
+            {
+                "address": "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
+                "alias": "Loracle",
+                "positions": [
+                    {"coin": "HYPE", "side": "Short", "positionValue": 10_000_000},
+                    {"coin": "BTC", "side": "Long", "positionValue": 1_000_000},
+                ],
+            },
+            {
+                "address": "0x2222222222222222222222222222222222222222",
+                "alias": "Two",
+                "positions": [
+                    {"coin": "HYPE", "side": "Short", "positionValue": 2_000_000},
+                    {"coin": "BTC", "side": "Long", "positionValue": 1_000_000},
+                ],
+            },
+            {
+                "address": "0x3333333333333333333333333333333333333333",
+                "alias": "Three",
+                "positions": [
+                    {"coin": "HYPE", "side": "Short", "positionValue": 2_000_000},
+                    {"coin": "BTC", "side": "Long", "positionValue": 1_000_000},
+                ],
+            },
+        ]
+
+        summary = self.service.build_sentiment_summary(snapshots, min_wallets=3)
+
+        self.assertEqual([item["coin"] for item in summary["consensus"]], ["BTC"])
+        self.assertEqual(summary["consensus"][0]["walletCount"], 3)
+        self.assertEqual(summary["longWalletCount"], 3)
+        self.assertEqual(summary["shortWalletCount"], 2)
+
     def test_summarize_changes_detects_consensus_and_hip3_deltas(self) -> None:
         previous = {
             "overallBias": "mixed",
@@ -656,6 +691,34 @@ class AlertSummaryTests(unittest.TestCase):
         message = self.service.build_positions_message(dashboard)
         self.assertIn("- No open positions", message)
         self.assertNotIn("CHIP short", message)
+        self.assertIn("Position groups: 0", message)
+
+    def test_build_positions_message_excludes_loracle_hype_positions(self) -> None:
+        dashboard = {
+            "generatedAt": "2026-04-09T06:00:00Z",
+            "wallets": [
+                {
+                    "alias": "Loracle",
+                    "address": "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
+                    "positions": [{"coin": "HYPE", "side": "Short", "positionValue": 10_000_000.0}],
+                },
+                {
+                    "alias": "main-2",
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "positions": [{"coin": "HYPE", "side": "Short", "positionValue": 2_000_000.0}],
+                },
+                {
+                    "alias": "main-3",
+                    "address": "0x3333333333333333333333333333333333333333",
+                    "positions": [{"coin": "HYPE", "side": "Short", "positionValue": 2_000_000.0}],
+                },
+            ],
+        }
+
+        message = self.service.build_positions_message(dashboard)
+
+        self.assertIn("- No open positions", message)
+        self.assertNotIn("HYPE short", message)
         self.assertIn("Position groups: 0", message)
 
     def test_build_positions_message_filters_hip3_positions_below_threshold(self) -> None:
@@ -1308,6 +1371,37 @@ class AlertSummaryTests(unittest.TestCase):
 
         self.assertIn("0x1111111111111111111111111111111111111111:BTC:long", snapshot)
         self.assertEqual(snapshot["0x1111111111111111111111111111111111111111:BTC:long"]["totalValue"], 560000.0)
+
+    def test_large_position_alerts_exclude_loracle_hype_positions(self) -> None:
+        previous = {
+            "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae:HYPE:short": {
+                "address": "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
+                "alias": "Loracle",
+                "coin": "HYPE",
+                "side": "short",
+                "totalValue": 10_000_000.0,
+                "totalSize": 250_000.0,
+            }
+        }
+        dashboard = {
+            "wallets": [
+                {
+                    "address": "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
+                    "alias": "Loracle",
+                    "positions": [
+                        {"coin": "HYPE", "side": "Short", "positionValue": 12_000_000.0, "size": 300_000.0},
+                    ],
+                }
+            ]
+        }
+
+        current = self.service.build_large_position_snapshot(dashboard)
+        changes = self.service.build_large_position_alert_changes(previous, current)
+
+        self.assertEqual(current, {})
+        self.assertEqual(changes["newLargePositions"], [])
+        self.assertEqual(changes["increasedLargePositions"], [])
+        self.assertEqual(changes["closedLargePositions"], [])
 
     def test_large_position_changes_use_recent_fill_add_price(self) -> None:
         previous = {
