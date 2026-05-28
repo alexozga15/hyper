@@ -3,7 +3,7 @@ name: 2-Hour Update
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */2 * * *"
+    - cron: "17 */2 * * *"
 
 permissions:
   contents: write
