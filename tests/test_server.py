@@ -787,8 +787,11 @@ class AlertSummaryTests(unittest.TestCase):
 
         self.assertIn("BTC long wallets", message)
         self.assertIn("Wallets: 2 | Positions: 2 | Total: $1,200K, size-w entry $77,333", message)
-        self.assertIn("1. Big BTC: $800K, size 10, entry $78,000, uPnL $12,345", message)
-        self.assertIn("2. Small BTC: $400K, size 5, entry $76,000", message)
+        self.assertIn(
+            "1. 0x1111111111111111111111111111111111111111: $800K, size 10, entry $78,000, uPnL $12,345",
+            message,
+        )
+        self.assertIn("2. 0x2222222222222222222222222222222222222222: $400K, size 5, entry $76,000", message)
         self.assertNotIn("Short BTC", message)
 
     def test_build_position_wallets_message_excludes_loracle_hype(self) -> None:
@@ -815,7 +818,7 @@ class AlertSummaryTests(unittest.TestCase):
         message = self.service.build_position_wallets_message(dashboard, "hype", "short")
 
         self.assertIn("Wallets: 1 | Positions: 1 | Total: $1,000K", message)
-        self.assertIn("Other: $1,000K", message)
+        self.assertIn("0x2222222222222222222222222222222222222222: $1,000K", message)
         self.assertNotIn("Loracle", message)
 
     def test_build_position_wallets_message_matches_mixed_case_tickers(self) -> None:
@@ -835,7 +838,7 @@ class AlertSummaryTests(unittest.TestCase):
         message = self.service.build_position_wallets_message(dashboard, "kpepe", "short")
 
         self.assertIn("KPEPE short wallets", message)
-        self.assertIn("Mixed: $600K", message)
+        self.assertIn("0x1111111111111111111111111111111111111111: $600K", message)
 
     def test_build_positions_message_filters_hip3_positions_below_threshold(self) -> None:
         dashboard = {

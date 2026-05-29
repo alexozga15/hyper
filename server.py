@@ -2329,7 +2329,7 @@ class WalletTrackerService:
                 if to_float(item.get("unrealizedPnl")):
                     pnl_note = f', uPnL ${to_float(item.get("unrealizedPnl")):,.0f}'
                 lines.append(
-                    f'{index}. {wallet_label(item.get("alias", ""), item.get("address", ""))}: '
+                    f'{index}. {item.get("address", "")}: '
                     f'{format_money_thousands(to_float(item.get("totalValue")))}{size_note}{item_entry_note}{pnl_note}'
                 )
 
