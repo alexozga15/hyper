@@ -49,6 +49,8 @@ NEW_POSITION_ALERT_MIN_VALUE = LARGE_POSITION_ALERT_MIN_VALUE
 POSITION_INCREASE_ALERT_MIN_DELTA = LARGE_POSITION_ALERT_MIN_VALUE
 POSITION_INCREASE_ALERT_MIN_PCT = 0.5
 ALERT_DEDUPE_COOLDOWN_MS = 30 * 60 * 1000
+CLUSTERED_OPEN_ALERT_MIN_WALLETS = 3
+CLUSTERED_OPEN_ALERT_WINDOW_MS = 10 * 60 * 1000
 RECENT_FILL_ALERT_LIMIT = 100
 CONSENSUS_SIZE_ALERT_MIN_DELTA = 2
 CONSENSUS_SIZE_ALERT_MIN_PCT = 0.5
@@ -1513,6 +1515,108 @@ class WalletTrackerService:
             if item["size"] > 0
         }
 
+    def classify_open_fill_side(self, direction: Any) -> str | None:
+        normalized = str(direction or "").strip().lower()
+        if "open" not in normalized:
+            return None
+        if "long" in normalized:
+            return "long"
+        if "short" in normalized:
+            return "short"
+        return None
+
+    def build_clustered_open_position_alerts(
+        self,
+        dashboard: dict[str, Any],
+        current_positions: dict[str, Any],
+        *,
+        now_ms: int | None = None,
+        window_ms: int = CLUSTERED_OPEN_ALERT_WINDOW_MS,
+        min_wallets: int = CLUSTERED_OPEN_ALERT_MIN_WALLETS,
+    ) -> list[dict[str, Any]]:
+        checked_ms = current_time_ms() if now_ms is None else now_ms
+        cutoff_ms = checked_ms - window_ms
+        current_map = current_positions if isinstance(current_positions, dict) else {}
+        opened_positions: dict[str, dict[str, Any]] = {}
+
+        for wallet in dashboard.get("wallets", []):
+            address = str(wallet.get("address") or "")
+            if not address:
+                continue
+            for fill in wallet.get("recentFills", []):
+                side = self.classify_open_fill_side(fill.get("direction"))
+                if not side:
+                    continue
+                fill_time = int(to_float(fill.get("time")))
+                if fill_time < cutoff_ms or fill_time > checked_ms:
+                    continue
+                coin = normalize_position_coin(fill.get("coin"))
+                if not should_count_position(address, coin):
+                    continue
+                position_key = f"{address}:{coin}:{side}"
+                current_item = current_map.get(position_key)
+                if not isinstance(current_item, dict):
+                    continue
+                if to_float(current_item.get("totalValue")) < NEW_POSITION_ALERT_MIN_VALUE:
+                    continue
+                previous = opened_positions.get(position_key)
+                if previous and int(to_float(previous.get("openTime"))) >= fill_time:
+                    continue
+                opened_positions[position_key] = {**current_item, "openTime": fill_time}
+
+        groups: dict[str, dict[str, Any]] = {}
+        for item in opened_positions.values():
+            coin = str(item.get("coin") or "Unknown")
+            side = str(item.get("side") or "")
+            group = groups.setdefault(
+                f"{coin}:{side}",
+                {
+                    "coin": coin,
+                    "side": side,
+                    "wallets": [],
+                    "walletCount": 0,
+                    "totalValue": 0.0,
+                    "totalSize": 0.0,
+                    "entryValue": 0.0,
+                    "earliestOpenTime": 0,
+                    "latestOpenTime": 0,
+                    "windowMs": window_ms,
+                },
+            )
+            total_value = to_float(item.get("totalValue"))
+            total_size = to_float(item.get("totalSize"))
+            entry_px = to_float(item.get("entryPx"))
+            open_time = int(to_float(item.get("openTime")))
+            group["wallets"].append(item)
+            group["walletCount"] += 1
+            group["totalValue"] += total_value
+            group["totalSize"] += total_size
+            group["entryValue"] += entry_px * total_size
+            group["earliestOpenTime"] = (
+                open_time
+                if not group["earliestOpenTime"]
+                else min(int(group["earliestOpenTime"]), open_time)
+            )
+            group["latestOpenTime"] = max(int(group["latestOpenTime"]), open_time)
+
+        alerts = []
+        for group in groups.values():
+            if int(group["walletCount"]) < min_wallets:
+                continue
+            total_size = to_float(group.get("totalSize"))
+            wallets = sorted(group["wallets"], key=lambda item: to_float(item.get("totalValue")), reverse=True)
+            alerts.append(
+                {
+                    **group,
+                    "wallets": wallets,
+                    "totalValue": round(to_float(group.get("totalValue")), 2),
+                    "totalSize": round(total_size, 8),
+                    "entryPx": round(to_float(group.get("entryValue")) / total_size, 8) if total_size > 0 else 0.0,
+                }
+            )
+
+        return sorted(alerts, key=lambda item: (item["walletCount"], item["totalValue"]), reverse=True)
+
     def summarize_large_position_changes(
         self,
         previous_positions: dict[str, Any],
@@ -1609,6 +1713,7 @@ class WalletTrackerService:
             "changedConsensus": [],
             "hip3Added": [],
             "hip3Removed": [],
+            "clusteredOpenPositions": [],
             "newLargePositions": new_large_positions,
             "increasedLargePositions": increased_large_positions,
             "closedLargePositions": closed_large_positions,
@@ -1654,6 +1759,13 @@ class WalletTrackerService:
             f"s{self.alert_bucket(size_value)}:v{self.alert_bucket(notional_value)}"
         )
 
+    def clustered_open_event_key(self, item: dict[str, Any]) -> str:
+        coin = str(item.get("coin") or "Unknown")
+        side = str(item.get("side") or "")
+        wallets = item.get("wallets", [])
+        addresses = sorted(str(wallet.get("address") or "") for wallet in wallets if isinstance(wallet, dict))
+        return f"position:cluster-open:{coin}:{side}:{','.join(addresses)}"
+
     def consensus_event_key(self, event: str, item: dict[str, Any]) -> str:
         return (
             f'consensus:{event}:{item.get("coin", "Unknown")}:{item.get("side", "")}:'
@@ -1670,6 +1782,7 @@ class WalletTrackerService:
             ("changed", "changedConsensus"),
         ):
             keys.extend(self.consensus_event_key(event, item) for item in changes.get(field, []))
+        keys.extend(self.clustered_open_event_key(item) for item in changes.get("clusteredOpenPositions", []))
         keys.extend(self.large_position_event_key("open", item) for item in changes.get("newLargePositions", []))
         keys.extend(self.large_position_event_key("add", item) for item in changes.get("increasedLargePositions", []))
         keys.extend(self.large_position_event_key("close", item) for item in changes.get("closedLargePositions", []))
@@ -1708,6 +1821,15 @@ class WalletTrackerService:
                 else:
                     kept.append(item)
             filtered[field] = kept
+
+        kept_clustered_opens = []
+        for item in changes.get("clusteredOpenPositions", []):
+            key = self.clustered_open_event_key(item)
+            if is_suppressed(key):
+                suppressed.append(key)
+            else:
+                kept_clustered_opens.append(item)
+        filtered["clusteredOpenPositions"] = kept_clustered_opens
 
         for event, field in (
             ("open", "newLargePositions"),
@@ -1880,6 +2002,28 @@ class WalletTrackerService:
             lines.append("Consensus gone")
             for item in changes["removedConsensus"][:10]:
                 lines.append(f'- {item["coin"]} {item["side"]}')
+
+        if changes.get("clusteredOpenPositions"):
+            lines.append("")
+            lines.append(
+                f"{CLUSTERED_OPEN_ALERT_MIN_WALLETS}+ opens >{format_money_compact(NEW_POSITION_ALERT_MIN_VALUE)} in 10m"
+            )
+            for item in changes["clusteredOpenPositions"][:10]:
+                size_note = ""
+                if to_float(item.get("totalSize")) > 0:
+                    size_note = f' sz {format_position_size(to_float(item.get("totalSize")))}'
+                entry_note = ""
+                if to_float(item.get("entryPx")) > 0:
+                    entry_note = f' entry ${format_price(to_float(item.get("entryPx")))}'
+                lines.append(
+                    f'- {item["coin"]} {item["side"]}: {int(item.get("walletCount") or 0)} wallets, '
+                    f'{format_money_compact(item["totalValue"])}{size_note}{entry_note}'
+                )
+                for wallet in item.get("wallets", [])[:5]:
+                    lines.append(
+                        f'  {wallet_label(wallet.get("alias", ""), wallet.get("address", ""))}: '
+                        f'{format_money_compact(wallet.get("totalValue"))}'
+                    )
 
         if changes["newLargePositions"]:
             lines.append("")
@@ -2406,14 +2550,20 @@ class WalletTrackerService:
         previous_dedupe = state.get("alertDedupe", {}) if isinstance(state, dict) else {}
         current_positions = self.build_large_position_snapshot(dashboard)
         fill_prices = self.build_recent_fill_price_map(dashboard, since_ms=iso_to_ms(state.get("lastCheckedAt")))
+        dedupe_now_ms = current_time_ms()
         # Keep HIP-3 available for explicit commands like /hip3, but exclude it
         # from automatic Telegram alerts and change-trigger decisions.
         changes = self.summarize_changes(previous_summary, summary, track_hip3=False)
         position_changes = self.build_large_position_alert_changes(previous_positions, current_positions, fill_prices)
+        clustered_open_positions = self.build_clustered_open_position_alerts(
+            dashboard,
+            current_positions,
+            now_ms=dedupe_now_ms,
+        )
+        changes["clusteredOpenPositions"] = clustered_open_positions
         changes["newLargePositions"] = position_changes["newLargePositions"]
         changes["increasedLargePositions"] = position_changes["increasedLargePositions"]
         changes["closedLargePositions"] = position_changes["closedLargePositions"]
-        dedupe_now_ms = current_time_ms()
         changes, suppressed_alert_keys = self.filter_deduped_alert_changes(
             changes,
             previous_dedupe,
@@ -2427,6 +2577,7 @@ class WalletTrackerService:
                 changes["addedConsensus"],
                 changes["removedConsensus"],
                 changes["changedConsensus"],
+                changes["clusteredOpenPositions"],
                 changes["newLargePositions"],
                 changes["increasedLargePositions"],
                 changes["closedLargePositions"],
@@ -2509,6 +2660,11 @@ class WalletTrackerService:
         fill_prices = self.build_recent_fill_price_map(dashboard, since_ms=iso_to_ms(state.get("lastCheckedAt")))
         position_changes = self.build_large_position_alert_changes(previous_positions, current_positions, fill_prices)
         dedupe_now_ms = current_time_ms()
+        position_changes["clusteredOpenPositions"] = self.build_clustered_open_position_alerts(
+            dashboard,
+            current_positions,
+            now_ms=dedupe_now_ms,
+        )
         position_changes, suppressed_alert_keys = self.filter_deduped_alert_changes(
             position_changes,
             previous_dedupe,
@@ -2517,6 +2673,7 @@ class WalletTrackerService:
         alert_event_keys = self.collect_alert_event_keys(position_changes)
         should_send_position_alert = any(
             [
+                position_changes["clusteredOpenPositions"],
                 position_changes["newLargePositions"],
                 position_changes["increasedLargePositions"],
                 position_changes["closedLargePositions"],

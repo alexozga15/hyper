@@ -1267,6 +1267,124 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(len(saved_dedupe), 1)
         self.assertTrue(next(iter(saved_dedupe)).startswith("position:open:"))
 
+    def test_check_alerts_notifies_on_clustered_large_opens(self) -> None:
+        now_ms = 1_700_000_000_000
+        previous_summary = {
+            "overallBias": "mixed",
+            "consensus": [],
+            "hip3Consensus": [],
+        }
+        current_summary = {
+            "overallBias": "mixed",
+            "consensus": [],
+            "hip3Consensus": [],
+        }
+        dashboard = {
+            "wallets": [
+                {
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "alias": "Trader One",
+                    "positions": [
+                        {"coin": "BTC", "side": "Long", "positionValue": 750000.0, "size": 10.0, "entryPx": 75000.0},
+                    ],
+                    "recentFills": [
+                        {"coin": "BTC", "direction": "Open Long", "price": 75000.0, "size": 10.0, "time": now_ms - 60_000}
+                    ],
+                },
+                {
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "alias": "Trader Two",
+                    "positions": [
+                        {"coin": "BTC", "side": "Long", "positionValue": 650000.0, "size": 8.0, "entryPx": 81250.0},
+                    ],
+                    "recentFills": [
+                        {"coin": "BTC", "direction": "Open Long", "price": 81250.0, "size": 8.0, "time": now_ms - 300_000}
+                    ],
+                },
+                {
+                    "address": "0x3333333333333333333333333333333333333333",
+                    "alias": "Trader Three",
+                    "positions": [
+                        {"coin": "BTC", "side": "Long", "positionValue": 700000.0, "size": 9.0, "entryPx": 77777.7778},
+                    ],
+                    "recentFills": [
+                        {"coin": "BTC", "direction": "Open Long", "price": 77777.7778, "size": 9.0, "time": now_ms - 540_000}
+                    ],
+                },
+            ]
+        }
+        previous_positions = self.service.build_large_position_snapshot(dashboard)
+
+        with patch(
+            "server.load_json_file",
+            return_value={
+                "config": {"enabled": True, "botToken": "token", "chatId": "chat"},
+                "state": {"summary": previous_summary, "largePositions": previous_positions, "alertDedupe": {}},
+            },
+        ), patch("server.save_json_file") as save_json_file, patch("server.current_time_ms", return_value=now_ms), patch.object(
+            self.service, "dashboard", return_value=dashboard
+        ), patch.object(
+            self.service, "build_sentiment_summary", return_value=current_summary
+        ), patch.object(
+            self.service, "send_telegram_message"
+        ) as send_telegram_message:
+            result = self.service.check_alerts(send_notification=True)
+
+        self.assertTrue(result["shouldNotify"])
+        self.assertTrue(result["sent"])
+        self.assertEqual(len(result["changes"]["clusteredOpenPositions"]), 1)
+        self.assertEqual(result["changes"]["clusteredOpenPositions"][0]["coin"], "BTC")
+        self.assertEqual(result["changes"]["clusteredOpenPositions"][0]["walletCount"], 3)
+        sent_message = send_telegram_message.call_args.args[2]
+        self.assertIn("3+ opens >$500K in 10m", sent_message)
+        self.assertIn("- BTC long: 3 wallets, $2.1M", sent_message)
+        self.assertIn("Trader One: $750K", sent_message)
+        saved_dedupe = save_json_file.call_args.args[1]["state"]["alertDedupe"]
+        self.assertTrue(next(iter(saved_dedupe)).startswith("position:cluster-open:BTC:long:"))
+
+    def test_clustered_large_open_alert_requires_three_wallets_inside_window(self) -> None:
+        now_ms = 1_700_000_000_000
+        dashboard = {
+            "wallets": [
+                {
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "positions": [
+                        {"coin": "ETH", "side": "Short", "positionValue": 700000.0, "size": 300.0, "entryPx": 2333.33}
+                    ],
+                    "recentFills": [
+                        {"coin": "ETH", "direction": "Open Short", "price": 2333.33, "size": 300.0, "time": now_ms - 60_000}
+                    ],
+                },
+                {
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "positions": [
+                        {"coin": "ETH", "side": "Short", "positionValue": 800000.0, "size": 340.0, "entryPx": 2352.94}
+                    ],
+                    "recentFills": [
+                        {"coin": "ETH", "direction": "Open Short", "price": 2352.94, "size": 340.0, "time": now_ms - 120_000}
+                    ],
+                },
+                {
+                    "address": "0x3333333333333333333333333333333333333333",
+                    "positions": [
+                        {"coin": "ETH", "side": "Short", "positionValue": 900000.0, "size": 380.0, "entryPx": 2368.42}
+                    ],
+                    "recentFills": [
+                        {"coin": "ETH", "direction": "Open Short", "price": 2368.42, "size": 380.0, "time": now_ms - 660_000}
+                    ],
+                },
+            ]
+        }
+        current_positions = self.service.build_large_position_snapshot(dashboard)
+
+        alerts = self.service.build_clustered_open_position_alerts(
+            dashboard,
+            current_positions,
+            now_ms=now_ms,
+        )
+
+        self.assertEqual(alerts, [])
+
     def test_check_alerts_does_not_sync_failed_telegram_alert(self) -> None:
         previous_summary = {
             "overallBias": "mixed",
