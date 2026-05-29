@@ -748,6 +748,95 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertNotIn("HYPE short", message)
         self.assertIn("Position groups: 0", message)
 
+    def test_build_position_wallets_message_lists_matching_wallets(self) -> None:
+        dashboard = {
+            "generatedAt": "2026-04-09T06:00:00Z",
+            "wallets": [
+                {
+                    "alias": "Big BTC",
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "positions": [
+                        {
+                            "coin": "BTC",
+                            "side": "Long",
+                            "positionValue": 800000.0,
+                            "size": 10.0,
+                            "entryPx": 78000.0,
+                            "unrealizedPnl": 12345.0,
+                        }
+                    ],
+                },
+                {
+                    "alias": "Small BTC",
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "positions": [
+                        {"coin": "BTC", "side": "Long", "positionValue": 400000.0, "size": 5.0, "entryPx": 76000.0}
+                    ],
+                },
+                {
+                    "alias": "Short BTC",
+                    "address": "0x3333333333333333333333333333333333333333",
+                    "positions": [
+                        {"coin": "BTC", "side": "Short", "positionValue": 900000.0, "size": 12.0, "entryPx": 79000.0}
+                    ],
+                },
+            ],
+        }
+
+        message = self.service.build_position_wallets_message(dashboard, "btc", "long")
+
+        self.assertIn("BTC long wallets", message)
+        self.assertIn("Wallets: 2 | Positions: 2 | Total: $1,200K, size-w entry $77,333", message)
+        self.assertIn("1. Big BTC: $800K, size 10, entry $78,000, uPnL $12,345", message)
+        self.assertIn("2. Small BTC: $400K, size 5, entry $76,000", message)
+        self.assertNotIn("Short BTC", message)
+
+    def test_build_position_wallets_message_excludes_loracle_hype(self) -> None:
+        dashboard = {
+            "generatedAt": "2026-04-09T06:00:00Z",
+            "wallets": [
+                {
+                    "alias": "Loracle",
+                    "address": "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
+                    "positions": [
+                        {"coin": "HYPE", "side": "Short", "positionValue": 10_000_000.0, "size": 200_000.0}
+                    ],
+                },
+                {
+                    "alias": "Other",
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "positions": [
+                        {"coin": "HYPE", "side": "Short", "positionValue": 1_000_000.0, "size": 20_000.0}
+                    ],
+                },
+            ],
+        }
+
+        message = self.service.build_position_wallets_message(dashboard, "hype", "short")
+
+        self.assertIn("Wallets: 1 | Positions: 1 | Total: $1,000K", message)
+        self.assertIn("Other: $1,000K", message)
+        self.assertNotIn("Loracle", message)
+
+    def test_build_position_wallets_message_matches_mixed_case_tickers(self) -> None:
+        dashboard = {
+            "generatedAt": "2026-04-09T06:00:00Z",
+            "wallets": [
+                {
+                    "alias": "Mixed",
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "positions": [
+                        {"coin": "kPEPE", "side": "Short", "positionValue": 600000.0, "size": 1000000.0}
+                    ],
+                }
+            ],
+        }
+
+        message = self.service.build_position_wallets_message(dashboard, "kpepe", "short")
+
+        self.assertIn("KPEPE short wallets", message)
+        self.assertIn("Mixed: $600K", message)
+
     def test_build_positions_message_filters_hip3_positions_below_threshold(self) -> None:
         dashboard = {
             "generatedAt": "2026-04-09T06:00:00Z",

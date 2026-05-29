@@ -2252,6 +2252,91 @@ class WalletTrackerService:
         lines.append(f'Checked at: {dashboard.get("generatedAt", now_iso())}')
         return "\n".join(lines)
 
+    def build_position_wallets_message(self, dashboard: dict[str, Any], coin: str, side: str) -> str:
+        normalized_coin = normalize_position_coin(coin.upper())
+        normalized_side = str(side or "").lower()
+        if normalized_side not in {"long", "short"}:
+            return "Use /ticker long or /ticker short"
+
+        wallets: dict[str, dict[str, Any]] = {}
+        for wallet in dashboard.get("wallets", []):
+            address = str(wallet.get("address") or "")
+            for position in wallet.get("positions", []):
+                position_coin = normalize_position_coin(position.get("coin"))
+                position_side = str(position.get("side") or "").lower()
+                if position_coin.upper() != normalized_coin.upper() or position_side != normalized_side:
+                    continue
+                if not should_count_position(address, position_coin):
+                    continue
+                bucket = wallets.setdefault(
+                    address,
+                    {
+                        "address": address,
+                        "alias": wallet.get("alias", ""),
+                        "positionCount": 0,
+                        "totalValue": 0.0,
+                        "totalSize": 0.0,
+                        "entryValue": 0.0,
+                        "entrySum": 0.0,
+                        "entryCount": 0,
+                        "unrealizedPnl": 0.0,
+                    },
+                )
+                position_value = to_float(position.get("positionValue"))
+                size = abs(to_float(position.get("size")))
+                entry_px = to_float(position.get("entryPx"))
+                bucket["positionCount"] += 1
+                bucket["totalValue"] += position_value
+                bucket["totalSize"] += size
+                bucket["entryValue"] += entry_px * size
+                bucket["unrealizedPnl"] += to_float(position.get("unrealizedPnl"))
+                if entry_px > 0:
+                    bucket["entrySum"] += entry_px
+                    bucket["entryCount"] += 1
+
+        rows = sorted(wallets.values(), key=lambda item: item["totalValue"], reverse=True)
+        total_value = sum(to_float(item.get("totalValue")) for item in rows)
+        total_size = sum(to_float(item.get("totalSize")) for item in rows)
+        entry_value = sum(to_float(item.get("entryValue")) for item in rows)
+        entry_sum = sum(to_float(item.get("entrySum")) for item in rows)
+        entry_count = sum(int(to_float(item.get("entryCount"))) for item in rows)
+        position_count = sum(int(to_float(item.get("positionCount"))) for item in rows)
+
+        entry_note = ""
+        if total_size > 0:
+            entry_note = f", size-w entry ${format_price(entry_value / total_size)}"
+        elif entry_count > 0:
+            entry_note = f", avg entry ${format_price(entry_sum / entry_count)}"
+
+        lines = [
+            f"{normalized_coin} {normalized_side} wallets",
+            f"Wallets: {len(rows)} | Positions: {position_count} | Total: {format_money_thousands(total_value)}{entry_note}",
+        ]
+
+        if not rows:
+            lines.append(f"- No {normalized_coin} {normalized_side} positions")
+        else:
+            for index, item in enumerate(rows[:50], start=1):
+                size_note = ""
+                if to_float(item.get("totalSize")) > 0:
+                    size_note = f', size {format_position_size(to_float(item.get("totalSize")))}'
+                item_entry_note = ""
+                if to_float(item.get("totalSize")) > 0 and to_float(item.get("entryValue")) > 0:
+                    item_entry_note = f', entry ${format_price(to_float(item.get("entryValue")) / to_float(item.get("totalSize")))}'
+                elif int(to_float(item.get("entryCount"))) > 0:
+                    item_entry_note = f', avg entry ${format_price(to_float(item.get("entrySum")) / int(to_float(item.get("entryCount"))))}'
+                pnl_note = ""
+                if to_float(item.get("unrealizedPnl")):
+                    pnl_note = f', uPnL ${to_float(item.get("unrealizedPnl")):,.0f}'
+                lines.append(
+                    f'{index}. {wallet_label(item.get("alias", ""), item.get("address", ""))}: '
+                    f'{format_money_thousands(to_float(item.get("totalValue")))}{size_note}{item_entry_note}{pnl_note}'
+                )
+
+        lines.append("")
+        lines.append(f'Checked at: {dashboard.get("generatedAt", now_iso())}')
+        return "\n".join(lines)
+
     def build_hourly_update_message(self, dashboard: dict[str, Any], summary: dict[str, Any], min_wallets: int) -> str:
         return "\n\n".join(
             [

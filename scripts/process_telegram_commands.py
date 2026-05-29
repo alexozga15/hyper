@@ -23,6 +23,7 @@ from server import (
 
 
 LIVE_COMMANDS = {"/update", "/sentiment", "/consensus", "/signals", "/hip3", "/positions", "/ranks", "/elite"}
+SUMMARY_COMMANDS = {"/update", "/sentiment", "/consensus", "/signals", "/hip3"}
 
 
 def normalize_command(text: str) -> str:
@@ -33,6 +34,24 @@ def normalize_command(text: str) -> str:
     if "@" in command:
         command = command.split("@", 1)[0]
     return command
+
+
+def parse_position_wallet_query(text: str) -> tuple[str, str] | None:
+    message = (text or "").strip().split()
+    if len(message) < 2:
+        return None
+    command = message[0].strip()
+    if not command.startswith("/"):
+        return None
+    if "@" in command:
+        command = command.split("@", 1)[0]
+    ticker = command[1:].strip()
+    side = message[1].strip().lower()
+    if not ticker or side not in {"long", "short"}:
+        return None
+    if f"/{ticker.lower()}" in LIVE_COMMANDS or ticker.lower() == "help":
+        return None
+    return ticker.upper(), side
 
 
 def build_help_message() -> str:
@@ -47,6 +66,8 @@ def build_help_message() -> str:
             "/positions - all open positions now",
             "/ranks - tracked wallets ranked by 7D hit rate plus 7D PnL",
             "/elite - open positions for Elite-ranked wallets",
+            "/btc long - wallets currently long BTC",
+            "/hype short - wallets currently short HYPE",
             "/help - show commands",
         ]
     )
@@ -138,6 +159,7 @@ def load_updates(service: WalletTrackerService, bot_token: str, last_update_id: 
 def build_reply(
     service: WalletTrackerService,
     command: str,
+    position_query: tuple[str, str] | None,
     summary_cache: dict[str, Any] | None,
     dashboard_cache: dict[str, Any] | None,
     min_wallets: int,
@@ -177,6 +199,9 @@ def build_reply(
         return service.build_wallet_rankings_message(dashboard_cache, limit=20)
     if command == "/elite":
         return service.build_elite_wallet_positions_message(dashboard_cache)
+    if position_query:
+        coin, side = position_query
+        return service.build_position_wallets_message(dashboard_cache, coin, side)
     return build_help_message()
 
 
@@ -211,18 +236,20 @@ def main() -> int:
             latest_seen = max(latest_seen, update_id)
             continue
 
-        command = normalize_command(str(message.get("text", "")))
+        message_text = str(message.get("text", ""))
+        command = normalize_command(message_text)
         if not command:
             latest_seen = max(latest_seen, update_id)
             continue
 
-        if command in LIVE_COMMANDS:
+        position_query = parse_position_wallet_query(message_text)
+        if command in LIVE_COMMANDS or position_query:
             if dashboard_cache is None:
                 dashboard_cache = service.dashboard()
-            if summary_cache is None:
+            if command in SUMMARY_COMMANDS and summary_cache is None:
                 summary_cache = service.build_sentiment_summary(dashboard_cache["wallets"], min_wallets)
 
-        reply = build_reply(service, command, summary_cache, dashboard_cache, min_wallets)
+        reply = build_reply(service, command, position_query, summary_cache, dashboard_cache, min_wallets)
 
         service.send_telegram_message(bot_token, chat_id, reply)
         latest_seen = max(latest_seen, update_id)

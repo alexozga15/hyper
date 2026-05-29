@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import scripts.process_telegram_commands as commands
-from scripts.process_telegram_commands import load_dispatch_updates, load_updates
+from scripts.process_telegram_commands import load_dispatch_updates, load_updates, parse_position_wallet_query
 
 
 class DispatchUpdateTests(unittest.TestCase):
@@ -149,6 +149,28 @@ class DispatchUpdateTests(unittest.TestCase):
         self.assertEqual(updates, [])
         self.assertEqual(source, "polling_disabled")
 
+    def test_parse_position_wallet_query_from_ticker_direction_command(self) -> None:
+        self.assertEqual(parse_position_wallet_query("/btc long"), ("BTC", "long"))
+        self.assertEqual(parse_position_wallet_query("/hype@HyperwatchBot short"), ("HYPE", "short"))
+        self.assertIsNone(parse_position_wallet_query("/btc sideways"))
+        self.assertIsNone(parse_position_wallet_query("/update long"))
+
+    def test_build_reply_routes_ticker_direction_query(self) -> None:
+        class FakeService:
+            def build_position_wallets_message(self, dashboard: dict, coin: str, side: str) -> str:
+                return f"{coin}:{side}:{dashboard['generatedAt']}"
+
+        reply = commands.build_reply(
+            FakeService(),
+            "/btc",
+            ("BTC", "long"),
+            None,
+            {"generatedAt": "now"},
+            3,
+        )
+
+        self.assertEqual(reply, "BTC:long:now")
+
     def test_main_persists_successful_update_before_later_send_failure(self) -> None:
         class FakeService:
             def __init__(self) -> None:
@@ -184,6 +206,49 @@ class DispatchUpdateTests(unittest.TestCase):
                 commands.main()
 
         save_json_file.assert_called_once_with(commands.TELEGRAM_STATE_FILE, {"lastUpdateId": 1})
+
+    def test_main_processes_ticker_direction_command(self) -> None:
+        class FakeService:
+            def __init__(self) -> None:
+                self.sent_reply = ""
+                self.dashboard_called = 0
+
+            def dashboard(self) -> dict:
+                self.dashboard_called += 1
+                return {"generatedAt": "now", "wallets": []}
+
+            def build_sentiment_summary(self, wallets: list, min_wallets: int) -> dict:
+                raise AssertionError("Ticker-direction commands should not build sentiment summaries")
+
+            def build_position_wallets_message(self, dashboard: dict, coin: str, side: str) -> str:
+                return f"{coin} {side} reply"
+
+            def send_telegram_message(self, bot_token: str, chat_id: str, reply: str) -> None:
+                self.sent_reply = reply
+
+        fake_service = FakeService()
+        updates = [{"update_id": 1, "message": {"chat": {"id": "chat"}, "text": "/btc long"}}]
+
+        with patch.dict(
+            "os.environ",
+            {"TELEGRAM_BOT_TOKEN": "token", "TELEGRAM_CHAT_ID": "chat"},
+            clear=True,
+        ), patch.object(commands, "WalletTrackerService", return_value=fake_service), patch.object(
+            commands, "WalletStore"
+        ), patch.object(
+            commands, "HyperliquidClient"
+        ), patch.object(
+            commands, "load_json_file", return_value={"lastUpdateId": 0}
+        ), patch.object(
+            commands, "load_updates", return_value=(updates, "repository_dispatch")
+        ), patch.object(
+            commands, "save_json_file"
+        ):
+            exit_code = commands.main()
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(fake_service.dashboard_called, 1)
+        self.assertEqual(fake_service.sent_reply, "BTC long reply")
 
 
 if __name__ == "__main__":
