@@ -75,7 +75,7 @@ HOLDING_ONLY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
 OIL_POSITION_ALIASES = {"flx:OIL", "cash:WTI", "xyz:BRENTOIL", "xyz:CL"}
 RAW_OIL_POSITION_NAMES = {"BRENTOIL", "CL", "WTI", "OIL"}
 RAW_COMMODITY_POSITION_NAMES = RAW_OIL_POSITION_NAMES | {"GOLD", "SILVER", "COPPER", "NATGAS"}
-RAW_STOCK_INDEX_POSITION_NAMES = {"SP500", "US500", "XYZ100", "NAS100", "NDX", "SPX"}
+RAW_STOCK_INDEX_POSITION_NAMES = {"SP500", "US500", "XYZ100", "NAS100", "NDX", "SPX", "EWY"}
 STOCK_POSITION_PREFIXES = {"xyz", "vntl", "km"}
 NON_STOCK_MARKET_SUFFIXES = RAW_COMMODITY_POSITION_NAMES
 
@@ -2228,16 +2228,37 @@ class WalletTrackerService:
             consensus = summary.get("consensus", [])
             lines.append("")
             lines.append("Consensus:")
-            if consensus:
-                for item in consensus[:10]:
+            main_consensus = [
+                item
+                for item in consensus
+                if not str(item.get("coin", "")).startswith("@")
+                and not is_commodity_like_position(item.get("coin"))
+                and not is_stock_like_position(item.get("coin"))
+            ]
+            commodity_consensus = [item for item in consensus if is_commodity_like_position(item.get("coin"))]
+            stock_consensus = [item for item in consensus if is_stock_like_position(item.get("coin"))]
+
+            def append_consensus_items(items: list[dict[str, Any]]) -> None:
+                for item in items[:10]:
                     net_note = f', net +{int(to_float(item.get("netWalletCount")))}' if "netWalletCount" in item else ""
                     if "netWeightedWalletCount" in item:
                         net_note += f', qnet +{to_float(item.get("netWeightedWalletCount")):.1f}'
                     lines.append(
                         f'- {item["coin"]} {item["side"]} ({item["walletCount"]} wallets{net_note}, conviction {item.get("convictionScore", 0):.0f}/100)'
                     )
+
+            if main_consensus:
+                append_consensus_items(main_consensus)
             else:
                 lines.append("- None")
+            if commodity_consensus:
+                lines.append("")
+                lines.append("Commodities consensus:")
+                append_consensus_items(commodity_consensus)
+            if stock_consensus:
+                lines.append("")
+                lines.append("Stocks / indices consensus:")
+                append_consensus_items(stock_consensus)
 
         if include_hip3:
             hip3_consensus = summary.get("hip3Consensus", [])
