@@ -432,11 +432,13 @@ class AlertSummaryTests(unittest.TestCase):
             {
                 "address": "0x1111111111111111111111111111111111111111",
                 "positions": [{"coin": "BTC", "side": "Long", "positionValue": 2_000_000.0}],
+                "holdingOnly30d": True,
                 "recentFills": [],
             },
             {
                 "address": "0x2222222222222222222222222222222222222222",
                 "positions": [{"coin": "ETH", "side": "Long", "positionValue": 2_000_000.0}],
+                "holdingOnly30d": True,
                 "recentFills": [
                     {
                         "coin": "ETH",
@@ -450,6 +452,7 @@ class AlertSummaryTests(unittest.TestCase):
             {
                 "address": "0x3333333333333333333333333333333333333333",
                 "positions": [{"coin": "SOL", "side": "Long", "positionValue": 2_000_000.0}],
+                "holdingOnly30d": True,
                 "recentFills": [
                     {
                         "coin": "SOL",
@@ -463,6 +466,7 @@ class AlertSummaryTests(unittest.TestCase):
             {
                 "address": "0x4444444444444444444444444444444444444444",
                 "positions": [{"coin": "BNB", "side": "Long", "positionValue": 2_000_000.0}],
+                "holdingOnly30d": True,
                 "recentFills": [
                     {
                         "coin": "BNB",
@@ -476,6 +480,7 @@ class AlertSummaryTests(unittest.TestCase):
             {
                 "address": "0x5555555555555555555555555555555555555555",
                 "positions": [{"coin": "HYPE", "side": "Long", "positionValue": 2_000_000.0}],
+                "holdingOnly30d": False,
                 "recentFills": [
                     {
                         "coin": "HYPE",

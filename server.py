@@ -1326,7 +1326,7 @@ class WalletTrackerService:
         )
 
     def is_active_for_conviction(self, wallet: dict[str, Any], position: dict[str, Any], *, now_ms: int) -> bool:
-        if "recentFills" not in wallet:
+        if not wallet.get("holdingOnly30d"):
             return True
         recent_fills = wallet.get("recentFills", [])
         if not isinstance(recent_fills, list):
@@ -1337,7 +1337,6 @@ class WalletTrackerService:
         if side not in {"long", "short"}:
             return True
 
-        stale_cutoff_ms = now_ms - HOLDING_ONLY_WINDOW_MS
         recent_add_cutoff_ms = now_ms - RANKING_WINDOW_MS
         for fill in recent_fills:
             if not isinstance(fill, dict):
@@ -1351,13 +1350,10 @@ class WalletTrackerService:
             if normalize_position_coin(fill.get("coin")).upper() != coin.upper():
                 continue
             fill_time = int(to_float(fill.get("time")))
-            if fill_time < stale_cutoff_ms or fill_time > now_ms:
+            if fill_time < recent_add_cutoff_ms or fill_time > now_ms:
                 continue
-            direction = str(fill.get("direction") or "").lower()
-            if "open" in direction:
-                return True
             fill_notional = to_float(fill.get("price")) * abs(to_float(fill.get("size")))
-            if fill_time >= recent_add_cutoff_ms and fill_notional >= POSITION_INCREASE_ALERT_MIN_DELTA:
+            if fill_notional >= POSITION_INCREASE_ALERT_MIN_DELTA:
                 return True
         return False
 
