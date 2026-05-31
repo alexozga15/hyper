@@ -51,6 +51,7 @@ POSITION_INCREASE_ALERT_MIN_PCT = 0.5
 ALERT_DEDUPE_COOLDOWN_MS = 30 * 60 * 1000
 CLUSTERED_OPEN_ALERT_MIN_WALLETS = 3
 CLUSTERED_OPEN_ALERT_WINDOW_MS = 10 * 60 * 1000
+COUNTED_POSITION_MAX_UNREALIZED_LOSS = -1_000_000
 RECENT_FILL_ALERT_LIMIT = 100
 CONSENSUS_SIZE_ALERT_MIN_DELTA = 2
 CONSENSUS_SIZE_ALERT_MIN_PCT = 0.5
@@ -144,6 +145,14 @@ def should_count_position(address: Any, coin: Any) -> bool:
     normalized_address = str(address or "").strip().lower()
     normalized_coin = normalize_position_coin(coin)
     return (normalized_address, normalized_coin) not in EXCLUDED_COUNTED_POSITIONS
+
+
+def should_count_open_position(address: Any, coin: Any, position: Any) -> bool:
+    if not should_count_position(address, coin):
+        return False
+    if isinstance(position, dict) and to_float(position.get("unrealizedPnl")) < COUNTED_POSITION_MAX_UNREALIZED_LOSS:
+        return False
+    return True
 
 
 def is_stock_like_position(coin: Any) -> bool:
@@ -1324,7 +1333,7 @@ class WalletTrackerService:
             address = str(snapshot.get("address") or "")
             for position in snapshot.get("positions", []):
                 coin = normalize_position_coin(position.get("coin"))
-                if not should_count_position(address, coin):
+                if not should_count_open_position(address, coin, position):
                     continue
                 side = str(position.get("side") or "Flat").lower()
                 position_value = to_float(position.get("positionValue"))
@@ -1424,7 +1433,7 @@ class WalletTrackerService:
                     continue
                 position_value = to_float(position.get("positionValue"))
                 coin = normalize_position_coin(position.get("coin"))
-                if not should_count_position(address, coin):
+                if not should_count_open_position(address, coin, position):
                     continue
                 key = f"{address}:{coin}:{side}"
                 bucket = positions.setdefault(
@@ -2158,7 +2167,7 @@ class WalletTrackerService:
                 position_value = to_float(position.get("positionValue"))
                 raw_coin = str(position.get("coin") or "Unknown")
                 coin = normalize_position_coin(raw_coin)
-                if not should_count_position(address, coin):
+                if not should_count_open_position(address, coin, position):
                     continue
                 is_hip3 = raw_coin.startswith("@")
                 is_stock_like = is_stock_like_position(raw_coin)
@@ -2362,7 +2371,11 @@ class WalletTrackerService:
         for wallet in elite_wallets:
             rank = wallet.get("recentWinRateRank", {})
             positions = sorted(
-                wallet.get("positions", []),
+                [
+                    position
+                    for position in wallet.get("positions", [])
+                    if should_count_open_position(wallet.get("address"), position.get("coin"), position)
+                ],
                 key=lambda item: abs(to_float(item.get("positionValue"))),
                 reverse=True,
             )
@@ -2410,7 +2423,7 @@ class WalletTrackerService:
                 position_side = str(position.get("side") or "").lower()
                 if position_coin.upper() != normalized_coin.upper() or position_side != normalized_side:
                     continue
-                if not should_count_position(address, position_coin):
+                if not should_count_open_position(address, position_coin, position):
                     continue
                 bucket = wallets.setdefault(
                     address,

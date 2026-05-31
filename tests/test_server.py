@@ -181,6 +181,34 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(summary["longWalletCount"], 3)
         self.assertEqual(summary["shortWalletCount"], 2)
 
+    def test_large_losing_positions_are_excluded_from_sentiment_counts(self) -> None:
+        snapshots = [
+            {
+                "address": "0x1111111111111111111111111111111111111111",
+                "positions": [
+                    {"coin": "BTC", "side": "Long", "positionValue": 2_000_000.0, "unrealizedPnl": -1_200_000.0}
+                ],
+            },
+            {
+                "address": "0x2222222222222222222222222222222222222222",
+                "positions": [
+                    {"coin": "BTC", "side": "Long", "positionValue": 1_500_000.0, "unrealizedPnl": -900_000.0}
+                ],
+            },
+            {
+                "address": "0x3333333333333333333333333333333333333333",
+                "positions": [
+                    {"coin": "BTC", "side": "Long", "positionValue": 1_000_000.0, "unrealizedPnl": 100_000.0}
+                ],
+            },
+        ]
+
+        summary = self.service.build_sentiment_summary(snapshots, min_wallets=2)
+
+        self.assertEqual(summary["longWalletCount"], 2)
+        self.assertEqual(summary["consensus"][0]["walletCount"], 2)
+        self.assertEqual(summary["consensus"][0]["totalValue"], 2_500_000.0)
+
     def test_summarize_changes_detects_consensus_and_hip3_deltas(self) -> None:
         previous = {
             "overallBias": "mixed",
@@ -748,6 +776,40 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertNotIn("HYPE short", message)
         self.assertIn("Position groups: 0", message)
 
+    def test_build_positions_message_excludes_large_losing_positions(self) -> None:
+        dashboard = {
+            "generatedAt": "2026-04-09T06:00:00Z",
+            "wallets": [
+                {
+                    "alias": "losing",
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "positions": [
+                        {"coin": "BTC", "side": "Long", "positionValue": 2_000_000.0, "unrealizedPnl": -1_200_000.0}
+                    ],
+                },
+                {
+                    "alias": "ok-2",
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "positions": [
+                        {"coin": "BTC", "side": "Long", "positionValue": 1_000_000.0, "unrealizedPnl": -900_000.0}
+                    ],
+                },
+                {
+                    "alias": "ok-3",
+                    "address": "0x3333333333333333333333333333333333333333",
+                    "positions": [
+                        {"coin": "BTC", "side": "Long", "positionValue": 1_000_000.0, "unrealizedPnl": 0.0}
+                    ],
+                },
+            ],
+        }
+
+        message = self.service.build_positions_message(dashboard)
+
+        self.assertIn("- No open positions", message)
+        self.assertNotIn("BTC long", message)
+        self.assertIn("Open positions: 0", message)
+
     def test_build_position_wallets_message_lists_matching_wallets(self) -> None:
         dashboard = {
             "generatedAt": "2026-04-09T06:00:00Z",
@@ -839,6 +901,45 @@ class AlertSummaryTests(unittest.TestCase):
 
         self.assertIn("KPEPE short wallets", message)
         self.assertIn("0x1111111111111111111111111111111111111111: $600K", message)
+
+    def test_build_position_wallets_message_excludes_large_losing_positions(self) -> None:
+        dashboard = {
+            "generatedAt": "2026-04-09T06:00:00Z",
+            "wallets": [
+                {
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "positions": [
+                        {
+                            "coin": "BTC",
+                            "side": "Long",
+                            "positionValue": 2_000_000.0,
+                            "size": 20.0,
+                            "entryPx": 100_000.0,
+                            "unrealizedPnl": -1_200_000.0,
+                        }
+                    ],
+                },
+                {
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "positions": [
+                        {
+                            "coin": "BTC",
+                            "side": "Long",
+                            "positionValue": 800_000.0,
+                            "size": 10.0,
+                            "entryPx": 80_000.0,
+                            "unrealizedPnl": -999_999.0,
+                        }
+                    ],
+                },
+            ],
+        }
+
+        message = self.service.build_position_wallets_message(dashboard, "btc", "long")
+
+        self.assertIn("Wallets: 1 | Positions: 1 | Total: $800K", message)
+        self.assertNotIn("0x1111111111111111111111111111111111111111", message)
+        self.assertIn("0x2222222222222222222222222222222222222222", message)
 
     def test_build_positions_message_filters_hip3_positions_below_threshold(self) -> None:
         dashboard = {
@@ -1608,6 +1709,45 @@ class AlertSummaryTests(unittest.TestCase):
 
         self.assertIn("0x1111111111111111111111111111111111111111:BTC:long", snapshot)
         self.assertEqual(snapshot["0x1111111111111111111111111111111111111111:BTC:long"]["totalValue"], 560000.0)
+
+    def test_large_position_snapshot_excludes_large_losing_positions(self) -> None:
+        dashboard = {
+            "wallets": [
+                {
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "alias": "Trader One",
+                    "positions": [
+                        {
+                            "coin": "BTC",
+                            "side": "Long",
+                            "positionValue": 2_000_000.0,
+                            "size": 20.0,
+                            "entryPx": 100_000.0,
+                            "unrealizedPnl": -1_200_000.0,
+                        }
+                    ],
+                },
+                {
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "alias": "Trader Two",
+                    "positions": [
+                        {
+                            "coin": "BTC",
+                            "side": "Long",
+                            "positionValue": 800_000.0,
+                            "size": 10.0,
+                            "entryPx": 80_000.0,
+                            "unrealizedPnl": -1_000_000.0,
+                        }
+                    ],
+                },
+            ]
+        }
+
+        snapshot = self.service.build_large_position_snapshot(dashboard)
+
+        self.assertNotIn("0x1111111111111111111111111111111111111111:BTC:long", snapshot)
+        self.assertIn("0x2222222222222222222222222222222222222222:BTC:long", snapshot)
 
     def test_large_position_alerts_exclude_loracle_hype_positions(self) -> None:
         previous = {
