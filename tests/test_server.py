@@ -426,6 +426,50 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(summary["consensus"][0]["oppositeWalletCount"], 1)
         self.assertEqual(summary["consensus"][0]["netWalletCount"], 2)
 
+    def test_quality_weighted_conviction_can_break_raw_wallet_ties(self) -> None:
+        snapshots = [
+            {
+                "address": "0x1111111111111111111111111111111111111111",
+                "recentWinRateRank": {"score": 100.0, "label": "Elite"},
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000.0}],
+            },
+            {
+                "address": "0x2222222222222222222222222222222222222222",
+                "recentWinRateRank": {"score": 100.0, "label": "Elite"},
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000.0}],
+            },
+            {
+                "address": "0x3333333333333333333333333333333333333333",
+                "recentWinRateRank": {"score": 100.0, "label": "Elite"},
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000.0}],
+            },
+            {
+                "address": "0x4444444444444444444444444444444444444444",
+                "recentWinRateRank": {"score": 45.0, "label": "Cold"},
+                "positions": [{"coin": "BTC", "side": "Short", "positionValue": 1_000_000.0}],
+            },
+            {
+                "address": "0x5555555555555555555555555555555555555555",
+                "recentWinRateRank": {"score": 45.0, "label": "Cold"},
+                "positions": [{"coin": "BTC", "side": "Short", "positionValue": 1_000_000.0}],
+            },
+            {
+                "address": "0x6666666666666666666666666666666666666666",
+                "recentWinRateRank": {"score": 45.0, "label": "Cold"},
+                "positions": [{"coin": "BTC", "side": "Short", "positionValue": 1_000_000.0}],
+            },
+        ]
+
+        summary = self.service.build_sentiment_summary(snapshots, min_wallets=3)
+        consensus_by_key = {f'{item["coin"]}:{item["side"]}': item for item in summary["consensus"]}
+
+        self.assertEqual(consensus_by_key["BTC:long"]["netWalletCount"], 0)
+        self.assertGreater(consensus_by_key["BTC:long"]["netWeightedWalletCount"], 0)
+        self.assertEqual(consensus_by_key["BTC:long"]["convictionScore"], 100.0)
+        self.assertEqual(consensus_by_key["BTC:short"]["convictionScore"], 0.0)
+        self.assertEqual(summary["signals"][0]["coin"], "BTC")
+        self.assertEqual(summary["signals"][0]["side"], "long")
+
     def test_stale_positions_need_recent_large_add_for_conviction(self) -> None:
         now_ms = 1_700_000_000_000
         snapshots = [
@@ -444,7 +488,7 @@ class AlertSummaryTests(unittest.TestCase):
                         "coin": "ETH",
                         "direction": "Increase Long",
                         "price": 4_000.0,
-                        "size": 100.0,
+                        "size": 90.0,
                         "time": now_ms - 24 * 60 * 60 * 1000,
                     }
                 ],
@@ -491,6 +535,28 @@ class AlertSummaryTests(unittest.TestCase):
                     }
                 ],
             },
+            {
+                "address": "0x6666666666666666666666666666666666666666",
+                "positions": [
+                    {"coin": "PAXG", "side": "Long", "positionValue": 2_000_000.0, "unrealizedPnl": 1_200_000.0}
+                ],
+                "holdingOnly30d": True,
+                "recentFills": [],
+            },
+            {
+                "address": "0x7777777777777777777777777777777777777777",
+                "positions": [{"coin": "TON", "side": "Long", "positionValue": 1_000_000.0}],
+                "holdingOnly30d": True,
+                "recentFills": [
+                    {
+                        "coin": "TON",
+                        "direction": "Increase Long",
+                        "price": 2.5,
+                        "size": 100_000.0,
+                        "time": now_ms - 2 * 24 * 60 * 60 * 1000,
+                    }
+                ],
+            },
         ]
 
         with patch("server.current_time_ms", return_value=now_ms):
@@ -502,6 +568,8 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertNotIn("SOL:long", consensus_keys)
         self.assertIn("BNB:long", consensus_keys)
         self.assertIn("HYPE:long", consensus_keys)
+        self.assertIn("PAXG:long", consensus_keys)
+        self.assertIn("TON:long", consensus_keys)
 
     def test_stale_positions_remain_visible_in_position_groups(self) -> None:
         dashboard = {

@@ -52,6 +52,8 @@ ALERT_DEDUPE_COOLDOWN_MS = 30 * 60 * 1000
 CLUSTERED_OPEN_ALERT_MIN_WALLETS = 3
 CLUSTERED_OPEN_ALERT_WINDOW_MS = 10 * 60 * 1000
 COUNTED_POSITION_MAX_UNREALIZED_LOSS = -1_000_000
+COUNTED_POSITION_MIN_TREND_PROFIT = 1_000_000
+RECENT_ADD_POSITION_MIN_PCT = 0.20
 RECENT_FILL_ALERT_LIMIT = 100
 CONSENSUS_SIZE_ALERT_MIN_DELTA = 2
 CONSENSUS_SIZE_ALERT_MIN_PCT = 0.5
@@ -1286,6 +1288,16 @@ class WalletTrackerService:
         save_json_file(self.alerts_path, {"config": config, "state": state})
         return self.get_alert_settings()
 
+    def wallet_conviction_weight(self, wallet: dict[str, Any]) -> float:
+        rank = wallet.get("recentWinRateRank")
+        if not isinstance(rank, dict):
+            return 1.0
+        score = to_float(rank.get("score"))
+        label = str(rank.get("label") or "")
+        if score <= 0 or label == "Unranked":
+            return 1.0
+        return round(max(0.5, min(score / ELITE_MIN_QUALITY_SCORE, 1.5)), 3)
+
     def build_high_conviction_signals(
         self,
         consensus: list[dict[str, Any]],
@@ -1309,6 +1321,8 @@ class WalletTrackerService:
                     "walletCount": int(to_float(item.get("walletCount"))),
                     "oppositeWalletCount": int(to_float(item.get("oppositeWalletCount"))),
                     "netWalletCount": int(to_float(item.get("netWalletCount"))),
+                    "weightedWalletCount": round(to_float(item.get("weightedWalletCount")), 3),
+                    "netWeightedWalletCount": round(to_float(item.get("netWeightedWalletCount")), 3),
                     "totalValue": round(to_float(item.get("totalValue")), 2),
                     "convictionScore": round(conviction_score, 1),
                     "threshold": round(to_float(threshold), 1),
@@ -1322,11 +1336,20 @@ class WalletTrackerService:
             )
         return sorted(
             signals,
-            key=lambda item: (-item["convictionScore"], -item["netWalletCount"], -item["walletCount"], item["coin"], item["side"]),
+            key=lambda item: (
+                -item["convictionScore"],
+                -item["netWeightedWalletCount"],
+                -item["netWalletCount"],
+                -item["walletCount"],
+                item["coin"],
+                item["side"],
+            ),
         )
 
     def is_active_for_conviction(self, wallet: dict[str, Any], position: dict[str, Any], *, now_ms: int) -> bool:
         if not wallet.get("holdingOnly30d"):
+            return True
+        if to_float(position.get("unrealizedPnl")) >= COUNTED_POSITION_MIN_TREND_PROFIT:
             return True
         recent_fills = wallet.get("recentFills", [])
         if not isinstance(recent_fills, list):
@@ -1353,7 +1376,11 @@ class WalletTrackerService:
             if fill_time < recent_add_cutoff_ms or fill_time > now_ms:
                 continue
             fill_notional = to_float(fill.get("price")) * abs(to_float(fill.get("size")))
-            if fill_notional >= POSITION_INCREASE_ALERT_MIN_DELTA:
+            position_value = abs(to_float(position.get("positionValue")))
+            relative_add_value = position_value * RECENT_ADD_POSITION_MIN_PCT
+            if fill_notional >= POSITION_INCREASE_ALERT_MIN_DELTA or (
+                relative_add_value > 0 and fill_notional >= relative_add_value
+            ):
                 return True
         return False
 
@@ -1367,6 +1394,7 @@ class WalletTrackerService:
 
         for snapshot in snapshots:
             address = str(snapshot.get("address") or "")
+            wallet_weight = self.wallet_conviction_weight(snapshot)
             for position in snapshot.get("positions", []):
                 coin = normalize_position_coin(position.get("coin"))
                 if not should_count_open_position(address, coin, position):
@@ -1386,6 +1414,7 @@ class WalletTrackerService:
                         "side": side,
                         "walletCount": 0,
                         "totalValue": 0.0,
+                        "weightedWalletCount": 0.0,
                         "wallets": [],
                         "walletAddresses": set(),
                     },
@@ -1394,11 +1423,13 @@ class WalletTrackerService:
                 if address and address not in bucket["walletAddresses"]:
                     bucket["walletAddresses"].add(address)
                     bucket["walletCount"] += 1
+                    bucket["weightedWalletCount"] += wallet_weight
                     bucket["wallets"].append(
                         {
                             "address": address,
                             "alias": snapshot.get("alias", ""),
                             "value": round(position_value, 2),
+                            "qualityWeight": wallet_weight,
                         }
                     )
 
@@ -1416,35 +1447,48 @@ class WalletTrackerService:
                 "coin": bucket["coin"],
                 "side": bucket["side"],
                 "walletCount": bucket["walletCount"],
+                "weightedWalletCount": round(bucket["weightedWalletCount"], 3),
                 "totalValue": round(bucket["totalValue"], 2),
                 "wallets": sorted(bucket["wallets"], key=lambda item: item["value"], reverse=True),
             }
             for bucket in aggregate.values()
             if bucket["walletCount"] >= min_wallets
         ]
-        coin_side_counts: dict[str, dict[str, int]] = {}
+        coin_side_counts: dict[str, dict[str, float]] = {}
+        coin_side_raw_counts: dict[str, dict[str, int]] = {}
         for bucket in aggregate.values():
-            side_counts = coin_side_counts.setdefault(str(bucket["coin"]), {"long": 0, "short": 0})
-            side_counts[str(bucket["side"])] = int(to_float(bucket["walletCount"]))
-        max_net_wallet_count = 0
+            side_counts = coin_side_counts.setdefault(str(bucket["coin"]), {"long": 0.0, "short": 0.0})
+            side_counts[str(bucket["side"])] = to_float(bucket["weightedWalletCount"])
+            raw_counts = coin_side_raw_counts.setdefault(str(bucket["coin"]), {"long": 0, "short": 0})
+            raw_counts[str(bucket["side"])] = int(to_float(bucket["walletCount"]))
+        max_net_weighted_wallet_count = 0.0
         for item in consensus:
             side = str(item["side"])
             side_counts = coin_side_counts.get(str(item["coin"]), {})
+            raw_counts = coin_side_raw_counts.get(str(item["coin"]), {})
             opposite_side = "short" if side == "long" else "long"
             side_wallet_count = int(to_float(item["walletCount"]))
-            opposite_wallet_count = int(to_float(side_counts.get(opposite_side)))
+            opposite_wallet_count = int(to_float(raw_counts.get(opposite_side)))
             net_wallet_count = max(0, side_wallet_count - opposite_wallet_count)
+            side_weighted_wallet_count = to_float(item["weightedWalletCount"])
+            opposite_weighted_wallet_count = to_float(side_counts.get(opposite_side))
+            net_weighted_wallet_count = max(0.0, side_weighted_wallet_count - opposite_weighted_wallet_count)
             item["oppositeWalletCount"] = opposite_wallet_count
             item["netWalletCount"] = net_wallet_count
-            item["longWalletCount"] = int(to_float(side_counts.get("long")))
-            item["shortWalletCount"] = int(to_float(side_counts.get("short")))
-            max_net_wallet_count = max(max_net_wallet_count, net_wallet_count)
+            item["oppositeWeightedWalletCount"] = round(opposite_weighted_wallet_count, 3)
+            item["netWeightedWalletCount"] = round(net_weighted_wallet_count, 3)
+            item["longWalletCount"] = int(to_float(raw_counts.get("long")))
+            item["shortWalletCount"] = int(to_float(raw_counts.get("short")))
+            item["longWeightedWalletCount"] = round(to_float(side_counts.get("long")), 3)
+            item["shortWeightedWalletCount"] = round(to_float(side_counts.get("short")), 3)
+            max_net_weighted_wallet_count = max(max_net_weighted_wallet_count, net_weighted_wallet_count)
         for item in consensus:
-            net_score = (item["netWalletCount"] / max_net_wallet_count) if max_net_wallet_count else 0.0
+            net_score = (to_float(item["netWeightedWalletCount"]) / max_net_weighted_wallet_count) if max_net_weighted_wallet_count else 0.0
             item["convictionScore"] = round(net_score * 100, 1)
         consensus = sorted(
             consensus,
             key=lambda item: (
+                -item["netWeightedWalletCount"],
                 -item["netWalletCount"],
                 -item["walletCount"],
                 str(item.get("coin", "")).startswith("@"),
@@ -2171,6 +2215,8 @@ class WalletTrackerService:
             if signals:
                 for item in signals[:10]:
                     net_note = f', net +{int(to_float(item.get("netWalletCount")))}' if "netWalletCount" in item else ""
+                    if "netWeightedWalletCount" in item:
+                        net_note += f', qnet +{to_float(item.get("netWeightedWalletCount")):.1f}'
                     lines.append(
                         f'- {str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]} '
                         f'({item["walletCount"]} wallets{net_note}, conviction {to_float(item.get("convictionScore")):.0f}/100)'
@@ -2185,6 +2231,8 @@ class WalletTrackerService:
             if consensus:
                 for item in consensus[:10]:
                     net_note = f', net +{int(to_float(item.get("netWalletCount")))}' if "netWalletCount" in item else ""
+                    if "netWeightedWalletCount" in item:
+                        net_note += f', qnet +{to_float(item.get("netWeightedWalletCount")):.1f}'
                     lines.append(
                         f'- {item["coin"]} {item["side"]} ({item["walletCount"]} wallets{net_note}, conviction {item.get("convictionScore", 0):.0f}/100)'
                     )
@@ -2310,6 +2358,8 @@ class WalletTrackerService:
         if signals:
             for index, item in enumerate(signals[:20], start=1):
                 net_note = f', net +{int(to_float(item.get("netWalletCount")))}' if "netWalletCount" in item else ""
+                if "netWeightedWalletCount" in item:
+                    net_note += f', qnet +{to_float(item.get("netWeightedWalletCount")):.1f}'
                 lines.append(
                     f'{index}. {str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]} '
                     f'({item["walletCount"]} wallets{net_note}, conviction {to_float(item.get("convictionScore")):.0f}/100)'
