@@ -342,6 +342,90 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(summary["consensus"][0]["convictionScore"], 100.0)
         self.assertGreater(summary["consensus"][0]["convictionScore"], summary["consensus"][1]["convictionScore"])
 
+    def test_build_sentiment_summary_uses_net_wallet_conviction(self) -> None:
+        snapshots = [
+            {
+                "address": "0x1111111111111111111111111111111111111111",
+                "positions": [
+                    {"coin": "BTC", "side": "Long", "positionValue": 1_000_000.0},
+                    {"coin": "BNB", "side": "Short", "positionValue": 1_000_000.0},
+                ],
+            },
+            {
+                "address": "0x2222222222222222222222222222222222222222",
+                "positions": [
+                    {"coin": "BTC", "side": "Long", "positionValue": 1_000_000.0},
+                    {"coin": "BNB", "side": "Short", "positionValue": 1_000_000.0},
+                ],
+            },
+            {
+                "address": "0x3333333333333333333333333333333333333333",
+                "positions": [
+                    {"coin": "BTC", "side": "Long", "positionValue": 1_000_000.0},
+                    {"coin": "BNB", "side": "Short", "positionValue": 1_000_000.0},
+                ],
+            },
+            {
+                "address": "0x4444444444444444444444444444444444444444",
+                "positions": [
+                    {"coin": "BTC", "side": "Short", "positionValue": 1_000_000.0},
+                    {"coin": "BNB", "side": "Short", "positionValue": 1_000_000.0},
+                ],
+            },
+            {
+                "address": "0x5555555555555555555555555555555555555555",
+                "positions": [
+                    {"coin": "BTC", "side": "Short", "positionValue": 1_000_000.0},
+                ],
+            },
+            {
+                "address": "0x6666666666666666666666666666666666666666",
+                "positions": [
+                    {"coin": "BTC", "side": "Short", "positionValue": 1_000_000.0},
+                ],
+            },
+        ]
+
+        summary = self.service.build_sentiment_summary(snapshots, min_wallets=3)
+        consensus_by_key = {f'{item["coin"]}:{item["side"]}': item for item in summary["consensus"]}
+
+        self.assertEqual(consensus_by_key["BTC:long"]["netWalletCount"], 0)
+        self.assertEqual(consensus_by_key["BTC:short"]["netWalletCount"], 0)
+        self.assertEqual(consensus_by_key["BTC:long"]["convictionScore"], 0.0)
+        self.assertEqual(consensus_by_key["BTC:short"]["convictionScore"], 0.0)
+        self.assertEqual(consensus_by_key["BNB:short"]["netWalletCount"], 4)
+        self.assertEqual(consensus_by_key["BNB:short"]["convictionScore"], 100.0)
+        self.assertEqual(summary["signals"][0]["coin"], "BNB")
+        self.assertNotIn("BTC", {item["coin"] for item in summary["signals"]})
+
+    def test_net_wallet_conviction_counts_below_threshold_opposition(self) -> None:
+        snapshots = [
+            {
+                "address": "0x1111111111111111111111111111111111111111",
+                "positions": [{"coin": "SOL", "side": "Short", "positionValue": 1_000_000.0}],
+            },
+            {
+                "address": "0x2222222222222222222222222222222222222222",
+                "positions": [{"coin": "SOL", "side": "Short", "positionValue": 1_000_000.0}],
+            },
+            {
+                "address": "0x3333333333333333333333333333333333333333",
+                "positions": [{"coin": "SOL", "side": "Short", "positionValue": 1_000_000.0}],
+            },
+            {
+                "address": "0x4444444444444444444444444444444444444444",
+                "positions": [{"coin": "SOL", "side": "Long", "positionValue": 1_000_000.0}],
+            },
+        ]
+
+        summary = self.service.build_sentiment_summary(snapshots, min_wallets=3)
+
+        self.assertEqual(len(summary["consensus"]), 1)
+        self.assertEqual(summary["consensus"][0]["coin"], "SOL")
+        self.assertEqual(summary["consensus"][0]["side"], "short")
+        self.assertEqual(summary["consensus"][0]["oppositeWalletCount"], 1)
+        self.assertEqual(summary["consensus"][0]["netWalletCount"], 2)
+
     def test_build_sentiment_summary_emits_high_conviction_signals(self) -> None:
         snapshots = [
             {

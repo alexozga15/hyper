@@ -1307,19 +1307,22 @@ class WalletTrackerService:
                     "action": action,
                     "strength": strength,
                     "walletCount": int(to_float(item.get("walletCount"))),
+                    "oppositeWalletCount": int(to_float(item.get("oppositeWalletCount"))),
+                    "netWalletCount": int(to_float(item.get("netWalletCount"))),
                     "totalValue": round(to_float(item.get("totalValue")), 2),
                     "convictionScore": round(conviction_score, 1),
                     "threshold": round(to_float(threshold), 1),
                     "wallets": item.get("wallets", [])[:5],
                     "rationale": (
                         f'{int(to_float(item.get("walletCount")))} wallets are {side} '
-                        f'with {conviction_score:.0f}/100 count-based conviction.'
+                        f'against {int(to_float(item.get("oppositeWalletCount")))} opposite wallets, '
+                        f'net +{int(to_float(item.get("netWalletCount")))}.'
                     ),
                 }
             )
         return sorted(
             signals,
-            key=lambda item: (-item["convictionScore"], -item["walletCount"], item["coin"], item["side"]),
+            key=lambda item: (-item["convictionScore"], -item["netWalletCount"], -item["walletCount"], item["coin"], item["side"]),
         )
 
     def build_sentiment_summary(self, snapshots: list[dict[str, Any]], min_wallets: int) -> dict[str, Any]:
@@ -1384,13 +1387,35 @@ class WalletTrackerService:
             for bucket in aggregate.values()
             if bucket["walletCount"] >= min_wallets
         ]
-        max_wallet_count = max((item["walletCount"] for item in consensus), default=0)
+        coin_side_counts: dict[str, dict[str, int]] = {}
+        for bucket in aggregate.values():
+            side_counts = coin_side_counts.setdefault(str(bucket["coin"]), {"long": 0, "short": 0})
+            side_counts[str(bucket["side"])] = int(to_float(bucket["walletCount"]))
+        max_net_wallet_count = 0
         for item in consensus:
-            wallet_score = (item["walletCount"] / max_wallet_count) if max_wallet_count else 0.0
-            item["convictionScore"] = round(wallet_score * 100, 1)
+            side = str(item["side"])
+            side_counts = coin_side_counts.get(str(item["coin"]), {})
+            opposite_side = "short" if side == "long" else "long"
+            side_wallet_count = int(to_float(item["walletCount"]))
+            opposite_wallet_count = int(to_float(side_counts.get(opposite_side)))
+            net_wallet_count = max(0, side_wallet_count - opposite_wallet_count)
+            item["oppositeWalletCount"] = opposite_wallet_count
+            item["netWalletCount"] = net_wallet_count
+            item["longWalletCount"] = int(to_float(side_counts.get("long")))
+            item["shortWalletCount"] = int(to_float(side_counts.get("short")))
+            max_net_wallet_count = max(max_net_wallet_count, net_wallet_count)
+        for item in consensus:
+            net_score = (item["netWalletCount"] / max_net_wallet_count) if max_net_wallet_count else 0.0
+            item["convictionScore"] = round(net_score * 100, 1)
         consensus = sorted(
             consensus,
-            key=lambda item: (-item["walletCount"], str(item.get("coin", "")).startswith("@"), item["coin"], item["side"]),
+            key=lambda item: (
+                -item["netWalletCount"],
+                -item["walletCount"],
+                str(item.get("coin", "")).startswith("@"),
+                item["coin"],
+                item["side"],
+            ),
         )
         hip3_consensus = [item for item in consensus if str(item.get("coin", "")).startswith("@")]
         signals = self.build_high_conviction_signals(consensus)
@@ -2110,9 +2135,10 @@ class WalletTrackerService:
             lines.append("Signals:")
             if signals:
                 for item in signals[:10]:
+                    net_note = f', net +{int(to_float(item.get("netWalletCount")))}' if "netWalletCount" in item else ""
                     lines.append(
                         f'- {str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]} '
-                        f'({item["walletCount"]} wallets, conviction {to_float(item.get("convictionScore")):.0f}/100)'
+                        f'({item["walletCount"]} wallets{net_note}, conviction {to_float(item.get("convictionScore")):.0f}/100)'
                     )
             else:
                 lines.append(f'- None at {HIGH_CONVICTION_SIGNAL_THRESHOLD:.0f}+ conviction')
@@ -2123,8 +2149,9 @@ class WalletTrackerService:
             lines.append("Consensus:")
             if consensus:
                 for item in consensus[:10]:
+                    net_note = f', net +{int(to_float(item.get("netWalletCount")))}' if "netWalletCount" in item else ""
                     lines.append(
-                        f'- {item["coin"]} {item["side"]} ({item["walletCount"]} wallets, conviction {item.get("convictionScore", 0):.0f}/100)'
+                        f'- {item["coin"]} {item["side"]} ({item["walletCount"]} wallets{net_note}, conviction {item.get("convictionScore", 0):.0f}/100)'
                     )
             else:
                 lines.append("- None")
@@ -2247,9 +2274,10 @@ class WalletTrackerService:
         lines = [title, f'Threshold: {HIGH_CONVICTION_SIGNAL_THRESHOLD:.0f}/100 conviction']
         if signals:
             for index, item in enumerate(signals[:20], start=1):
+                net_note = f', net +{int(to_float(item.get("netWalletCount")))}' if "netWalletCount" in item else ""
                 lines.append(
                     f'{index}. {str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]} '
-                    f'({item["walletCount"]} wallets, conviction {to_float(item.get("convictionScore")):.0f}/100)'
+                    f'({item["walletCount"]} wallets{net_note}, conviction {to_float(item.get("convictionScore")):.0f}/100)'
                 )
         else:
             lines.append("- No high-conviction signals right now")
