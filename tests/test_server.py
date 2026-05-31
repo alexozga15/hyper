@@ -1311,7 +1311,7 @@ class AlertSummaryTests(unittest.TestCase):
                     "address": "0x2222222222222222222222222222222222222222",
                     "positions": [
                         {"coin": "xyz:NVDA", "side": "Long", "positionValue": 150000.0},
-                        {"coin": "EWY", "side": "Long", "positionValue": 200000.0},
+                        {"coin": "EWY", "side": "Long", "positionValue": 120000.0},
                     ],
                 },
                 {
@@ -1319,7 +1319,7 @@ class AlertSummaryTests(unittest.TestCase):
                     "address": "0x3333333333333333333333333333333333333333",
                     "positions": [
                         {"coin": "xyz:NVDA", "side": "Long", "positionValue": 100000.0},
-                        {"coin": "EWY", "side": "Long", "positionValue": 150000.0},
+                        {"coin": "EWY", "side": "Long", "positionValue": 60000.0},
                     ],
                 },
             ],
@@ -1327,7 +1327,7 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_positions_message(dashboard)
         self.assertIn("Stocks / indices:", message)
-        self.assertIn("EWY long (3 wallets, 3 positions, $600K)", message)
+        self.assertIn("EWY long (3 wallets, 3 positions, $430K)", message)
         self.assertIn("NVDA long (3 wallets, 3 positions, $550K)", message)
         self.assertNotIn("SPACEX short", message)
         self.assertNotIn("xyz:NVDA", message)

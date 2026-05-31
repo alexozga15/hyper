@@ -2405,7 +2405,7 @@ class WalletTrackerService:
             stock_like_only=False,
             commodity_like_only=True,
         )
-        stock_groups = self.build_position_groups(dashboard, hip3_only=False, stock_like_only=True)
+        stock_groups = self.build_position_groups(dashboard, hip3_only=False, stock_like_only=True, min_value=0)
         total_positions = sum(item["positionCount"] for item in position_groups + commodity_groups + stock_groups)
 
         if not position_groups and not commodity_groups and not stock_groups:
