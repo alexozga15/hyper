@@ -1325,18 +1325,57 @@ class WalletTrackerService:
             key=lambda item: (-item["convictionScore"], -item["netWalletCount"], -item["walletCount"], item["coin"], item["side"]),
         )
 
+    def is_active_for_conviction(self, wallet: dict[str, Any], position: dict[str, Any], *, now_ms: int) -> bool:
+        if "recentFills" not in wallet:
+            return True
+        recent_fills = wallet.get("recentFills", [])
+        if not isinstance(recent_fills, list):
+            return True
+
+        coin = normalize_position_coin(position.get("coin"))
+        side = str(position.get("side") or "").lower()
+        if side not in {"long", "short"}:
+            return True
+
+        stale_cutoff_ms = now_ms - HOLDING_ONLY_WINDOW_MS
+        recent_add_cutoff_ms = now_ms - RANKING_WINDOW_MS
+        for fill in recent_fills:
+            if not isinstance(fill, dict):
+                continue
+            classified = self.classify_fill_direction(fill.get("direction"))
+            if not classified:
+                continue
+            fill_side, event = classified
+            if event != "add" or fill_side != side:
+                continue
+            if normalize_position_coin(fill.get("coin")).upper() != coin.upper():
+                continue
+            fill_time = int(to_float(fill.get("time")))
+            if fill_time < stale_cutoff_ms or fill_time > now_ms:
+                continue
+            direction = str(fill.get("direction") or "").lower()
+            if "open" in direction:
+                return True
+            fill_notional = to_float(fill.get("price")) * abs(to_float(fill.get("size")))
+            if fill_time >= recent_add_cutoff_ms and fill_notional >= POSITION_INCREASE_ALERT_MIN_DELTA:
+                return True
+        return False
+
     def build_sentiment_summary(self, snapshots: list[dict[str, Any]], min_wallets: int) -> dict[str, Any]:
         aggregate: dict[tuple[str, str], dict[str, Any]] = {}
         total_long = 0.0
         total_short = 0.0
         long_wallets: set[str] = set()
         short_wallets: set[str] = set()
+        now_ms = current_time_ms()
 
         for snapshot in snapshots:
             address = str(snapshot.get("address") or "")
             for position in snapshot.get("positions", []):
                 coin = normalize_position_coin(position.get("coin"))
                 if not should_count_open_position(address, coin, position):
+                    continue
+                if not self.is_active_for_conviction(snapshot, position, now_ms=now_ms):
                     continue
                 side = str(position.get("side") or "Flat").lower()
                 position_value = to_float(position.get("positionValue"))

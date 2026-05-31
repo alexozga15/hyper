@@ -426,6 +426,104 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(summary["consensus"][0]["oppositeWalletCount"], 1)
         self.assertEqual(summary["consensus"][0]["netWalletCount"], 2)
 
+    def test_stale_positions_need_recent_large_add_for_conviction(self) -> None:
+        now_ms = 1_700_000_000_000
+        snapshots = [
+            {
+                "address": "0x1111111111111111111111111111111111111111",
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 2_000_000.0}],
+                "recentFills": [],
+            },
+            {
+                "address": "0x2222222222222222222222222222222222222222",
+                "positions": [{"coin": "ETH", "side": "Long", "positionValue": 2_000_000.0}],
+                "recentFills": [
+                    {
+                        "coin": "ETH",
+                        "direction": "Increase Long",
+                        "price": 4_000.0,
+                        "size": 100.0,
+                        "time": now_ms - 24 * 60 * 60 * 1000,
+                    }
+                ],
+            },
+            {
+                "address": "0x3333333333333333333333333333333333333333",
+                "positions": [{"coin": "SOL", "side": "Long", "positionValue": 2_000_000.0}],
+                "recentFills": [
+                    {
+                        "coin": "SOL",
+                        "direction": "Increase Long",
+                        "price": 200.0,
+                        "size": 3_000.0,
+                        "time": now_ms - 10 * 24 * 60 * 60 * 1000,
+                    }
+                ],
+            },
+            {
+                "address": "0x4444444444444444444444444444444444444444",
+                "positions": [{"coin": "BNB", "side": "Long", "positionValue": 2_000_000.0}],
+                "recentFills": [
+                    {
+                        "coin": "BNB",
+                        "direction": "Increase Long",
+                        "price": 700.0,
+                        "size": 1_000.0,
+                        "time": now_ms - 2 * 24 * 60 * 60 * 1000,
+                    }
+                ],
+            },
+            {
+                "address": "0x5555555555555555555555555555555555555555",
+                "positions": [{"coin": "HYPE", "side": "Long", "positionValue": 2_000_000.0}],
+                "recentFills": [
+                    {
+                        "coin": "HYPE",
+                        "direction": "Open Long",
+                        "price": 50.0,
+                        "size": 1_000.0,
+                        "time": now_ms - 20 * 24 * 60 * 60 * 1000,
+                    }
+                ],
+            },
+        ]
+
+        with patch("server.current_time_ms", return_value=now_ms):
+            summary = self.service.build_sentiment_summary(snapshots, min_wallets=1)
+
+        consensus_keys = {f'{item["coin"]}:{item["side"]}' for item in summary["consensus"]}
+        self.assertNotIn("BTC:long", consensus_keys)
+        self.assertNotIn("ETH:long", consensus_keys)
+        self.assertNotIn("SOL:long", consensus_keys)
+        self.assertIn("BNB:long", consensus_keys)
+        self.assertIn("HYPE:long", consensus_keys)
+
+    def test_stale_positions_remain_visible_in_position_groups(self) -> None:
+        dashboard = {
+            "generatedAt": "2026-04-09T06:00:00Z",
+            "wallets": [
+                {
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 800_000.0}],
+                    "recentFills": [],
+                },
+                {
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 800_000.0}],
+                    "recentFills": [],
+                },
+                {
+                    "address": "0x3333333333333333333333333333333333333333",
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 800_000.0}],
+                    "recentFills": [],
+                },
+            ],
+        }
+
+        message = self.service.build_positions_message(dashboard)
+
+        self.assertIn("BTC long (3 wallets, 3 positions, $2,400K", message)
+
     def test_build_sentiment_summary_emits_high_conviction_signals(self) -> None:
         snapshots = [
             {
