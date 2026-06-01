@@ -205,6 +205,26 @@ def build_reply(
     return build_help_message()
 
 
+def build_summary_cache(
+    service: WalletTrackerService,
+    dashboard: dict[str, Any],
+    min_wallets: int,
+) -> dict[str, Any]:
+    if hasattr(service, "build_monthly_sentiment_summary") and hasattr(service, "alerts_path"):
+        raw = load_json_file(service.alerts_path, {})
+        stored_config = raw.get("config", {}) if isinstance(raw, dict) else {}
+        state = raw.get("state", {}) if isinstance(raw, dict) else {}
+        summary, _cohort = service.build_monthly_sentiment_summary(
+            dashboard,
+            min_wallets,
+            state,
+            persist=True,
+            stored_config=stored_config,
+        )
+        return summary
+    return service.build_sentiment_summary(dashboard["wallets"], min_wallets)
+
+
 def main() -> int:
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     allowed_chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
@@ -247,7 +267,7 @@ def main() -> int:
             if dashboard_cache is None:
                 dashboard_cache = service.dashboard()
             if command in SUMMARY_COMMANDS and summary_cache is None:
-                summary_cache = service.build_sentiment_summary(dashboard_cache["wallets"], min_wallets)
+                summary_cache = build_summary_cache(service, dashboard_cache, min_wallets)
 
         reply = build_reply(service, command, position_query, summary_cache, dashboard_cache, min_wallets)
 

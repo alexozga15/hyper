@@ -73,6 +73,7 @@ ELITE_WALLET_OVERRIDES = {"0xc9e839a529d1a3a46e2b48d20c461d4afecb72e4"}
 TOP_CONVICTION_WALLET_COUNT = 10
 TOP_CONVICTION_WALLET_MULTIPLIER = 1.5
 NON_TOP_CONVICTION_WALLET_MULTIPLIER = 0.5
+TOXIC_CONVICTION_WALLET_MAX_30D_PNL = -500_000
 RANKING_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 HOLDING_ONLY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
 OIL_POSITION_ALIASES = {"flx:OIL", "cash:WTI", "xyz:BRENTOIL", "xyz:CL"}
@@ -1244,6 +1245,7 @@ class WalletTrackerService:
             "lastCheckedAt": state.get("lastCheckedAt"),
             "lastSentAt": state.get("lastSentAt"),
             "lastSummary": state.get("summary", {}),
+            "topConvictionWallets": state.get("topConvictionWallets", {}),
         }
 
     def resolve_alert_config(self, stored_config: dict[str, Any]) -> dict[str, Any]:
@@ -1292,7 +1294,15 @@ class WalletTrackerService:
         return self.get_alert_settings()
 
     def top_conviction_wallet_addresses(self, wallets: list[dict[str, Any]], *, limit: int = TOP_CONVICTION_WALLET_COUNT) -> set[str]:
-        ranked = sorted(
+        ranked = self.rank_top_conviction_wallets(wallets)
+        return {
+            str(wallet.get("address") or "").lower()
+            for wallet in ranked[:limit]
+            if str(wallet.get("address") or "").strip()
+        }
+
+    def rank_top_conviction_wallets(self, wallets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return sorted(
             wallets,
             key=lambda wallet: (
                 to_float(wallet.get("recentWinRateRank", {}).get("score")) if isinstance(wallet.get("recentWinRateRank"), dict) else 0.0,
@@ -1302,11 +1312,99 @@ class WalletTrackerService:
             ),
             reverse=True,
         )
-        return {
-            str(wallet.get("address") or "").lower()
-            for wallet in ranked[:limit]
+
+    def is_toxic_conviction_wallet(self, wallet: dict[str, Any]) -> bool:
+        return (
+            to_float(wallet.get("realizedPnl30d")) < TOXIC_CONVICTION_WALLET_MAX_30D_PNL
+            or to_float(wallet.get("unrealizedPnl")) < COUNTED_POSITION_MAX_UNREALIZED_LOSS
+        )
+
+    def current_top_conviction_month(self) -> str:
+        return datetime.fromtimestamp(current_time_ms() / 1000, timezone.utc).strftime("%Y-%m")
+
+    def resolve_monthly_top_conviction_cohort(
+        self,
+        wallets: list[dict[str, Any]],
+        state: dict[str, Any],
+        *,
+        month_key: str | None = None,
+        limit: int = TOP_CONVICTION_WALLET_COUNT,
+    ) -> tuple[set[str], dict[str, Any]]:
+        active_month = month_key or self.current_top_conviction_month()
+        wallet_by_address = {
+            str(wallet.get("address") or "").lower(): wallet
+            for wallet in wallets
             if str(wallet.get("address") or "").strip()
         }
+        stored = state.get("topConvictionWallets", {}) if isinstance(state, dict) else {}
+        stored_addresses = [
+            str(address or "").lower()
+            for address in (stored.get("addresses", []) if isinstance(stored, dict) else [])
+            if str(address or "").strip()
+        ]
+        use_stored = isinstance(stored, dict) and stored.get("month") == active_month and stored_addresses
+
+        toxic_addresses = {
+            address
+            for address, wallet in wallet_by_address.items()
+            if self.is_toxic_conviction_wallet(wallet)
+        }
+        selected: list[str] = []
+        demoted: list[str] = []
+        if use_stored:
+            for address in stored_addresses:
+                if address not in wallet_by_address or address in toxic_addresses:
+                    demoted.append(address)
+                    continue
+                if address not in selected:
+                    selected.append(address)
+
+        ranked = self.rank_top_conviction_wallets(wallets)
+        for wallet in ranked:
+            address = str(wallet.get("address") or "").lower()
+            if not address or address in selected or address in toxic_addresses:
+                continue
+            if not use_stored or len(selected) < limit:
+                selected.append(address)
+            if len(selected) >= limit:
+                break
+
+        selected = selected[:limit]
+        cohort = {
+            "month": active_month,
+            "addresses": selected,
+            "updatedAt": now_iso(),
+            "demoted": demoted,
+        }
+        return set(selected), cohort
+
+    def build_monthly_sentiment_summary(
+        self,
+        dashboard: dict[str, Any],
+        min_wallets: int,
+        state: dict[str, Any],
+        *,
+        persist: bool = False,
+        stored_config: dict[str, Any] | None = None,
+        month_key: str | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        top_wallet_addresses, cohort = self.resolve_monthly_top_conviction_cohort(
+            dashboard.get("wallets", []),
+            state,
+            month_key=month_key,
+        )
+        summary = self.build_sentiment_summary(
+            dashboard.get("wallets", []),
+            min_wallets,
+            top_wallet_addresses=top_wallet_addresses,
+        )
+        summary["topConvictionWallets"] = cohort
+        if persist and isinstance(state, dict) and state.get("topConvictionWallets") != cohort:
+            save_json_file(
+                self.alerts_path,
+                {"config": stored_config or {}, "state": {**state, "topConvictionWallets": cohort}},
+            )
+        return summary, cohort
 
     def wallet_conviction_weight(self, wallet: dict[str, Any], top_wallet_addresses: set[str] | None = None) -> float:
         rank = wallet.get("recentWinRateRank")
@@ -1411,18 +1509,26 @@ class WalletTrackerService:
                 return True
         return False
 
-    def build_sentiment_summary(self, snapshots: list[dict[str, Any]], min_wallets: int) -> dict[str, Any]:
+    def build_sentiment_summary(
+        self,
+        snapshots: list[dict[str, Any]],
+        min_wallets: int,
+        *,
+        top_wallet_addresses: set[str] | None = None,
+    ) -> dict[str, Any]:
         aggregate: dict[tuple[str, str], dict[str, Any]] = {}
         total_long = 0.0
         total_short = 0.0
         long_wallets: set[str] = set()
         short_wallets: set[str] = set()
         now_ms = current_time_ms()
-        top_wallet_addresses = self.top_conviction_wallet_addresses(snapshots)
+        active_top_wallet_addresses = (
+            top_wallet_addresses if top_wallet_addresses is not None else self.top_conviction_wallet_addresses(snapshots)
+        )
 
         for snapshot in snapshots:
             address = str(snapshot.get("address") or "")
-            wallet_weight = self.wallet_conviction_weight(snapshot, top_wallet_addresses)
+            wallet_weight = self.wallet_conviction_weight(snapshot, active_top_wallet_addresses)
             for position in snapshot.get("positions", []):
                 coin = normalize_position_coin(position.get("coin"))
                 if not should_count_open_position(address, coin, position):
@@ -2306,7 +2412,17 @@ class WalletTrackerService:
 
     def live_sentiment_summary(self, min_wallets: int) -> dict[str, Any]:
         dashboard = self.dashboard()
-        return self.build_sentiment_summary(dashboard["wallets"], min_wallets)
+        raw = load_json_file(self.alerts_path, {})
+        stored_config = raw.get("config", {}) if isinstance(raw, dict) else {}
+        state = raw.get("state", {}) if isinstance(raw, dict) else {}
+        summary, _cohort = self.build_monthly_sentiment_summary(
+            dashboard,
+            min_wallets,
+            state,
+            persist=True,
+            stored_config=stored_config,
+        )
+        return summary
 
     def build_position_groups(
         self,
@@ -2719,7 +2835,7 @@ class WalletTrackerService:
         min_wallets = max(1, int(config.get("minConsensusWallets", DEFAULT_CONSENSUS_THRESHOLD)))
 
         dashboard = self.dashboard()
-        summary = self.build_sentiment_summary(dashboard["wallets"], min_wallets)
+        summary, top_cohort = self.build_monthly_sentiment_summary(dashboard, min_wallets, state)
         previous_summary = state.get("summary", {}) if isinstance(state, dict) else {}
         previous_positions = state.get("largePositions", {}) if isinstance(state, dict) else {}
         previous_dedupe = state.get("alertDedupe", {}) if isinstance(state, dict) else {}
@@ -2793,6 +2909,7 @@ class WalletTrackerService:
             **state,
             "lastCheckedAt": checked_at,
             "lastSentAt": checked_at if sent else state.get("lastSentAt"),
+            "topConvictionWallets": top_cohort,
         }
         if not should_notify or sent or not config.get("enabled"):
             new_state["summary"] = summary
@@ -2819,17 +2936,17 @@ class WalletTrackerService:
 
     def send_hourly_update(self, min_wallets: int, bot_token: str, chat_id: str) -> dict[str, Any]:
         dashboard = self.dashboard()
-        summary = self.build_sentiment_summary(dashboard["wallets"], min_wallets)
+        raw = load_json_file(self.alerts_path, {})
+        stored_config = raw.get("config", {}) if isinstance(raw, dict) else {}
+        config = self.resolve_alert_config(stored_config)
+        state = raw.get("state", {}) if isinstance(raw, dict) else {}
+        summary, top_cohort = self.build_monthly_sentiment_summary(dashboard, min_wallets, state)
         current_positions = self.build_large_position_snapshot(dashboard)
         self.send_telegram_message(
             bot_token,
             chat_id,
             self.build_hourly_update_message(dashboard, summary, min_wallets),
         )
-        raw = load_json_file(self.alerts_path, {})
-        stored_config = raw.get("config", {}) if isinstance(raw, dict) else {}
-        config = self.resolve_alert_config(stored_config)
-        state = raw.get("state", {}) if isinstance(raw, dict) else {}
         previous_positions = state.get("largePositions", {}) if isinstance(state, dict) else {}
         previous_dedupe = state.get("alertDedupe", {}) if isinstance(state, dict) else {}
         fill_prices = self.build_recent_fill_price_map(dashboard, since_ms=iso_to_ms(state.get("lastCheckedAt")))
@@ -2873,6 +2990,7 @@ class WalletTrackerService:
             "summary": summary,
             "lastCheckedAt": synced_at,
             "lastHourlySyncedAt": synced_at,
+            "topConvictionWallets": top_cohort,
         }
         if not should_send_position_alert or position_alert_sent or not config.get("enabled"):
             new_state["largePositions"] = current_positions

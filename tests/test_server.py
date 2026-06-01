@@ -516,6 +516,124 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(consensus_by_key["BTC:long"]["convictionScore"], 100.0)
         self.assertEqual(consensus_by_key["BTC:short"]["convictionScore"], 0.0)
 
+    def test_monthly_top_conviction_cohort_reuses_same_month(self) -> None:
+        wallets = [
+            {
+                "address": f"0x{index:040x}",
+                "recentWinRateRank": {"score": 10.0, "label": "Cold"},
+                "realizedPnl30d": 0.0,
+                "positions": [],
+            }
+            for index in range(1, 11)
+        ]
+        wallets.append(
+            {
+                "address": "0x0000000000000000000000000000000000000011",
+                "recentWinRateRank": {"score": 100.0, "label": "Elite"},
+                "realizedPnl30d": 1_000_000.0,
+                "positions": [],
+            }
+        )
+        stored_addresses = [f"0x{index:040x}" for index in range(1, 11)]
+        state = {"topConvictionWallets": {"month": "2026-06", "addresses": stored_addresses}}
+
+        selected, cohort = self.service.resolve_monthly_top_conviction_cohort(
+            wallets,
+            state,
+            month_key="2026-06",
+            limit=10,
+        )
+
+        self.assertEqual(selected, set(stored_addresses))
+        self.assertEqual(cohort["addresses"], stored_addresses)
+        self.assertNotIn("0x0000000000000000000000000000000000000011", selected)
+
+    def test_monthly_top_conviction_cohort_refreshes_new_month(self) -> None:
+        wallets = [
+            {
+                "address": f"0x{index:040x}",
+                "recentWinRateRank": {"score": 10.0, "label": "Cold"},
+                "realizedPnl30d": 0.0,
+                "positions": [],
+            }
+            for index in range(1, 5)
+        ]
+        wallets.append(
+            {
+                "address": "0x0000000000000000000000000000000000000011",
+                "recentWinRateRank": {"score": 100.0, "label": "Elite"},
+                "realizedPnl30d": 1_000_000.0,
+                "positions": [],
+            }
+        )
+        state = {
+            "topConvictionWallets": {
+                "month": "2026-05",
+                "addresses": [f"0x{index:040x}" for index in range(1, 4)],
+            }
+        }
+
+        selected, cohort = self.service.resolve_monthly_top_conviction_cohort(
+            wallets,
+            state,
+            month_key="2026-06",
+            limit=3,
+        )
+
+        self.assertIn("0x0000000000000000000000000000000000000011", selected)
+        self.assertEqual(cohort["month"], "2026-06")
+        self.assertEqual(len(cohort["addresses"]), 3)
+
+    def test_monthly_top_conviction_cohort_demotes_toxic_wallet(self) -> None:
+        toxic_address = "0x0000000000000000000000000000000000000099"
+        wallets = [
+            {
+                "address": toxic_address,
+                "recentWinRateRank": {"score": 100.0, "label": "Elite"},
+                "realizedPnl30d": -600_000.0,
+                "positions": [],
+            },
+            {
+                "address": "0x0000000000000000000000000000000000000001",
+                "recentWinRateRank": {"score": 80.0, "label": "Strong"},
+                "realizedPnl30d": 100_000.0,
+                "positions": [],
+            },
+            {
+                "address": "0x0000000000000000000000000000000000000002",
+                "recentWinRateRank": {"score": 70.0, "label": "Strong"},
+                "realizedPnl30d": 50_000.0,
+                "positions": [],
+            },
+            {
+                "address": "0x0000000000000000000000000000000000000003",
+                "recentWinRateRank": {"score": 60.0, "label": "Strong"},
+                "realizedPnl30d": 25_000.0,
+                "positions": [],
+            },
+        ]
+        state = {
+            "topConvictionWallets": {
+                "month": "2026-06",
+                "addresses": [
+                    toxic_address,
+                    "0x0000000000000000000000000000000000000001",
+                    "0x0000000000000000000000000000000000000002",
+                ],
+            }
+        }
+
+        selected, cohort = self.service.resolve_monthly_top_conviction_cohort(
+            wallets,
+            state,
+            month_key="2026-06",
+            limit=3,
+        )
+
+        self.assertNotIn(toxic_address, selected)
+        self.assertIn(toxic_address, cohort["demoted"])
+        self.assertEqual(len(selected), 3)
+
     def test_stale_positions_need_recent_large_add_for_conviction(self) -> None:
         now_ms = 1_700_000_000_000
         snapshots = [
