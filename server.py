@@ -70,6 +70,9 @@ ELITE_MIN_PROFIT_FACTOR = 1.5
 ELITE_MAX_DRAWDOWN_PCT = 35.0
 ELITE_MAX_MARGIN_USAGE_PCT = 70.0
 ELITE_WALLET_OVERRIDES = {"0xc9e839a529d1a3a46e2b48d20c461d4afecb72e4"}
+TOP_CONVICTION_WALLET_COUNT = 10
+TOP_CONVICTION_WALLET_MULTIPLIER = 1.5
+NON_TOP_CONVICTION_WALLET_MULTIPLIER = 0.5
 RANKING_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 HOLDING_ONLY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
 OIL_POSITION_ALIASES = {"flx:OIL", "cash:WTI", "xyz:BRENTOIL", "xyz:CL"}
@@ -1288,15 +1291,39 @@ class WalletTrackerService:
         save_json_file(self.alerts_path, {"config": config, "state": state})
         return self.get_alert_settings()
 
-    def wallet_conviction_weight(self, wallet: dict[str, Any]) -> float:
+    def top_conviction_wallet_addresses(self, wallets: list[dict[str, Any]], *, limit: int = TOP_CONVICTION_WALLET_COUNT) -> set[str]:
+        ranked = sorted(
+            wallets,
+            key=lambda wallet: (
+                to_float(wallet.get("recentWinRateRank", {}).get("score")) if isinstance(wallet.get("recentWinRateRank"), dict) else 0.0,
+                to_float(wallet.get("realizedPnl30d")),
+                to_float(wallet.get("recentRealizedPnl")),
+                to_float(wallet.get("unrealizedPnl")),
+            ),
+            reverse=True,
+        )
+        return {
+            str(wallet.get("address") or "").lower()
+            for wallet in ranked[:limit]
+            if str(wallet.get("address") or "").strip()
+        }
+
+    def wallet_conviction_weight(self, wallet: dict[str, Any], top_wallet_addresses: set[str] | None = None) -> float:
         rank = wallet.get("recentWinRateRank")
         if not isinstance(rank, dict):
-            return 1.0
-        score = to_float(rank.get("score"))
-        label = str(rank.get("label") or "")
-        if score <= 0 or label == "Unranked":
-            return 1.0
-        return round(max(0.5, min(score / ELITE_MIN_QUALITY_SCORE, 1.5)), 3)
+            base_weight = 1.0
+        else:
+            score = to_float(rank.get("score"))
+            label = str(rank.get("label") or "")
+            if score <= 0 or label == "Unranked":
+                base_weight = 1.0
+            else:
+                base_weight = round(max(0.5, min(score / ELITE_MIN_QUALITY_SCORE, 1.5)), 3)
+        address = str(wallet.get("address") or "").lower()
+        if not top_wallet_addresses:
+            return base_weight
+        multiplier = TOP_CONVICTION_WALLET_MULTIPLIER if address in top_wallet_addresses else NON_TOP_CONVICTION_WALLET_MULTIPLIER
+        return round(base_weight * multiplier, 3)
 
     def build_high_conviction_signals(
         self,
@@ -1391,10 +1418,11 @@ class WalletTrackerService:
         long_wallets: set[str] = set()
         short_wallets: set[str] = set()
         now_ms = current_time_ms()
+        top_wallet_addresses = self.top_conviction_wallet_addresses(snapshots)
 
         for snapshot in snapshots:
             address = str(snapshot.get("address") or "")
-            wallet_weight = self.wallet_conviction_weight(snapshot)
+            wallet_weight = self.wallet_conviction_weight(snapshot, top_wallet_addresses)
             for position in snapshot.get("positions", []):
                 coin = normalize_position_coin(position.get("coin"))
                 if not should_count_open_position(address, coin, position):

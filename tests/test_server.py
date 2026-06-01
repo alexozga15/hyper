@@ -478,6 +478,44 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(summary["signals"][0]["coin"], "BTC")
         self.assertEqual(summary["signals"][0]["side"], "long")
 
+    def test_top_ten_wallets_get_extra_conviction_weight(self) -> None:
+        snapshots = []
+        for index in range(1, 4):
+            snapshots.append(
+                {
+                    "address": f"0x{index:040x}",
+                    "recentWinRateRank": {"score": 90.0, "label": "Strong"},
+                    "realizedPnl30d": 100_000.0,
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000.0}],
+                }
+            )
+        for index in range(4, 11):
+            snapshots.append(
+                {
+                    "address": f"0x{index:040x}",
+                    "recentWinRateRank": {"score": 80.0, "label": "Strong"},
+                    "realizedPnl30d": 50_000.0,
+                    "positions": [],
+                }
+            )
+        for index in range(11, 14):
+            snapshots.append(
+                {
+                    "address": f"0x{index:040x}",
+                    "recentWinRateRank": {"score": 40.0, "label": "Cold"},
+                    "realizedPnl30d": -10_000.0,
+                    "positions": [{"coin": "BTC", "side": "Short", "positionValue": 1_000_000.0}],
+                }
+            )
+
+        summary = self.service.build_sentiment_summary(snapshots, min_wallets=3)
+        consensus_by_key = {f'{item["coin"]}:{item["side"]}': item for item in summary["consensus"]}
+
+        self.assertEqual(consensus_by_key["BTC:long"]["netWalletCount"], 0)
+        self.assertGreater(consensus_by_key["BTC:long"]["netWeightedWalletCount"], 0)
+        self.assertEqual(consensus_by_key["BTC:long"]["convictionScore"], 100.0)
+        self.assertEqual(consensus_by_key["BTC:short"]["convictionScore"], 0.0)
+
     def test_stale_positions_need_recent_large_add_for_conviction(self) -> None:
         now_ms = 1_700_000_000_000
         snapshots = [
