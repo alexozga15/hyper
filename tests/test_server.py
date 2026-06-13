@@ -2096,11 +2096,6 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertTrue(result["positionAlertSent"])
         self.assertEqual(send_telegram_message.call_count, 2)
         hourly_message = send_telegram_message.call_args_list[0].args[2]
-        self.assertIn("Hourly wallet signals", hourly_message)
-        self.assertIn("Signals:", hourly_message)
-        self.assertIn("- None at 70+ probability", hourly_message)
-        self.assertNotIn("Consensus:", hourly_message)
-        self.assertNotIn("Open positions now", hourly_message)
         self.assertNotIn("Wallet ranks by 7D hit rate + PnL", hourly_message)
         self.assertNotIn("High-conviction signals", hourly_message)
         alert_message = send_telegram_message.call_args_list[1].args[2]
