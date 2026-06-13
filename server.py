@@ -45,7 +45,7 @@ ACTIONABLE_SIGNAL_MIN_WALLETS = 4
 ACTIONABLE_SIGNAL_MIN_NET_WALLETS = 2
 ACTIONABLE_SIGNAL_MIN_QNET = 1.5
 ACTIONABLE_SIGNAL_MIN_VALUE = 1_000_000
-POSITION_GROUP_DISPLAY_MIN_VALUE = 500_000
+POSITION_GROUP_DISPLAY_MIN_VALUE = 1_000_000
 MIN_POSITION_MESSAGE_WALLETS = 3
 LARGE_POSITION_ALERT_MIN_VALUE = 500_000
 MIN_POSITION_MESSAGE_VALUE = POSITION_GROUP_DISPLAY_MIN_VALUE
@@ -2667,7 +2667,7 @@ class WalletTrackerService:
             stock_like_only=False,
             commodity_like_only=True,
         )
-        stock_groups = self.build_position_groups(dashboard, hip3_only=False, stock_like_only=True, min_value=0)
+        stock_groups = self.build_position_groups(dashboard, hip3_only=False, stock_like_only=True)
         total_positions = sum(item["positionCount"] for item in position_groups + commodity_groups + stock_groups)
 
         if not position_groups and not commodity_groups and not stock_groups:
