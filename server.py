@@ -2891,11 +2891,12 @@ class WalletTrackerService:
         return "\n".join(lines)
 
     def build_hourly_update_message(self, dashboard: dict[str, Any], summary: dict[str, Any], min_wallets: int) -> str:
-        return "\n\n".join(
-            [
-                self.build_summary_message(summary, min_wallets, title="Hourly wallet update", include_signals=False),
-                self.build_positions_message(dashboard),
-            ]
+        return self.build_summary_message(
+            summary,
+            min_wallets,
+            title="Hourly wallet signals",
+            include_consensus=False,
+            include_signals=True,
         )
 
     def split_message(self, message: str, limit: int = 3500) -> list[str]:

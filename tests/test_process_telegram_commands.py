@@ -171,6 +171,36 @@ class DispatchUpdateTests(unittest.TestCase):
 
         self.assertEqual(reply, "BTC:long:now")
 
+    def test_build_reply_update_uses_compact_signal_view(self) -> None:
+        class FakeService:
+            def __init__(self) -> None:
+                self.summary_kwargs = None
+                self.positions_called = False
+
+            def build_summary_message(self, summary: dict, min_wallets: int, **kwargs) -> str:
+                self.summary_kwargs = kwargs
+                return "signal summary"
+
+            def build_positions_message(self, dashboard: dict) -> str:
+                self.positions_called = True
+                return "positions"
+
+        service = FakeService()
+        reply = commands.build_reply(
+            service,
+            "/update",
+            None,
+            {"generatedAt": "now"},
+            {"generatedAt": "now"},
+            3,
+        )
+
+        self.assertEqual(reply, "signal summary")
+        self.assertFalse(service.positions_called)
+        self.assertEqual(service.summary_kwargs["title"], "Current wallet signals")
+        self.assertFalse(service.summary_kwargs["include_consensus"])
+        self.assertTrue(service.summary_kwargs["include_signals"])
+
     def test_main_persists_successful_update_before_later_send_failure(self) -> None:
         class FakeService:
             def __init__(self) -> None:

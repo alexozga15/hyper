@@ -58,10 +58,10 @@ def build_help_message() -> str:
     return "\n".join(
         [
             "Hyperwatch Pro commands",
-            "/update - live sentiment plus all open positions",
+            "/update - current actionable signal update",
             "/sentiment - full live sentiment update",
             "/consensus - current consensus only",
-            "/signals - high-conviction trade signals",
+            "/signals - actionable trade signals",
             "/hip3 - current HIP-3 consensus only",
             "/positions - all open positions now",
             "/ranks - tracked wallets ranked by 7D hit rate plus 7D PnL",
@@ -165,11 +165,12 @@ def build_reply(
     min_wallets: int,
 ) -> str:
     if command == "/update":
-        return "\n\n".join(
-            [
-                service.build_summary_message(summary_cache, min_wallets, include_signals=False),
-                service.build_positions_message(dashboard_cache),
-            ]
+        return service.build_summary_message(
+            summary_cache,
+            min_wallets,
+            title="Current wallet signals",
+            include_consensus=False,
+            include_signals=True,
         )
     if command == "/sentiment":
         return service.build_summary_message(summary_cache, min_wallets)
