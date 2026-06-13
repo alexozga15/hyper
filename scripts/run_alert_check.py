@@ -21,7 +21,7 @@ def env_flag(name: str, default: bool) -> bool:
 
 def main() -> int:
     service = WalletTrackerService(WalletStore(WALLETS_FILE), HyperliquidClient())
-    min_wallets = int(os.environ.get("MIN_CONSENSUS_WALLETS", "3"))
+    min_wallets = int(os.environ.get("MIN_CONSENSUS_WALLETS", "4"))
     send_hourly_update = env_flag("SEND_HOURLY_UPDATE", False)
     send_change_alerts = env_flag("SEND_CHANGE_ALERTS", not send_hourly_update)
     service.update_alert_settings(
