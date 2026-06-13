@@ -475,8 +475,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertGreater(consensus_by_key["BTC:long"]["netWeightedWalletCount"], 0)
         self.assertEqual(consensus_by_key["BTC:long"]["convictionScore"], 100.0)
         self.assertEqual(consensus_by_key["BTC:short"]["convictionScore"], 0.0)
-        self.assertEqual(summary["signals"][0]["coin"], "BTC")
-        self.assertEqual(summary["signals"][0]["side"], "long")
+        self.assertEqual(summary["signals"], [])
 
     def test_top_ten_wallets_get_extra_conviction_weight(self) -> None:
         snapshots = []
@@ -779,6 +778,11 @@ class AlertSummaryTests(unittest.TestCase):
                 "positions": [{"coin": "BTC", "side": "Long", "positionValue": 300000}],
             },
             {
+                "address": "0x6666666666666666666666666666666666666666",
+                "alias": "Six",
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 300000}],
+            },
+            {
                 "address": "0x4444444444444444444444444444444444444444",
                 "alias": "Four",
                 "positions": [{"coin": "ETH", "side": "Short", "positionValue": 100000}],
@@ -795,8 +799,9 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(summary["signalCount"], 1)
         self.assertEqual(summary["signals"][0]["coin"], "BTC")
         self.assertEqual(summary["signals"][0]["action"], "buy")
-        self.assertEqual(summary["signals"][0]["strength"], "extreme")
+        self.assertEqual(summary["signals"][0]["strength"], "high")
         self.assertEqual(summary["signals"][0]["convictionScore"], 100.0)
+        self.assertGreaterEqual(summary["signals"][0]["probabilityScore"], 70.0)
 
     def test_summarize_changes_detects_signal_changes(self) -> None:
         previous = {
@@ -842,8 +847,8 @@ class AlertSummaryTests(unittest.TestCase):
 
         self.assertEqual(changes["addedSignals"][0]["coin"], "ETH")
         self.assertEqual(changes["changedSignals"][0]["coin"], "BTC")
-        self.assertEqual(changes["changedSignals"][0]["fromConvictionScore"], 82.0)
-        self.assertEqual(changes["changedSignals"][0]["toConvictionScore"], 95.0)
+        self.assertEqual(changes["changedSignals"][0]["fromProbabilityScore"], 82.0)
+        self.assertEqual(changes["changedSignals"][0]["toProbabilityScore"], 95.0)
 
     def test_build_signals_message_formats_signal_actions(self) -> None:
         summary = {
@@ -862,8 +867,8 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_signals_message(summary)
 
-        self.assertIn("High-conviction signals", message)
-        self.assertIn("1. BUY BTC long (3 wallets, conviction 94/100)", message)
+        self.assertIn("Actionable wallet signals", message)
+        self.assertIn("1. BUY BTC long (3 wallets, p94/100)", message)
         self.assertNotIn("$1.2M", message)
 
     def test_build_holding_only_wallets_returns_30d_holders_by_notional(self) -> None:
@@ -1580,6 +1585,86 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(result["changes"]["hip3Added"], [])
         self.assertEqual(result["changes"]["hip3Removed"], [])
         send_telegram_message.assert_not_called()
+
+    def test_check_alerts_does_not_notify_on_weak_consensus_churn(self) -> None:
+        previous_summary = {
+            "overallBias": "mixed",
+            "consensus": [],
+            "hip3Consensus": [],
+            "signals": [],
+        }
+        current_summary = {
+            "overallBias": "bullish",
+            "consensus": [{"coin": "BTC", "side": "long", "walletCount": 3, "totalValue": 900_000.0}],
+            "hip3Consensus": [],
+            "signals": [],
+        }
+
+        with patch(
+            "server.load_json_file",
+            return_value={
+                "config": {"enabled": True, "botToken": "token", "chatId": "chat"},
+                "state": {"summary": previous_summary, "largePositions": {}},
+            },
+        ), patch("server.save_json_file"), patch.object(
+            self.service, "dashboard", return_value={"wallets": []}
+        ), patch.object(
+            self.service, "build_sentiment_summary", return_value=current_summary
+        ), patch.object(
+            self.service, "send_telegram_message"
+        ) as send_telegram_message:
+            result = self.service.check_alerts(send_notification=True)
+
+        self.assertFalse(result["shouldNotify"])
+        self.assertFalse(result["sent"])
+        self.assertEqual(len(result["changes"]["addedConsensus"]), 1)
+        send_telegram_message.assert_not_called()
+
+    def test_check_alerts_notifies_on_actionable_signal(self) -> None:
+        previous_summary = {
+            "overallBias": "mixed",
+            "consensus": [],
+            "hip3Consensus": [],
+            "signals": [],
+        }
+        current_summary = {
+            "overallBias": "bullish",
+            "consensus": [],
+            "hip3Consensus": [],
+            "signals": [
+                {
+                    "coin": "BTC",
+                    "side": "long",
+                    "action": "buy",
+                    "walletCount": 5,
+                    "netWalletCount": 4,
+                    "netWeightedWalletCount": 3.5,
+                    "probabilityScore": 82.0,
+                    "totalValue": 2_500_000.0,
+                }
+            ],
+        }
+
+        with patch(
+            "server.load_json_file",
+            return_value={
+                "config": {"enabled": True, "botToken": "token", "chatId": "chat"},
+                "state": {"summary": previous_summary, "largePositions": {}},
+            },
+        ), patch("server.save_json_file"), patch.object(
+            self.service, "dashboard", return_value={"wallets": []}
+        ), patch.object(
+            self.service, "build_sentiment_summary", return_value=current_summary
+        ), patch.object(
+            self.service, "send_telegram_message"
+        ) as send_telegram_message:
+            result = self.service.check_alerts(send_notification=True)
+
+        self.assertTrue(result["shouldNotify"])
+        self.assertTrue(result["sent"])
+        sent_message = send_telegram_message.call_args.args[2]
+        self.assertIn("Actionable signals", sent_message)
+        self.assertIn("BUY BTC long: p82", sent_message)
 
     def test_check_alerts_notifies_on_new_large_positions(self) -> None:
         previous_summary = {

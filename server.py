@@ -38,9 +38,13 @@ HEX_ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 MAX_IMPORT_BATCH = 100
 MAX_DISCOVERY_BATCH = 60
 DEFAULT_CONSENSUS_THRESHOLD = 3
-HIGH_CONVICTION_SIGNAL_THRESHOLD = 80.0
-EXTREME_CONVICTION_SIGNAL_THRESHOLD = 90.0
 SIGNAL_CONVICTION_ALERT_MIN_DELTA = 10.0
+ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD = 70.0
+EXTREME_SIGNAL_PROBABILITY_THRESHOLD = 85.0
+ACTIONABLE_SIGNAL_MIN_WALLETS = 4
+ACTIONABLE_SIGNAL_MIN_NET_WALLETS = 2
+ACTIONABLE_SIGNAL_MIN_QNET = 1.5
+ACTIONABLE_SIGNAL_MIN_VALUE = 1_000_000
 POSITION_GROUP_DISPLAY_MIN_VALUE = 500_000
 MIN_POSITION_MESSAGE_WALLETS = 3
 LARGE_POSITION_ALERT_MIN_VALUE = 500_000
@@ -1423,31 +1427,123 @@ class WalletTrackerService:
         multiplier = TOP_CONVICTION_WALLET_MULTIPLIER if address in top_wallet_addresses else NON_TOP_CONVICTION_WALLET_MULTIPLIER
         return round(base_weight * multiplier, 3)
 
+    def has_recent_position_fill(
+        self,
+        wallet: dict[str, Any],
+        position: dict[str, Any],
+        *,
+        now_ms: int,
+        event: str,
+        window_ms: int,
+    ) -> bool:
+        recent_fills = wallet.get("recentFills", [])
+        if not isinstance(recent_fills, list):
+            return False
+        coin = normalize_position_coin(position.get("coin"))
+        side = str(position.get("side") or "").lower()
+        if side not in {"long", "short"}:
+            return False
+        cutoff_ms = now_ms - window_ms
+        for fill in recent_fills:
+            if not isinstance(fill, dict):
+                continue
+            classified = self.classify_fill_direction(fill.get("direction"))
+            if not classified:
+                continue
+            fill_side, fill_event = classified
+            if fill_event != event or fill_side != side:
+                continue
+            if normalize_position_coin(fill.get("coin")).upper() != coin.upper():
+                continue
+            fill_time = int(to_float(fill.get("time")))
+            if fill_time < cutoff_ms or fill_time > now_ms:
+                continue
+            if event == "add":
+                fill_notional = to_float(fill.get("price")) * abs(to_float(fill.get("size")))
+                position_value = abs(to_float(position.get("positionValue")))
+                relative_add_value = position_value * RECENT_ADD_POSITION_MIN_PCT
+                if fill_notional < POSITION_INCREASE_ALERT_MIN_DELTA and (
+                    relative_add_value <= 0 or fill_notional < relative_add_value
+                ):
+                    continue
+            return True
+        return False
+
+    def signal_probability_score(self, item: dict[str, Any]) -> float:
+        conviction = max(0.0, min(to_float(item.get("convictionScore")), 100.0))
+        qnet = max(0.0, to_float(item.get("netWeightedWalletCount")))
+        net_wallets = max(0, int(to_float(item.get("netWalletCount"))))
+        wallet_count = max(0, int(to_float(item.get("walletCount"))))
+        total_value = max(0.0, to_float(item.get("totalValue")))
+        recent_adds = max(0, int(to_float(item.get("recentAddWalletCount"))))
+        fresh_activity = max(0, int(to_float(item.get("freshActivityWalletCount"))))
+        top_wallets = max(0, int(to_float(item.get("topWalletCount"))))
+        opposite_weight = max(0.0, to_float(item.get("oppositeWeightedWalletCount")))
+        side_weight = max(0.0, to_float(item.get("weightedWalletCount")))
+
+        value_score = min(1.0, total_value / 10_000_000)
+        qnet_score = min(1.0, qnet / 4.0)
+        net_score = min(1.0, net_wallets / 4.0)
+        activity_score = min(1.0, (recent_adds + fresh_activity) / 3.0)
+        quality_score = min(1.0, top_wallets / max(wallet_count, 1))
+        opposition_ratio = opposite_weight / max(side_weight + opposite_weight, 1.0)
+
+        probability = (
+            conviction * 0.35
+            + qnet_score * 20
+            + net_score * 15
+            + value_score * 10
+            + activity_score * 10
+            + quality_score * 10
+            - opposition_ratio * 15
+        )
+        return round(max(0.0, min(probability, 99.0)), 1)
+
+    def signal_rejection_reasons(self, item: dict[str, Any], probability: float) -> list[str]:
+        reasons: list[str] = []
+        if int(to_float(item.get("walletCount"))) < ACTIONABLE_SIGNAL_MIN_WALLETS:
+            reasons.append("wallet_count")
+        if int(to_float(item.get("netWalletCount"))) < ACTIONABLE_SIGNAL_MIN_NET_WALLETS:
+            reasons.append("weak_net")
+        if to_float(item.get("netWeightedWalletCount")) < ACTIONABLE_SIGNAL_MIN_QNET:
+            reasons.append("weak_qnet")
+        if to_float(item.get("totalValue")) < ACTIONABLE_SIGNAL_MIN_VALUE:
+            reasons.append("small_value")
+        if probability < ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD:
+            reasons.append("low_probability")
+        return reasons
+
     def build_high_conviction_signals(
         self,
         consensus: list[dict[str, Any]],
         *,
-        threshold: float = HIGH_CONVICTION_SIGNAL_THRESHOLD,
+        threshold: float = ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD,
     ) -> list[dict[str, Any]]:
         signals = []
         for item in consensus:
-            conviction_score = to_float(item.get("convictionScore"))
-            if conviction_score < threshold:
+            probability_score = self.signal_probability_score(item)
+            rejection_reasons = self.signal_rejection_reasons(item, probability_score)
+            if rejection_reasons:
                 continue
+            conviction_score = to_float(item.get("convictionScore"))
             side = str(item.get("side") or "").lower()
             action = signal_action_from_side(side)
-            strength = "extreme" if conviction_score >= EXTREME_CONVICTION_SIGNAL_THRESHOLD else "high"
+            strength = "extreme" if probability_score >= EXTREME_SIGNAL_PROBABILITY_THRESHOLD else "high"
             signals.append(
                 {
                     "coin": item.get("coin", "Unknown"),
                     "side": side,
                     "action": action,
                     "strength": strength,
+                    "probabilityScore": probability_score,
                     "walletCount": int(to_float(item.get("walletCount"))),
                     "oppositeWalletCount": int(to_float(item.get("oppositeWalletCount"))),
                     "netWalletCount": int(to_float(item.get("netWalletCount"))),
                     "weightedWalletCount": round(to_float(item.get("weightedWalletCount")), 3),
                     "netWeightedWalletCount": round(to_float(item.get("netWeightedWalletCount")), 3),
+                    "recentAddWalletCount": int(to_float(item.get("recentAddWalletCount"))),
+                    "freshActivityWalletCount": int(to_float(item.get("freshActivityWalletCount"))),
+                    "topWalletCount": int(to_float(item.get("topWalletCount"))),
                     "totalValue": round(to_float(item.get("totalValue")), 2),
                     "convictionScore": round(conviction_score, 1),
                     "threshold": round(to_float(threshold), 1),
@@ -1455,13 +1551,15 @@ class WalletTrackerService:
                     "rationale": (
                         f'{int(to_float(item.get("walletCount")))} wallets are {side} '
                         f'against {int(to_float(item.get("oppositeWalletCount")))} opposite wallets, '
-                        f'net +{int(to_float(item.get("netWalletCount")))}.'
+                        f'net +{int(to_float(item.get("netWalletCount")))}, '
+                        f'qnet +{to_float(item.get("netWeightedWalletCount")):.1f}.'
                     ),
                 }
             )
         return sorted(
             signals,
             key=lambda item: (
+                -item["probabilityScore"],
                 -item["convictionScore"],
                 -item["netWeightedWalletCount"],
                 -item["netWalletCount"],
@@ -1476,38 +1574,13 @@ class WalletTrackerService:
             return True
         if to_float(position.get("unrealizedPnl")) >= COUNTED_POSITION_MIN_TREND_PROFIT:
             return True
-        recent_fills = wallet.get("recentFills", [])
-        if not isinstance(recent_fills, list):
-            return True
-
-        coin = normalize_position_coin(position.get("coin"))
-        side = str(position.get("side") or "").lower()
-        if side not in {"long", "short"}:
-            return True
-
-        recent_add_cutoff_ms = now_ms - RANKING_WINDOW_MS
-        for fill in recent_fills:
-            if not isinstance(fill, dict):
-                continue
-            classified = self.classify_fill_direction(fill.get("direction"))
-            if not classified:
-                continue
-            fill_side, event = classified
-            if event != "add" or fill_side != side:
-                continue
-            if normalize_position_coin(fill.get("coin")).upper() != coin.upper():
-                continue
-            fill_time = int(to_float(fill.get("time")))
-            if fill_time < recent_add_cutoff_ms or fill_time > now_ms:
-                continue
-            fill_notional = to_float(fill.get("price")) * abs(to_float(fill.get("size")))
-            position_value = abs(to_float(position.get("positionValue")))
-            relative_add_value = position_value * RECENT_ADD_POSITION_MIN_PCT
-            if fill_notional >= POSITION_INCREASE_ALERT_MIN_DELTA or (
-                relative_add_value > 0 and fill_notional >= relative_add_value
-            ):
-                return True
-        return False
+        return self.has_recent_position_fill(
+            wallet,
+            position,
+            now_ms=now_ms,
+            event="add",
+            window_ms=RANKING_WINDOW_MS,
+        )
 
     def build_sentiment_summary(
         self,
@@ -1551,6 +1624,9 @@ class WalletTrackerService:
                         "weightedWalletCount": 0.0,
                         "wallets": [],
                         "walletAddresses": set(),
+                        "recentAddWalletAddresses": set(),
+                        "freshActivityWalletAddresses": set(),
+                        "topWalletAddresses": set(),
                     },
                 )
                 bucket["totalValue"] += position_value
@@ -1558,6 +1634,24 @@ class WalletTrackerService:
                     bucket["walletAddresses"].add(address)
                     bucket["walletCount"] += 1
                     bucket["weightedWalletCount"] += wallet_weight
+                    if address.lower() in active_top_wallet_addresses:
+                        bucket["topWalletAddresses"].add(address)
+                    if self.has_recent_position_fill(
+                        snapshot,
+                        position,
+                        now_ms=now_ms,
+                        event="add",
+                        window_ms=RANKING_WINDOW_MS,
+                    ):
+                        bucket["recentAddWalletAddresses"].add(address)
+                    if self.has_recent_position_fill(
+                        snapshot,
+                        position,
+                        now_ms=now_ms,
+                        event="add",
+                        window_ms=CLUSTERED_OPEN_ALERT_WINDOW_MS,
+                    ):
+                        bucket["freshActivityWalletAddresses"].add(address)
                     bucket["wallets"].append(
                         {
                             "address": address,
@@ -1582,6 +1676,9 @@ class WalletTrackerService:
                 "side": bucket["side"],
                 "walletCount": bucket["walletCount"],
                 "weightedWalletCount": round(bucket["weightedWalletCount"], 3),
+                "recentAddWalletCount": len(bucket["recentAddWalletAddresses"]),
+                "freshActivityWalletCount": len(bucket["freshActivityWalletAddresses"]),
+                "topWalletCount": len(bucket["topWalletAddresses"]),
                 "totalValue": round(bucket["totalValue"], 2),
                 "wallets": sorted(bucket["wallets"], key=lambda item: item["value"], reverse=True),
             }
@@ -2019,16 +2116,14 @@ class WalletTrackerService:
             f'{item.get("walletCount", item.get("toWalletCount", ""))}'
         )
 
+    def signal_event_key(self, event: str, item: dict[str, Any]) -> str:
+        probability_bucket = int(to_float(item.get("probabilityScore")) // 5 * 5)
+        return f'signal:{event}:{item.get("coin", "Unknown")}:{item.get("side", "")}:p{probability_bucket}'
+
     def collect_alert_event_keys(self, changes: dict[str, Any]) -> list[str]:
         keys: list[str] = []
-        if changes.get("biasChanged"):
-            keys.append("bias:changed")
-        for event, field in (
-            ("added", "addedConsensus"),
-            ("removed", "removedConsensus"),
-            ("changed", "changedConsensus"),
-        ):
-            keys.extend(self.consensus_event_key(event, item) for item in changes.get(field, []))
+        for event, field in (("added", "addedSignals"), ("changed", "changedSignals")):
+            keys.extend(self.signal_event_key(event, item) for item in changes.get(field, []))
         keys.extend(self.clustered_open_event_key(item) for item in changes.get("clusteredOpenPositions", []))
         keys.extend(self.large_position_event_key("open", item) for item in changes.get("newLargePositions", []))
         keys.extend(self.large_position_event_key("add", item) for item in changes.get("increasedLargePositions", []))
@@ -2051,9 +2146,7 @@ class WalletTrackerService:
             last_sent_ms = int(to_float(active_dedupe.get(key)))
             return last_sent_ms > 0 and now_ms - last_sent_ms < cooldown_ms
 
-        if filtered.get("biasChanged") and is_suppressed("bias:changed"):
-            filtered["biasChanged"] = False
-            suppressed.append("bias:changed")
+        filtered["biasChanged"] = False
 
         for event, field in (
             ("added", "addedConsensus"),
@@ -2063,6 +2156,17 @@ class WalletTrackerService:
             kept = []
             for item in changes.get(field, []):
                 key = self.consensus_event_key(event, item)
+                if is_suppressed(key):
+                    suppressed.append(key)
+                else:
+                    kept.append(item)
+            filtered[field] = kept
+
+        filtered["removedSignals"] = []
+        for event, field in (("added", "addedSignals"), ("changed", "changedSignals")):
+            kept = []
+            for item in changes.get(field, []):
+                key = self.signal_event_key(event, item)
                 if is_suppressed(key):
                     suppressed.append(key)
                 else:
@@ -2142,8 +2246,8 @@ class WalletTrackerService:
         for key in current_signals.keys() & previous_signals.keys():
             old_item = previous_signals[key]
             new_item = current_signals[key]
-            old_score = to_float(old_item.get("convictionScore"))
-            new_score = to_float(new_item.get("convictionScore"))
+            old_score = to_float(old_item.get("probabilityScore", old_item.get("convictionScore")))
+            new_score = to_float(new_item.get("probabilityScore", new_item.get("convictionScore")))
             score_delta = new_score - old_score
             old_wallet_count = int(to_float(old_item.get("walletCount")))
             new_wallet_count = int(to_float(new_item.get("walletCount")))
@@ -2152,18 +2256,18 @@ class WalletTrackerService:
             changed.append(
                 {
                     **new_item,
-                    "fromConvictionScore": round(old_score, 1),
-                    "toConvictionScore": round(new_score, 1),
-                    "convictionDelta": round(score_delta, 1),
+                    "fromProbabilityScore": round(old_score, 1),
+                    "toProbabilityScore": round(new_score, 1),
+                    "probabilityDelta": round(score_delta, 1),
                     "fromWalletCount": old_wallet_count,
                     "toWalletCount": new_wallet_count,
                 }
             )
 
         return {
-            "addedSignals": sorted(added, key=lambda item: (item["convictionScore"], item["walletCount"]), reverse=True),
-            "removedSignals": sorted(removed, key=lambda item: (item["convictionScore"], item["walletCount"]), reverse=True),
-            "changedSignals": sorted(changed, key=lambda item: (abs(item["convictionDelta"]), item["toWalletCount"]), reverse=True),
+            "addedSignals": sorted(added, key=lambda item: (item.get("probabilityScore", 0), item["walletCount"]), reverse=True),
+            "removedSignals": sorted(removed, key=lambda item: (item.get("probabilityScore", 0), item["walletCount"]), reverse=True),
+            "changedSignals": sorted(changed, key=lambda item: (abs(item["probabilityDelta"]), item["toWalletCount"]), reverse=True),
         }
 
     def summarize_changes(self, previous: dict[str, Any], current: dict[str, Any], track_hip3: bool) -> dict[str, Any]:
@@ -2225,30 +2329,30 @@ class WalletTrackerService:
 
     def build_telegram_message(self, changes: dict[str, Any], summary: dict[str, Any], min_wallets: int) -> str:
         lines = [
-            f"Wallet alert | Bias: {summary.get('overallBias', 'mixed')} | Min: {min_wallets}",
+            f"Wallet signal | Bias: {summary.get('overallBias', 'mixed')} | Min: {min_wallets}",
         ]
 
-        if changes["addedConsensus"]:
+        actionable_signals = changes.get("addedSignals", []) + changes.get("changedSignals", [])
+        if actionable_signals:
             lines.append("")
-            lines.append("New consensus")
-            for item in changes["addedConsensus"][:10]:
+            lines.append(f"Actionable signals >={ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD:.0f}/100")
+            for item in actionable_signals[:8]:
+                move_note = ""
+                if "fromProbabilityScore" in item:
+                    move_note = f' ({to_float(item.get("fromProbabilityScore")):.0f}->{to_float(item.get("toProbabilityScore")):.0f})'
+                activity_bits = []
+                if int(to_float(item.get("freshActivityWalletCount"))):
+                    activity_bits.append(f'{int(to_float(item.get("freshActivityWalletCount")))} 10m activity')
+                if int(to_float(item.get("recentAddWalletCount"))):
+                    activity_bits.append(f'{int(to_float(item.get("recentAddWalletCount")))} adds')
+                activity_note = f', {"/".join(activity_bits)}' if activity_bits else ""
                 lines.append(
-                    f'- {item["coin"]} {item["side"]}: {item["walletCount"]}w, c{item.get("convictionScore", 0):.0f}'
+                    f'- {str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]}: '
+                    f'p{to_float(item.get("probabilityScore")):.0f}{move_note}, '
+                    f'{item["walletCount"]}w net +{int(to_float(item.get("netWalletCount")))}, '
+                    f'qnet +{to_float(item.get("netWeightedWalletCount")):.1f}, '
+                    f'{format_money_compact(item.get("totalValue"))}{activity_note}'
                 )
-
-        if changes["changedConsensus"]:
-            lines.append("")
-            lines.append("Consensus changed")
-            for item in changes["changedConsensus"][:10]:
-                lines.append(
-                    f'- {item["coin"]} {item["side"]}: {item["fromWalletCount"]}->{item["toWalletCount"]}w, c{item.get("convictionScore", 0):.0f}'
-                )
-
-        if changes["removedConsensus"]:
-            lines.append("")
-            lines.append("Consensus gone")
-            for item in changes["removedConsensus"][:10]:
-                lines.append(f'- {item["coin"]} {item["side"]}')
 
         if changes.get("clusteredOpenPositions"):
             lines.append("")
@@ -2340,7 +2444,7 @@ class WalletTrackerService:
             f'Wallets tracked: {summary.get("walletCount", 0)}',
         ]
         if include_signals:
-            lines.append(f'High-conviction signals: {summary.get("signalCount", len(summary.get("signals", [])))}')
+            lines.append(f'Actionable signals: {summary.get("signalCount", len(summary.get("signals", [])))}')
 
         if include_signals:
             signals = summary.get("signals", [])
@@ -2348,15 +2452,22 @@ class WalletTrackerService:
             lines.append("Signals:")
             if signals:
                 for item in signals[:10]:
+                    probability = to_float(item.get("probabilityScore", item.get("convictionScore")))
                     net_note = f', net +{int(to_float(item.get("netWalletCount")))}' if "netWalletCount" in item else ""
                     if "netWeightedWalletCount" in item:
                         net_note += f', qnet +{to_float(item.get("netWeightedWalletCount")):.1f}'
+                    activity_bits = []
+                    if int(to_float(item.get("freshActivityWalletCount"))):
+                        activity_bits.append(f'{int(to_float(item.get("freshActivityWalletCount")))} 10m activity')
+                    if int(to_float(item.get("recentAddWalletCount"))):
+                        activity_bits.append(f'{int(to_float(item.get("recentAddWalletCount")))} adds')
+                    activity_note = f', {"/".join(activity_bits)}' if activity_bits else ""
                     lines.append(
                         f'- {str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]} '
-                        f'({item["walletCount"]} wallets{net_note}, conviction {to_float(item.get("convictionScore")):.0f}/100)'
+                        f'({item["walletCount"]} wallets{net_note}, p{probability:.0f}/100{activity_note})'
                     )
             else:
-                lines.append(f'- None at {HIGH_CONVICTION_SIGNAL_THRESHOLD:.0f}+ conviction')
+                lines.append(f'- None at {ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD:.0f}+ probability')
 
         if include_consensus:
             consensus = summary.get("consensus", [])
@@ -2517,20 +2628,27 @@ class WalletTrackerService:
             key=lambda item: (-item["walletCount"], item["coin"], item["side"]),
         )
 
-    def build_signals_message(self, summary: dict[str, Any], *, title: str = "High-conviction signals") -> str:
+    def build_signals_message(self, summary: dict[str, Any], *, title: str = "Actionable wallet signals") -> str:
         signals = summary.get("signals", [])
-        lines = [title, f'Threshold: {HIGH_CONVICTION_SIGNAL_THRESHOLD:.0f}/100 conviction']
+        lines = [title, f'Threshold: {ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD:.0f}/100 probability']
         if signals:
             for index, item in enumerate(signals[:20], start=1):
+                probability = to_float(item.get("probabilityScore", item.get("convictionScore")))
                 net_note = f', net +{int(to_float(item.get("netWalletCount")))}' if "netWalletCount" in item else ""
                 if "netWeightedWalletCount" in item:
                     net_note += f', qnet +{to_float(item.get("netWeightedWalletCount")):.1f}'
+                activity_bits = []
+                if int(to_float(item.get("freshActivityWalletCount"))):
+                    activity_bits.append(f'{int(to_float(item.get("freshActivityWalletCount")))} 10m activity')
+                if int(to_float(item.get("recentAddWalletCount"))):
+                    activity_bits.append(f'{int(to_float(item.get("recentAddWalletCount")))} adds')
+                activity_note = f', {"/".join(activity_bits)}' if activity_bits else ""
                 lines.append(
                     f'{index}. {str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]} '
-                    f'({item["walletCount"]} wallets{net_note}, conviction {to_float(item.get("convictionScore")):.0f}/100)'
+                    f'({item["walletCount"]} wallets{net_note}, p{probability:.0f}/100{activity_note})'
                 )
         else:
-            lines.append("- No high-conviction signals right now")
+            lines.append("- No actionable signals right now")
         lines.append("")
         lines.append(f'Checked at: {summary.get("generatedAt", now_iso())}')
         return "\n".join(lines)
@@ -2864,10 +2982,8 @@ class WalletTrackerService:
 
         should_notify = any(
             [
-                changes["biasChanged"],
-                changes["addedConsensus"],
-                changes["removedConsensus"],
-                changes["changedConsensus"],
+                changes["addedSignals"],
+                changes["changedSignals"],
                 changes["clusteredOpenPositions"],
                 changes["newLargePositions"],
                 changes["increasedLargePositions"],
