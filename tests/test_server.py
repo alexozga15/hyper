@@ -1683,7 +1683,7 @@ class AlertSummaryTests(unittest.TestCase):
                     "address": "0x1111111111111111111111111111111111111111",
                     "alias": "Trader One",
                     "positions": [
-                        {"coin": "BTC", "side": "Long", "positionValue": 750000.0, "size": 10.0, "entryPx": 75000.0},
+                        {"coin": "BTC", "side": "Long", "positionValue": 1_200_000.0, "size": 12.0, "entryPx": 100000.0},
                     ],
                 }
             ]
@@ -1701,8 +1701,8 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(len(result["changes"]["newLargePositions"]), 1)
         self.assertEqual(result["changes"]["newLargePositions"][0]["coin"], "BTC")
         sent_message = send_telegram_message.call_args.args[2]
-        self.assertIn("Open >$500K", sent_message)
-        self.assertIn("Trader One: BTC long $750K sz 10 @$75,000", sent_message)
+        self.assertIn("Open >$1.0M", sent_message)
+        self.assertIn("Trader One: BTC long $1.2M sz 12 @$100,000", sent_message)
 
     def test_check_alerts_notifies_on_closed_large_positions(self) -> None:
         previous_summary = {
@@ -1721,8 +1721,8 @@ class AlertSummaryTests(unittest.TestCase):
                 "alias": "Trader One",
                 "coin": "ETH",
                 "side": "short",
-                "totalValue": 900000.0,
-                "totalSize": 300.0,
+                "totalValue": 1_200_000.0,
+                "totalSize": 400.0,
             }
         }
         dashboard = {"wallets": [{"address": "0x1111111111111111111111111111111111111111", "alias": "Trader One", "positions": []}]}
@@ -1738,8 +1738,8 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertTrue(result["sent"])
         self.assertEqual(len(result["changes"]["closedLargePositions"]), 1)
         sent_message = send_telegram_message.call_args.args[2]
-        self.assertIn("Closed >$500K", sent_message)
-        self.assertIn("Trader One: ETH short $900K sz 300 last ~$3,000", sent_message)
+        self.assertIn("Closed >$1.0M", sent_message)
+        self.assertIn("Trader One: ETH short $1.2M sz 400 last ~$3,000", sent_message)
 
     def test_check_alerts_preview_does_not_sync_alert_baseline(self) -> None:
         previous_summary = {
@@ -1757,7 +1757,7 @@ class AlertSummaryTests(unittest.TestCase):
                 {
                     "address": "0x1111111111111111111111111111111111111111",
                     "alias": "Trader One",
-                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 750000.0}],
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_200_000.0}],
                 }
             ]
         }
@@ -1800,14 +1800,14 @@ class AlertSummaryTests(unittest.TestCase):
                     "address": address,
                     "alias": "Trader One",
                     "positions": [
-                        {"coin": "BTC", "side": "Long", "positionValue": 750000.0, "size": 10.0, "entryPx": 75000.0},
+                        {"coin": "BTC", "side": "Long", "positionValue": 1_200_000.0, "size": 12.0, "entryPx": 100000.0},
                     ],
                 }
             ]
         }
         duplicate_key = self.service.large_position_event_key(
             "open",
-            {"address": address, "coin": "BTC", "side": "long", "totalValue": 750000.0, "totalSize": 10.0},
+            {"address": address, "coin": "BTC", "side": "long", "totalValue": 1_200_000.0, "totalSize": 12.0},
         )
 
         with patch(
@@ -1854,7 +1854,7 @@ class AlertSummaryTests(unittest.TestCase):
                     "address": "0x1111111111111111111111111111111111111111",
                     "alias": "Trader One",
                     "positions": [
-                        {"coin": "BTC", "side": "Long", "positionValue": 750000.0, "size": 10.0, "entryPx": 75000.0},
+                        {"coin": "BTC", "side": "Long", "positionValue": 1_200_000.0, "size": 12.0, "entryPx": 100000.0},
                     ],
                 }
             ]
@@ -1898,30 +1898,30 @@ class AlertSummaryTests(unittest.TestCase):
                     "address": "0x1111111111111111111111111111111111111111",
                     "alias": "Trader One",
                     "positions": [
-                        {"coin": "BTC", "side": "Long", "positionValue": 750000.0, "size": 10.0, "entryPx": 75000.0},
+                        {"coin": "BTC", "side": "Long", "positionValue": 1_200_000.0, "size": 12.0, "entryPx": 100000.0},
                     ],
                     "recentFills": [
-                        {"coin": "BTC", "direction": "Open Long", "price": 75000.0, "size": 10.0, "time": now_ms - 60_000}
+                        {"coin": "BTC", "direction": "Open Long", "price": 100000.0, "size": 12.0, "time": now_ms - 60_000}
                     ],
                 },
                 {
                     "address": "0x2222222222222222222222222222222222222222",
                     "alias": "Trader Two",
                     "positions": [
-                        {"coin": "BTC", "side": "Long", "positionValue": 650000.0, "size": 8.0, "entryPx": 81250.0},
+                        {"coin": "BTC", "side": "Long", "positionValue": 1_100_000.0, "size": 10.0, "entryPx": 110000.0},
                     ],
                     "recentFills": [
-                        {"coin": "BTC", "direction": "Open Long", "price": 81250.0, "size": 8.0, "time": now_ms - 300_000}
+                        {"coin": "BTC", "direction": "Open Long", "price": 110000.0, "size": 10.0, "time": now_ms - 300_000}
                     ],
                 },
                 {
                     "address": "0x3333333333333333333333333333333333333333",
                     "alias": "Trader Three",
                     "positions": [
-                        {"coin": "BTC", "side": "Long", "positionValue": 700000.0, "size": 9.0, "entryPx": 77777.7778},
+                        {"coin": "BTC", "side": "Long", "positionValue": 1_300_000.0, "size": 13.0, "entryPx": 100000.0},
                     ],
                     "recentFills": [
-                        {"coin": "BTC", "direction": "Open Long", "price": 77777.7778, "size": 9.0, "time": now_ms - 540_000}
+                        {"coin": "BTC", "direction": "Open Long", "price": 100000.0, "size": 13.0, "time": now_ms - 540_000}
                     ],
                 },
             ]
@@ -1949,9 +1949,9 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(result["changes"]["clusteredOpenPositions"][0]["coin"], "BTC")
         self.assertEqual(result["changes"]["clusteredOpenPositions"][0]["walletCount"], 3)
         sent_message = send_telegram_message.call_args.args[2]
-        self.assertIn("3+ opens >$500K in 10m", sent_message)
-        self.assertIn("- BTC long: 3 wallets, $2.1M", sent_message)
-        self.assertIn("Trader One: $750K", sent_message)
+        self.assertIn("3+ opens >$1.0M in 10m", sent_message)
+        self.assertIn("- BTC long: 3 wallets, $3.6M", sent_message)
+        self.assertIn("Trader One: $1.2M", sent_message)
         saved_dedupe = save_json_file.call_args.args[1]["state"]["alertDedupe"]
         self.assertTrue(next(iter(saved_dedupe)).startswith("position:cluster-open:BTC:long:"))
 
@@ -1962,28 +1962,28 @@ class AlertSummaryTests(unittest.TestCase):
                 {
                     "address": "0x1111111111111111111111111111111111111111",
                     "positions": [
-                        {"coin": "ETH", "side": "Short", "positionValue": 700000.0, "size": 300.0, "entryPx": 2333.33}
+                        {"coin": "ETH", "side": "Short", "positionValue": 1_100_000.0, "size": 440.0, "entryPx": 2500.0}
                     ],
                     "recentFills": [
-                        {"coin": "ETH", "direction": "Open Short", "price": 2333.33, "size": 300.0, "time": now_ms - 60_000}
+                        {"coin": "ETH", "direction": "Open Short", "price": 2500.0, "size": 440.0, "time": now_ms - 60_000}
                     ],
                 },
                 {
                     "address": "0x2222222222222222222222222222222222222222",
                     "positions": [
-                        {"coin": "ETH", "side": "Short", "positionValue": 800000.0, "size": 340.0, "entryPx": 2352.94}
+                        {"coin": "ETH", "side": "Short", "positionValue": 1_200_000.0, "size": 480.0, "entryPx": 2500.0}
                     ],
                     "recentFills": [
-                        {"coin": "ETH", "direction": "Open Short", "price": 2352.94, "size": 340.0, "time": now_ms - 120_000}
+                        {"coin": "ETH", "direction": "Open Short", "price": 2500.0, "size": 480.0, "time": now_ms - 120_000}
                     ],
                 },
                 {
                     "address": "0x3333333333333333333333333333333333333333",
                     "positions": [
-                        {"coin": "ETH", "side": "Short", "positionValue": 900000.0, "size": 380.0, "entryPx": 2368.42}
+                        {"coin": "ETH", "side": "Short", "positionValue": 1_300_000.0, "size": 520.0, "entryPx": 2500.0}
                     ],
                     "recentFills": [
-                        {"coin": "ETH", "direction": "Open Short", "price": 2368.42, "size": 380.0, "time": now_ms - 660_000}
+                        {"coin": "ETH", "direction": "Open Short", "price": 2500.0, "size": 520.0, "time": now_ms - 660_000}
                     ],
                 },
             ]
@@ -2015,7 +2015,7 @@ class AlertSummaryTests(unittest.TestCase):
                 "alias": "Old Trader",
                 "coin": "BTC",
                 "side": "long",
-                "totalValue": 700000.0,
+                "totalValue": 1_200_000.0,
                 "totalSize": 7.0,
             }
         }
@@ -2024,7 +2024,7 @@ class AlertSummaryTests(unittest.TestCase):
                 {
                     "address": "0x1111111111111111111111111111111111111111",
                     "alias": "Trader One",
-                    "positions": [{"coin": "ETH", "side": "Short", "positionValue": 900000.0}],
+                    "positions": [{"coin": "ETH", "side": "Short", "positionValue": 1_300_000.0}],
                 }
             ]
         }
@@ -2065,7 +2065,7 @@ class AlertSummaryTests(unittest.TestCase):
                     "address": "0x69906b0ed626ca01a4b7c001e5711e5714ccf207",
                     "alias": "Trader One",
                     "positions": [
-                        {"coin": "BTC", "side": "Long", "positionValue": 807800.0},
+                        {"coin": "BTC", "side": "Long", "positionValue": 1_207_800.0},
                     ],
                 }
             ]
@@ -2099,8 +2099,8 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertNotIn("Wallet ranks by 7D hit rate + PnL", hourly_message)
         self.assertNotIn("High-conviction signals", hourly_message)
         alert_message = send_telegram_message.call_args_list[1].args[2]
-        self.assertIn("Open >$500K", alert_message)
-        self.assertIn("Trader One: BTC long $808K", alert_message)
+        self.assertIn("Open >$1.0M", alert_message)
+        self.assertIn("Trader One: BTC long $1.2M", alert_message)
         saved_state = save_json_file.call_args.args[1]["state"]
         self.assertEqual(saved_state["summary"]["consensus"][0]["walletCount"], 8)
         self.assertIn("0x69906b0ed626ca01a4b7c001e5711e5714ccf207:BTC:long", saved_state["largePositions"])
@@ -2118,7 +2118,7 @@ class AlertSummaryTests(unittest.TestCase):
                     "address": "0x1111111111111111111111111111111111111111",
                     "alias": "Trader One",
                     "positions": [
-                        {"coin": "ETH", "side": "Short", "positionValue": 900000.0, "size": 300.0},
+                        {"coin": "ETH", "side": "Short", "positionValue": 1_300_000.0, "size": 300.0},
                     ],
                 }
             ]
@@ -2129,7 +2129,7 @@ class AlertSummaryTests(unittest.TestCase):
                 "alias": "Old Trader",
                 "coin": "BTC",
                 "side": "long",
-                "totalValue": 700000.0,
+                "totalValue": 1_200_000.0,
                 "totalSize": 7.0,
             }
         }
@@ -2171,7 +2171,7 @@ class AlertSummaryTests(unittest.TestCase):
                 "alias": "Trader One",
                 "coin": "BTC",
                 "side": "long",
-                "totalValue": 600000.0,
+                "totalValue": 1_200_000.0,
                 "totalSize": 10.0,
                 "entryPx": 75000.0,
             }
@@ -2182,7 +2182,7 @@ class AlertSummaryTests(unittest.TestCase):
                     "address": "0x1111111111111111111111111111111111111111",
                     "alias": "Trader One",
                     "positions": [
-                        {"coin": "BTC", "side": "Long", "positionValue": 1200000.0, "size": 20.0, "entryPx": 78000.0},
+                        {"coin": "BTC", "side": "Long", "positionValue": 2_400_000.0, "size": 20.0, "entryPx": 78000.0},
                     ],
                 }
             ]
@@ -2199,8 +2199,8 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertTrue(result["sent"])
         self.assertEqual(len(result["changes"]["increasedLargePositions"]), 1)
         sent_message = send_telegram_message.call_args.args[2]
-        self.assertIn("Added >$500K", sent_message)
-        self.assertIn("Trader One: BTC long $600K->$1.2M (+$600K +10 add ~$60,000)", sent_message)
+        self.assertIn("Added >$1.0M", sent_message)
+        self.assertIn("Trader One: BTC long $1.2M->$2.4M (+$1.2M +10 add ~$120,000)", sent_message)
         self.assertNotIn("@$78,000", sent_message)
 
     def test_large_position_snapshot_filters_after_aggregation(self) -> None:
@@ -2210,8 +2210,8 @@ class AlertSummaryTests(unittest.TestCase):
                     "address": "0x1111111111111111111111111111111111111111",
                     "alias": "Trader One",
                     "positions": [
-                        {"coin": "BTC", "side": "Long", "positionValue": 300000.0, "size": 3.0, "entryPx": 75000.0},
-                        {"coin": "BTC", "side": "Long", "positionValue": 260000.0, "size": 2.0, "entryPx": 76000.0},
+                        {"coin": "BTC", "side": "Long", "positionValue": 600000.0, "size": 6.0, "entryPx": 75000.0},
+                        {"coin": "BTC", "side": "Long", "positionValue": 500000.0, "size": 5.0, "entryPx": 76000.0},
                     ],
                 }
             ]
@@ -2220,7 +2220,7 @@ class AlertSummaryTests(unittest.TestCase):
         snapshot = self.service.build_large_position_snapshot(dashboard)
 
         self.assertIn("0x1111111111111111111111111111111111111111:BTC:long", snapshot)
-        self.assertEqual(snapshot["0x1111111111111111111111111111111111111111:BTC:long"]["totalValue"], 560000.0)
+        self.assertEqual(snapshot["0x1111111111111111111111111111111111111111:BTC:long"]["totalValue"], 1_100_000.0)
 
     def test_large_position_snapshot_excludes_large_losing_positions(self) -> None:
         dashboard = {
@@ -2246,7 +2246,7 @@ class AlertSummaryTests(unittest.TestCase):
                         {
                             "coin": "BTC",
                             "side": "Long",
-                            "positionValue": 800_000.0,
+                            "positionValue": 1_100_000.0,
                             "size": 10.0,
                             "entryPx": 80_000.0,
                             "unrealizedPnl": -1_000_000.0,
@@ -2310,20 +2310,20 @@ class AlertSummaryTests(unittest.TestCase):
                 "coin": "BTC",
                 "side": "long",
                 "totalValue": 9900000.0,
-                "totalSize": 110.0,
+                "totalSize": 115.0,
             }
         }
 
         added, increased, closed = self.service.summarize_large_position_changes(
             previous,
             current,
-            {"wallet:BTC:long:add": {"price": 72909.0, "size": 10.0}},
+            {"wallet:BTC:long:add": {"price": 72909.0, "size": 15.0}},
         )
 
         self.assertEqual(added, [])
         self.assertEqual(len(increased), 1)
         self.assertEqual(increased[0]["addPrice"], 72909.0)
-        self.assertEqual(increased[0]["addValue"], 729090.0)
+        self.assertEqual(increased[0]["addValue"], 1_093_635.0)
         self.assertEqual(increased[0]["addPriceSource"], "fill")
         self.assertEqual(closed, [])
 
@@ -2388,7 +2388,7 @@ class AlertSummaryTests(unittest.TestCase):
                 "coin": "BTC",
                 "side": "long",
                 "totalValue": 9900000.0,
-                "totalSize": 110.0,
+                "totalSize": 115.0,
             }
         }
 
@@ -2396,8 +2396,8 @@ class AlertSummaryTests(unittest.TestCase):
 
         self.assertEqual(added, [])
         self.assertEqual(len(increased), 1)
-        self.assertEqual(increased[0]["sizeIncrease"], 10.0)
-        self.assertEqual(increased[0]["addPrice"], 90000.0)
+        self.assertEqual(increased[0]["sizeIncrease"], 15.0)
+        self.assertAlmostEqual(increased[0]["addPrice"], 86086.95652174)
         self.assertEqual(closed, [])
 
     def test_large_position_increases_ignore_small_drift(self) -> None:

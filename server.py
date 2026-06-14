@@ -47,7 +47,7 @@ ACTIONABLE_SIGNAL_MIN_QNET = 1.5
 ACTIONABLE_SIGNAL_MIN_VALUE = 1_000_000
 POSITION_GROUP_DISPLAY_MIN_VALUE = 1_000_000
 MIN_POSITION_MESSAGE_WALLETS = 3
-LARGE_POSITION_ALERT_MIN_VALUE = 500_000
+LARGE_POSITION_ALERT_MIN_VALUE = 1_000_000
 MIN_POSITION_MESSAGE_VALUE = POSITION_GROUP_DISPLAY_MIN_VALUE
 NEW_POSITION_ALERT_MIN_VALUE = LARGE_POSITION_ALERT_MIN_VALUE
 POSITION_INCREASE_ALERT_MIN_DELTA = LARGE_POSITION_ALERT_MIN_VALUE
@@ -2893,7 +2893,7 @@ class WalletTrackerService:
     def build_hourly_update_message(self, dashboard: dict[str, Any], summary: dict[str, Any], min_wallets: int) -> str:
         return "\n\n".join(
             [
-                self.build_summary_message(summary, min_wallets, title="Hourly wallet update", include_signals=False),
+                self.build_summary_message(summary, min_wallets, title="4-hour wallet update", include_signals=False),
                 self.build_positions_message(dashboard),
             ]
         )
