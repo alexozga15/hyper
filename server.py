@@ -69,6 +69,9 @@ RANKING_MIN_7D_CLOSED_TRADES = 5
 RANKING_FULL_CONFIDENCE_7D_CLOSED_TRADES = 20
 RANKING_MIN_30D_CLOSED_TRADES = 20
 RANKING_FULL_CONFIDENCE_30D_CLOSED_TRADES = 30
+CONVICTION_WEIGHT_30D_SHARE = 0.70
+CONVICTION_WEIGHT_7D_SHARE = 0.30
+CONVICTION_WEIGHT_7D_MAX_EFFECT_PCT = 20.0
 ELITE_MIN_QUALITY_SCORE = 65.0
 ELITE_MIN_PROFIT_FACTOR = 1.5
 ELITE_MAX_DRAWDOWN_PCT = 35.0
@@ -279,12 +282,23 @@ def profit_factor_score(profit_factor: float) -> float:
     return clamp(((to_float(profit_factor) - 0.5) / 2.5) * 100)
 
 
+def capped_recent_quality_blend(base_30d_score: float, recent_7d_score: float, recent_weight: float) -> float:
+    base = clamp(base_30d_score)
+    recent = clamp(recent_7d_score)
+    max_recent_weight = min(CONVICTION_WEIGHT_7D_SHARE, max(0.0, 1.0 - CONVICTION_WEIGHT_30D_SHARE))
+    weight = max(0.0, min(to_float(recent_weight), max_recent_weight))
+    blended = (base * (1.0 - weight)) + (recent * weight)
+    max_effect = CONVICTION_WEIGHT_7D_MAX_EFFECT_PCT
+    return clamp(max(base - max_effect, min(base + max_effect, blended)))
+
+
 def build_wallet_quality_rank(
     hit_rate: float,
     closed_trade_count: int,
     pnl_7d: float,
     account_value: float,
     *,
+    hit_rate_30d: float | None = None,
     closed_trade_count_30d: int | None = None,
     pnl_30d: float | None = None,
     gross_profit_30d: float = 0.0,
@@ -296,6 +310,7 @@ def build_wallet_quality_rank(
     normalized_hit_rate = max(0.0, min(to_float(hit_rate), 100.0))
     sample_size_7d = max(0, int(to_float(closed_trade_count)))
     sample_size_30d = max(0, int(to_float(closed_trade_count_30d if closed_trade_count_30d is not None else sample_size_7d)))
+    normalized_hit_rate_30d = max(0.0, min(to_float(hit_rate_30d if hit_rate_30d is not None else hit_rate), 100.0))
     pnl_30d_value = to_float(pnl_30d if pnl_30d is not None else pnl_7d)
     account = to_float(account_value)
     confidence_7d = min(sample_size_7d / RANKING_FULL_CONFIDENCE_7D_CLOSED_TRADES, 1.0)
@@ -311,7 +326,10 @@ def build_wallet_quality_rank(
     else:
         profit_factor = 0.0
     expectancy_pct = ((pnl_30d_value / max(sample_size_30d, 1)) / account) * 100 if account > 0 else 0.0
-    win_rate_score = normalized_hit_rate * confidence_30d
+    win_rate_score = normalized_hit_rate_30d * confidence_30d
+    recent_win_rate_score = normalized_hit_rate * confidence_7d
+    recent_quality_confidence = min(sample_size_7d / RANKING_MIN_7D_CLOSED_TRADES, 1.0)
+    recent_quality_win_rate_score = normalized_hit_rate * recent_quality_confidence
     drawdown_control_score = clamp(100.0 - (to_float(max_drawdown_pct) * 5.0))
     margin_score = clamp(100.0 - max(0.0, to_float(margin_usage_pct) - 30.0) * 2.0)
     unrealized_return_pct = (to_float(unrealized_pnl) / account) * 100 if account > 0 else 0.0
@@ -326,6 +344,19 @@ def build_wallet_quality_rank(
         + drawdown_control_score * 0.10
         + open_health_score * 0.05
     )
+    quality_30d_score = (
+        return_score(pnl_30d_return_pct) * 0.30
+        + profit_factor_score(profit_factor) * 0.25
+        + return_score(expectancy_pct) * 0.20
+        + win_rate_score * 0.15
+        + drawdown_control_score * 0.10
+    )
+    quality_7d_score = (
+        return_score(pnl_7d_return_pct) * 0.60
+        + recent_quality_win_rate_score * 0.40
+    )
+    effective_7d_weight = CONVICTION_WEIGHT_7D_SHARE * min(sample_size_7d / RANKING_MIN_7D_CLOSED_TRADES, 1.0)
+    conviction_weight_score = capped_recent_quality_blend(quality_30d_score, quality_7d_score, effective_7d_weight)
 
     elite_eligible = (
         sample_size_30d >= RANKING_MIN_30D_CLOSED_TRADES
@@ -351,6 +382,7 @@ def build_wallet_quality_rank(
         "label": label,
         "score": round(score, 1),
         "winRate": round(normalized_hit_rate, 1),
+        "winRate30d": round(normalized_hit_rate_30d, 1),
         "sampleSize": sample_size_7d,
         "sampleSize30d": sample_size_30d,
         "confidence": round(confidence_7d, 2),
@@ -364,11 +396,17 @@ def build_wallet_quality_rank(
         "maxDrawdownPct": round(to_float(max_drawdown_pct), 2),
         "marginUsagePct": round(to_float(margin_usage_pct), 2),
         "openHealthScore": round(open_health_score, 1),
-        "hitRateScore": round(win_rate_score, 1),
+        "hitRateScore": round(recent_win_rate_score, 1),
+        "quality7dHitRateScore": round(recent_quality_win_rate_score, 1),
+        "hitRate30dScore": round(win_rate_score, 1),
         "pnlScore": round(return_score(pnl_7d_return_pct), 1),
         "pnl30dScore": round(return_score(pnl_30d_return_pct), 1),
         "profitFactorScore": round(profit_factor_score(profit_factor), 1),
         "drawdownScore": round(drawdown_control_score, 1),
+        "quality7dScore": round(quality_7d_score, 1),
+        "quality30dScore": round(quality_30d_score, 1),
+        "convictionWeightScore": round(conviction_weight_score, 1),
+        "convictionWeight7dShare": round(effective_7d_weight, 2),
         "eliteEligible": elite_eligible,
         "metric": "multi_period_quality",
     }
@@ -999,6 +1037,8 @@ class WalletTrackerService:
         all_time_realized = performance.get("allTime", {}).get("pnl", 0.0)
         recent_closed_trade_count = win_count + loss_count
         hit_rate = (win_count / max(recent_closed_trade_count, 1)) * 100
+        closed_trade_count_30d = win_count_30d + loss_count_30d
+        hit_rate_30d = (win_count_30d / max(closed_trade_count_30d, 1)) * 100
 
         account_value = to_float(margin_summary.get("accountValue"))
         total_notional = to_float(margin_summary.get("totalNtlPos"))
@@ -1015,7 +1055,8 @@ class WalletTrackerService:
             recent_closed_trade_count,
             recent_realized_pnl,
             account_value,
-            closed_trade_count_30d=win_count_30d + loss_count_30d,
+            hit_rate_30d=hit_rate_30d,
+            closed_trade_count_30d=closed_trade_count_30d,
             pnl_30d=realized_pnl_30d,
             gross_profit_30d=gross_profit_30d,
             gross_loss_30d=gross_loss_30d,
@@ -1309,7 +1350,14 @@ class WalletTrackerService:
         return sorted(
             wallets,
             key=lambda wallet: (
-                to_float(wallet.get("recentWinRateRank", {}).get("score")) if isinstance(wallet.get("recentWinRateRank"), dict) else 0.0,
+                to_float(
+                    wallet.get("recentWinRateRank", {}).get(
+                        "convictionWeightScore",
+                        wallet.get("recentWinRateRank", {}).get("score"),
+                    )
+                )
+                if isinstance(wallet.get("recentWinRateRank"), dict)
+                else 0.0,
                 to_float(wallet.get("realizedPnl30d")),
                 to_float(wallet.get("recentRealizedPnl")),
                 to_float(wallet.get("unrealizedPnl")),
@@ -1415,7 +1463,7 @@ class WalletTrackerService:
         if not isinstance(rank, dict):
             base_weight = 1.0
         else:
-            score = to_float(rank.get("score"))
+            score = to_float(rank.get("convictionWeightScore", rank.get("score")))
             label = str(rank.get("label") or "")
             if score <= 0 or label == "Unranked":
                 base_weight = 1.0

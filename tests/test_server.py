@@ -38,6 +38,61 @@ class SegmentTests(unittest.TestCase):
         self.assertEqual(losing["label"], "Cold")
         self.assertEqual(losing["pnlReturnPct"], -50.0)
 
+    def test_wallet_quality_rank_blends_30d_base_with_capped_7d_weight(self) -> None:
+        cold_week = build_wallet_quality_rank(
+            0,
+            20,
+            -100_000,
+            100_000,
+            hit_rate_30d=70,
+            closed_trade_count_30d=30,
+            pnl_30d=30_000,
+            gross_profit_30d=50_000,
+            gross_loss_30d=10_000,
+            max_drawdown_pct=5,
+        )
+        hot_but_thin_week = build_wallet_quality_rank(
+            100,
+            2,
+            100_000,
+            100_000,
+            hit_rate_30d=70,
+            closed_trade_count_30d=30,
+            pnl_30d=30_000,
+            gross_profit_30d=50_000,
+            gross_loss_30d=10_000,
+            max_drawdown_pct=5,
+        )
+
+        self.assertLessEqual(
+            abs(cold_week["convictionWeightScore"] - cold_week["quality30dScore"]),
+            20.0,
+        )
+        self.assertEqual(hot_but_thin_week["convictionWeight7dShare"], 0.12)
+        self.assertLess(
+            abs(hot_but_thin_week["convictionWeightScore"] - hot_but_thin_week["quality30dScore"]),
+            5.0,
+        )
+
+        hot_active_week = build_wallet_quality_rank(
+            100,
+            5,
+            100_000,
+            100_000,
+            hit_rate_30d=70,
+            closed_trade_count_30d=30,
+            pnl_30d=30_000,
+            gross_profit_30d=50_000,
+            gross_loss_30d=10_000,
+            max_drawdown_pct=5,
+        )
+        self.assertEqual(hot_active_week["convictionWeight7dShare"], 0.3)
+        self.assertGreater(hot_active_week["convictionWeightScore"], hot_active_week["quality30dScore"])
+        self.assertLessEqual(
+            hot_active_week["convictionWeightScore"] - hot_active_week["quality30dScore"],
+            20.0,
+        )
+
     def test_wallet_quality_rank_requires_drawdown_control_for_elite(self) -> None:
         elite = build_wallet_quality_rank(
             90,
