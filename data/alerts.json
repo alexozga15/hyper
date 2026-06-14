@@ -6,140 +6,77 @@
   },
   "state": {
     "summary": {
-      "generatedAt": "2026-06-14T01:57:29.451666Z",
+      "generatedAt": "2026-06-14T05:11:22.295761Z",
       "overallBias": "bearish",
       "consensus": [
         {
           "coin": "HYPE",
           "side": "short",
           "walletCount": 8,
-          "weightedWalletCount": 4.894,
+          "weightedWalletCount": 4.789,
           "recentAddWalletCount": 0,
           "freshActivityWalletCount": 0,
           "topWalletCount": 4,
-          "totalValue": 30348919.9,
+          "totalValue": 34355967.36,
           "wallets": [
             {
               "address": "0x939f95036d2e7b6d7419ec072bf9d967352204d2",
               "alias": "0x939f95036d2e7b6d7419ec072bf9d967352204d2",
-              "value": 18872015.79,
-              "qualityWeight": 0.383
+              "value": 18708920.84,
+              "qualityWeight": 0.382
             },
             {
               "address": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
               "alias": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
-              "value": 6251641.86,
+              "value": 6385144.64,
+              "qualityWeight": 0.25
+            },
+            {
+              "address": "0x69906b0ed626ca01a4b7c001e5711e5714ccf207",
+              "alias": "0x69906b0ed626ca01a4b7c001e5711e5714ccf207",
+              "value": 4088614.18,
               "qualityWeight": 0.25
             },
             {
               "address": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
               "alias": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
-              "value": 2425320.61,
+              "value": 2404360.6,
               "qualityWeight": 0.75
             },
             {
               "address": "0xb3e475368ed0fa0ad23c04de0423d48a0758806f",
               "alias": "0xb3e475368ed0fa0ad23c04de0423d48a0758806f",
-              "value": 1212660.0,
+              "value": 1202180.0,
               "qualityWeight": 0.25
             },
             {
               "address": "0x3d89bcea338f35edfaeb313b1c713978c6dceb14",
               "alias": "0x3d89bcea338f35edfaeb313b1c713978c6dceb14",
-              "value": 636646.5,
+              "value": 631144.5,
               "qualityWeight": 0.75
             },
             {
               "address": "0xad59ed47c226987cf458a63428ca10887773ba81",
               "alias": "0xad59ed47c226987cf458a63428ca10887773ba81",
-              "value": 551760.3,
+              "value": 546991.9,
               "qualityWeight": 1.407
             },
             {
               "address": "0x63d417a577b50c96f4f09148d4e4d70950db0522",
               "alias": "0x63d417a577b50c96f4f09148d4e4d70950db0522",
-              "value": 391998.41,
+              "value": 388610.7,
               "qualityWeight": 0.75
-            },
-            {
-              "address": "0x091144e651b334341eabdbbbfed644ad0100023e",
-              "alias": "Manifold Trading",
-              "value": 6876.43,
-              "qualityWeight": 0.354
             }
           ],
           "oppositeWalletCount": 1,
           "netWalletCount": 7,
           "oppositeWeightedWalletCount": 1.153,
-          "netWeightedWalletCount": 3.741,
+          "netWeightedWalletCount": 3.636,
           "longWalletCount": 1,
           "shortWalletCount": 8,
           "longWeightedWalletCount": 1.153,
-          "shortWeightedWalletCount": 4.894,
+          "shortWeightedWalletCount": 4.789,
           "convictionScore": 100.0
-        },
-        {
-          "coin": "ETH",
-          "side": "short",
-          "walletCount": 7,
-          "weightedWalletCount": 3.933,
-          "recentAddWalletCount": 0,
-          "freshActivityWalletCount": 0,
-          "topWalletCount": 2,
-          "totalValue": 127599891.98,
-          "wallets": [
-            {
-              "address": "0x0ddf9bae2af4b874b96d287a5ad42eb47138a902",
-              "alias": "Penision Fund",
-              "value": 101016000.0,
-              "qualityWeight": 0.5
-            },
-            {
-              "address": "0x45d26f28196d226497130c4bac709d808fed4029",
-              "alias": "0x45d2...4029",
-              "value": 8480293.2,
-              "qualityWeight": 0.5
-            },
-            {
-              "address": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
-              "alias": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
-              "value": 6734800.0,
-              "qualityWeight": 0.75
-            },
-            {
-              "address": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
-              "alias": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
-              "value": 6250319.53,
-              "qualityWeight": 0.25
-            },
-            {
-              "address": "0x418aa6bf98a2b2bc93779f810330d88cde488888",
-              "alias": "0x418aa6bf98a2b2bc93779f810330d88cde488888",
-              "value": 4209250.0,
-              "qualityWeight": 0.5
-            },
-            {
-              "address": "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
-              "alias": "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
-              "value": 684327.67,
-              "qualityWeight": 0.5
-            },
-            {
-              "address": "0x95fde6cf0d305078b7eeac44182a931c169dd947",
-              "alias": "0x95fde6cf0d305078b7eeac44182a931c169dd947",
-              "value": 224901.57,
-              "qualityWeight": 0.933
-            }
-          ],
-          "oppositeWalletCount": 2,
-          "netWalletCount": 5,
-          "oppositeWeightedWalletCount": 3.096,
-          "netWeightedWalletCount": 0.837,
-          "longWalletCount": 2,
-          "shortWalletCount": 7,
-          "longWeightedWalletCount": 3.096,
-          "shortWeightedWalletCount": 3.933,
-          "convictionScore": 22.4
         },
         {
           "coin": "SOL",
@@ -149,105 +86,162 @@
           "recentAddWalletCount": 0,
           "freshActivityWalletCount": 0,
           "topWalletCount": 2,
-          "totalValue": 13390791.86,
+          "totalValue": 13338441.27,
           "wallets": [
             {
               "address": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
               "alias": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
-              "value": 10266061.85,
+              "value": 10225630.18,
               "qualityWeight": 0.25
             },
             {
               "address": "0xa87a233e8a7d8951ff790a2e39738086cb5f71b7",
               "alias": "0xa87a233e8a7d8951ff790a2e39738086cb5f71b7",
-              "value": 2432886.06,
+              "value": 2423691.88,
               "qualityWeight": 0.5
             },
             {
               "address": "0x63d417a577b50c96f4f09148d4e4d70950db0522",
               "alias": "0x63d417a577b50c96f4f09148d4e4d70950db0522",
-              "value": 485413.95,
+              "value": 483502.21,
               "qualityWeight": 0.75
             },
             {
               "address": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
               "alias": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
-              "value": 206430.0,
+              "value": 205617.0,
               "qualityWeight": 0.75
             }
           ],
-          "oppositeWalletCount": 2,
-          "netWalletCount": 2,
-          "oppositeWeightedWalletCount": 1.761,
-          "netWeightedWalletCount": 0.489,
-          "longWalletCount": 2,
+          "oppositeWalletCount": 1,
+          "netWalletCount": 3,
+          "oppositeWeightedWalletCount": 1.407,
+          "netWeightedWalletCount": 0.843,
+          "longWalletCount": 1,
           "shortWalletCount": 4,
-          "longWeightedWalletCount": 1.761,
+          "longWeightedWalletCount": 1.407,
           "shortWeightedWalletCount": 2.25,
-          "convictionScore": 13.1
+          "convictionScore": 23.2
+        },
+        {
+          "coin": "ETH",
+          "side": "short",
+          "walletCount": 6,
+          "weightedWalletCount": 3.278,
+          "recentAddWalletCount": 0,
+          "freshActivityWalletCount": 0,
+          "topWalletCount": 2,
+          "totalValue": 126499924.17,
+          "wallets": [
+            {
+              "address": "0x0ddf9bae2af4b874b96d287a5ad42eb47138a902",
+              "alias": "Penision Fund",
+              "value": 100686000.0,
+              "qualityWeight": 0.5
+            },
+            {
+              "address": "0x45d26f28196d226497130c4bac709d808fed4029",
+              "alias": "0x45d2...4029",
+              "value": 8452589.7,
+              "qualityWeight": 0.5
+            },
+            {
+              "address": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
+              "alias": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
+              "value": 6712400.0,
+              "qualityWeight": 0.75
+            },
+            {
+              "address": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
+              "alias": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
+              "value": 6229530.92,
+              "qualityWeight": 0.25
+            },
+            {
+              "address": "0x418aa6bf98a2b2bc93779f810330d88cde488888",
+              "alias": "0x418aa6bf98a2b2bc93779f810330d88cde488888",
+              "value": 4195250.0,
+              "qualityWeight": 0.34
+            },
+            {
+              "address": "0x95fde6cf0d305078b7eeac44182a931c169dd947",
+              "alias": "0x95fde6cf0d305078b7eeac44182a931c169dd947",
+              "value": 224153.55,
+              "qualityWeight": 0.938
+            }
+          ],
+          "oppositeWalletCount": 2,
+          "netWalletCount": 4,
+          "oppositeWeightedWalletCount": 3.113,
+          "netWeightedWalletCount": 0.165,
+          "longWalletCount": 2,
+          "shortWalletCount": 6,
+          "longWeightedWalletCount": 3.113,
+          "shortWeightedWalletCount": 3.278,
+          "convictionScore": 4.5
         },
         {
           "coin": "BTC",
           "side": "short",
           "walletCount": 7,
-          "weightedWalletCount": 4.647,
+          "weightedWalletCount": 4.237,
           "recentAddWalletCount": 0,
           "freshActivityWalletCount": 0,
           "topWalletCount": 3,
-          "totalValue": 45241947.85,
+          "totalValue": 44305866.2,
           "wallets": [
             {
               "address": "0x09bc1cf4d9f0b59e1425a8fde4d4b1f7d3c9410d",
               "alias": "0x09bc1cf4d9f0b59e1425a8fde4d4b1f7d3c9410d",
-              "value": 18139475.76,
+              "value": 15965640.2,
               "qualityWeight": 1.397
             },
             {
               "address": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
               "alias": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
-              "value": 10258395.39,
+              "value": 10687665.98,
               "qualityWeight": 0.25
             },
             {
               "address": "0x45d26f28196d226497130c4bac709d808fed4029",
               "alias": "0x45d2...4029",
-              "value": 6586038.0,
-              "qualityWeight": 0.5
-            },
-            {
-              "address": "0x418aa6bf98a2b2bc93779f810330d88cde488888",
-              "alias": "0x418aa6bf98a2b2bc93779f810330d88cde488888",
-              "value": 4584470.0,
+              "value": 6563292.0,
               "qualityWeight": 0.5
             },
             {
               "address": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
               "alias": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
-              "value": 4519900.0,
+              "value": 4504220.0,
               "qualityWeight": 0.75
             },
             {
-              "address": "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
-              "alias": "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
-              "value": 808986.94,
-              "qualityWeight": 0.5
+              "address": "0x418aa6bf98a2b2bc93779f810330d88cde488888",
+              "alias": "0x418aa6bf98a2b2bc93779f810330d88cde488888",
+              "value": 4504220.0,
+              "qualityWeight": 0.34
+            },
+            {
+              "address": "0x69906b0ed626ca01a4b7c001e5711e5714ccf207",
+              "alias": "0x69906b0ed626ca01a4b7c001e5711e5714ccf207",
+              "value": 1737342.0,
+              "qualityWeight": 0.25
             },
             {
               "address": "0x63d417a577b50c96f4f09148d4e4d70950db0522",
               "alias": "0x63d417a577b50c96f4f09148d4e4d70950db0522",
-              "value": 344681.76,
+              "value": 343486.03,
               "qualityWeight": 0.75
             }
           ],
           "oppositeWalletCount": 3,
           "netWalletCount": 4,
-          "oppositeWeightedWalletCount": 4.249,
-          "netWeightedWalletCount": 0.398,
+          "oppositeWeightedWalletCount": 4.266,
+          "netWeightedWalletCount": 0.0,
           "longWalletCount": 3,
           "shortWalletCount": 7,
-          "longWeightedWalletCount": 4.249,
-          "shortWeightedWalletCount": 4.647,
-          "convictionScore": 10.6
+          "longWeightedWalletCount": 4.266,
+          "shortWeightedWalletCount": 4.237,
+          "convictionScore": 0.0
         }
       ],
       "hip3Consensus": [],
@@ -257,58 +251,58 @@
           "side": "short",
           "action": "sell",
           "strength": "high",
-          "probabilityScore": 80.8,
+          "probabilityScore": 80.3,
           "walletCount": 8,
           "oppositeWalletCount": 1,
           "netWalletCount": 7,
-          "weightedWalletCount": 4.894,
-          "netWeightedWalletCount": 3.741,
+          "weightedWalletCount": 4.789,
+          "netWeightedWalletCount": 3.636,
           "recentAddWalletCount": 0,
           "freshActivityWalletCount": 0,
           "topWalletCount": 4,
-          "totalValue": 30348919.9,
+          "totalValue": 34355967.36,
           "convictionScore": 100.0,
           "threshold": 70.0,
           "wallets": [
             {
               "address": "0x939f95036d2e7b6d7419ec072bf9d967352204d2",
               "alias": "0x939f95036d2e7b6d7419ec072bf9d967352204d2",
-              "value": 18872015.79,
-              "qualityWeight": 0.383
+              "value": 18708920.84,
+              "qualityWeight": 0.382
             },
             {
               "address": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
               "alias": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
-              "value": 6251641.86,
+              "value": 6385144.64,
+              "qualityWeight": 0.25
+            },
+            {
+              "address": "0x69906b0ed626ca01a4b7c001e5711e5714ccf207",
+              "alias": "0x69906b0ed626ca01a4b7c001e5711e5714ccf207",
+              "value": 4088614.18,
               "qualityWeight": 0.25
             },
             {
               "address": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
               "alias": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
-              "value": 2425320.61,
+              "value": 2404360.6,
               "qualityWeight": 0.75
             },
             {
               "address": "0xb3e475368ed0fa0ad23c04de0423d48a0758806f",
               "alias": "0xb3e475368ed0fa0ad23c04de0423d48a0758806f",
-              "value": 1212660.0,
+              "value": 1202180.0,
               "qualityWeight": 0.25
-            },
-            {
-              "address": "0x3d89bcea338f35edfaeb313b1c713978c6dceb14",
-              "alias": "0x3d89bcea338f35edfaeb313b1c713978c6dceb14",
-              "value": 636646.5,
-              "qualityWeight": 0.75
             }
           ],
-          "rationale": "8 wallets are short against 1 opposite wallets, net +7, qnet +3.7."
+          "rationale": "8 wallets are short against 1 opposite wallets, net +7, qnet +3.6."
         }
       ],
       "signalCount": 1,
-      "longExposure": 77518432.21,
-      "shortExposure": 261545694.11,
-      "longWalletCount": 15,
-      "shortWalletCount": 19,
+      "longExposure": 75588057.68,
+      "shortExposure": 259862130.11,
+      "longWalletCount": 12,
+      "shortWalletCount": 17,
       "walletCount": 33,
       "topConvictionWallets": {
         "month": "2026-06",
@@ -324,7 +318,7 @@
           "0xad59ed47c226987cf458a63428ca10887773ba81",
           "0x09bc1cf4d9f0b59e1425a8fde4d4b1f7d3c9410d"
         ],
-        "updatedAt": "2026-06-14T01:57:29.440298Z",
+        "updatedAt": "2026-06-14T05:11:22.284171Z",
         "demoted": []
       }
     },
@@ -334,7 +328,7 @@
         "alias": "Penision Fund",
         "coin": "ETH",
         "side": "short",
-        "totalValue": 101016000.0,
+        "totalValue": 100686000.0,
         "totalSize": 60000.0,
         "entryValue": 108609600.0,
         "entryPx": 1810.16
@@ -344,7 +338,7 @@
         "alias": "0x45d2...4029",
         "coin": "ETH",
         "side": "short",
-        "totalValue": 8480293.2,
+        "totalValue": 8452589.7,
         "totalSize": 5037.0,
         "entryValue": 12014604.99,
         "entryPx": 2385.27
@@ -354,7 +348,7 @@
         "alias": "0x45d2...4029",
         "coin": "BTC",
         "side": "short",
-        "totalValue": 6586038.0,
+        "totalValue": 6563292.0,
         "totalSize": 102.0,
         "entryValue": 10252366.799999999,
         "entryPx": 100513.4
@@ -364,7 +358,7 @@
         "alias": "0x45d2...4029",
         "coin": "XYZ100",
         "side": "long",
-        "totalValue": 5047640.0,
+        "totalValue": 5045600.0,
         "totalSize": 170.0,
         "entryValue": 4169080.0,
         "entryPx": 24524.0
@@ -374,7 +368,7 @@
         "alias": "0x45d2...4029",
         "coin": "SP500",
         "side": "long",
-        "totalValue": 3429254.0,
+        "totalValue": 3428150.0,
         "totalSize": 460.0,
         "entryValue": 3024424.56,
         "entryPx": 6574.836
@@ -384,7 +378,7 @@
         "alias": "0x45d2...4029",
         "coin": "SOL",
         "side": "short",
-        "totalValue": 1728230.88,
+        "totalValue": 1721699.68,
         "totalSize": 25120.0,
         "entryValue": 2349556.496,
         "entryPx": 93.5333
@@ -394,37 +388,37 @@
         "alias": "0x45d2...4029",
         "coin": "OIL",
         "side": "short",
-        "totalValue": 1262460.0,
+        "totalValue": 1259580.0,
         "totalSize": 15000.0,
         "entryValue": 1656247.5,
         "entryPx": 110.4165
-      },
-      "0x45d26f28196d226497130c4bac709d808fed4029:NEAR:short": {
-        "address": "0x45d26f28196d226497130c4bac709d808fed4029",
-        "alias": "0x45d2...4029",
-        "coin": "NEAR",
-        "side": "short",
-        "totalValue": 599571.57,
-        "totalSize": 276900.0,
-        "entryValue": 661779.924,
-        "entryPx": 2.38996
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:DOGE:short": {
         "address": "0x45d26f28196d226497130c4bac709d808fed4029",
         "alias": "0x45d2...4029",
         "coin": "DOGE",
         "side": "short",
-        "totalValue": 595994.02,
+        "totalValue": 594365.38,
         "totalSize": 6786000.0,
         "entryValue": 726461.6579999999,
         "entryPx": 0.107053
+      },
+      "0x45d26f28196d226497130c4bac709d808fed4029:NEAR:short": {
+        "address": "0x45d26f28196d226497130c4bac709d808fed4029",
+        "alias": "0x45d2...4029",
+        "coin": "NEAR",
+        "side": "short",
+        "totalValue": 586695.72,
+        "totalSize": 276900.0,
+        "entryValue": 661779.924,
+        "entryPx": 2.38996
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:TAO:short": {
         "address": "0x45d26f28196d226497130c4bac709d808fed4029",
         "alias": "0x45d2...4029",
         "coin": "TAO",
         "side": "short",
-        "totalValue": 502664.4,
+        "totalValue": 523359.9,
         "totalSize": 1890.0,
         "entryValue": 608039.46,
         "entryPx": 321.714
@@ -434,7 +428,7 @@
         "alias": "0xe9ffe7698f46f96f980f2877e18c43f5b4165903",
         "coin": "SILVER",
         "side": "short",
-        "totalValue": 7619030.28,
+        "totalValue": 7618023.7,
         "totalSize": 111842.26,
         "entryValue": 8858387.913718,
         "entryPx": 79.2043
@@ -444,7 +438,7 @@
         "alias": "0xe9ffe7698f46f96f980f2877e18c43f5b4165903",
         "coin": "NVDA",
         "side": "short",
-        "totalValue": 7299416.8,
+        "totalValue": 7293736.32,
         "totalSize": 35503.0,
         "entryValue": 7690553.351,
         "entryPx": 216.617
@@ -454,7 +448,7 @@
         "alias": "0xe9ffe7698f46f96f980f2877e18c43f5b4165903",
         "coin": "MU",
         "side": "short",
-        "totalValue": 5364748.32,
+        "totalValue": 5358000.82,
         "totalSize": 5398.0,
         "entryValue": 4908536.350000001,
         "entryPx": 909.325
@@ -464,7 +458,7 @@
         "alias": "0xe9ffe7698f46f96f980f2877e18c43f5b4165903",
         "coin": "SPCX",
         "side": "short",
-        "totalValue": 2996909.22,
+        "totalValue": 2989671.62,
         "totalSize": 18094.0,
         "entryValue": 3567644.6432,
         "entryPx": 197.1728
@@ -474,7 +468,7 @@
         "alias": "0xe9ffe7698f46f96f980f2877e18c43f5b4165903",
         "coin": "CRCL",
         "side": "short",
-        "totalValue": 2530131.42,
+        "totalValue": 2512048.42,
         "totalSize": 31669.0,
         "entryValue": 3435041.423,
         "entryPx": 108.467
@@ -484,7 +478,7 @@
         "alias": "0xe9ffe7698f46f96f980f2877e18c43f5b4165903",
         "coin": "TSM",
         "side": "short",
-        "totalValue": 1116212.3,
+        "totalValue": 1123252.66,
         "totalSize": 2627.0,
         "entryValue": 1083671.6509999998,
         "entryPx": 412.513
@@ -494,7 +488,7 @@
         "alias": "0xe9ffe7698f46f96f980f2877e18c43f5b4165903",
         "coin": "HOOD",
         "side": "short",
-        "totalValue": 634572.25,
+        "totalValue": 635668.49,
         "totalSize": 6766.894,
         "entryValue": 534604.926682,
         "entryPx": 79.003
@@ -504,7 +498,7 @@
         "alias": "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
         "coin": "ZEC",
         "side": "long",
-        "totalValue": 15892616.03,
+        "totalValue": 16057571.73,
         "totalSize": 37661.12,
         "entryValue": 13233590.312320001,
         "entryPx": 351.386
@@ -514,17 +508,17 @@
         "alias": "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
         "coin": "NEAR",
         "side": "long",
-        "totalValue": 8318817.57,
-        "totalSize": 3841877.6,
-        "entryValue": 8546871.421616001,
-        "entryPx": 2.22466
+        "totalValue": 8959773.7,
+        "totalSize": 4228103.3,
+        "entryValue": 9374127.826429999,
+        "entryPx": 2.2171
       },
       "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae:WLD:long": {
         "address": "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
         "alias": "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
         "coin": "WLD",
         "side": "long",
-        "totalValue": 4947995.89,
+        "totalValue": 4800965.95,
         "totalSize": 9737082.6,
         "entryValue": 5011384.301742,
         "entryPx": 0.51467
@@ -534,7 +528,7 @@
         "alias": "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
         "coin": "TON",
         "side": "long",
-        "totalValue": 3254136.41,
+        "totalValue": 3223785.97,
         "totalSize": 1896902.6,
         "entryValue": 3539316.747184,
         "entryPx": 1.86584
@@ -544,7 +538,7 @@
         "alias": "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
         "coin": "ASTER",
         "side": "long",
-        "totalValue": 2282973.5,
+        "totalValue": 2273976.67,
         "totalSize": 3584396.0,
         "entryValue": 2664353.23472,
         "entryPx": 0.74332
@@ -554,7 +548,7 @@
         "alias": "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
         "coin": "XMR",
         "side": "long",
-        "totalValue": 2180226.61,
+        "totalValue": 2214775.28,
         "totalSize": 6421.686,
         "entryValue": 2163318.314622,
         "entryPx": 336.877
@@ -564,7 +558,7 @@
         "alias": "0x1e37...d5e",
         "coin": "BCH",
         "side": "long",
-        "totalValue": 3597817.5,
+        "totalValue": 3559907.65,
         "totalSize": 17231.752,
         "entryValue": 3926289.156704,
         "entryPx": 227.852
@@ -574,7 +568,7 @@
         "alias": "0x1e37...d5e",
         "coin": "ADA",
         "side": "long",
-        "totalValue": 803818.82,
+        "totalValue": 800701.62,
         "totalSize": 4652537.0,
         "entryValue": 787106.904586,
         "entryPx": 0.169178
@@ -584,7 +578,7 @@
         "alias": "0x1e37...d5e",
         "coin": "AAVE",
         "side": "long",
-        "totalValue": 709140.77,
+        "totalValue": 700205.39,
         "totalSize": 10537.01,
         "entryValue": 697948.360978,
         "entryPx": 66.2378
@@ -594,7 +588,7 @@
         "alias": "0x1e37...d5e",
         "coin": "ETH",
         "side": "long",
-        "totalValue": 560948.92,
+        "totalValue": 559116.41,
         "totalSize": 333.1842,
         "entryValue": 587490.372492,
         "entryPx": 1763.26
@@ -604,17 +598,27 @@
         "alias": "0x1e37...d5e",
         "coin": "DOT",
         "side": "long",
-        "totalValue": 512617.8,
+        "totalValue": 506986.59,
         "totalSize": 523346.4,
         "entryValue": 543788.3103840001,
         "entryPx": 1.03906
+      },
+      "0x09bc1cf4d9f0b59e1425a8fde4d4b1f7d3c9410d:BTC:short": {
+        "address": "0x09bc1cf4d9f0b59e1425a8fde4d4b1f7d3c9410d",
+        "alias": "0x09bc1cf4d9f0b59e1425a8fde4d4b1f7d3c9410d",
+        "coin": "BTC",
+        "side": "short",
+        "totalValue": 15965640.2,
+        "totalSize": 248.12172,
+        "entryValue": 15903783.450324,
+        "entryPx": 64096.7
       },
       "0x5d2f4460ac3514ada79f5d9838916e508ab39bb7:XYZ100:long": {
         "address": "0x5d2f4460ac3514ada79f5d9838916e508ab39bb7",
         "alias": "0x5d2f4460ac3514ada79f5d9838916e508ab39bb7",
         "coin": "XYZ100",
         "side": "long",
-        "totalValue": 20197133.81,
+        "totalValue": 20188971.15,
         "totalSize": 680.2214,
         "entryValue": 16887006.42105,
         "entryPx": 24825.75
@@ -624,27 +628,17 @@
         "alias": "0x5d2f4460ac3514ada79f5d9838916e508ab39bb7",
         "coin": "SP500",
         "side": "long",
-        "totalValue": 8946386.93,
+        "totalValue": 8943626.78,
         "totalSize": 1200.068,
         "entryValue": 8365091.99502,
         "entryPx": 6970.515
-      },
-      "0x09bc1cf4d9f0b59e1425a8fde4d4b1f7d3c9410d:BTC:short": {
-        "address": "0x09bc1cf4d9f0b59e1425a8fde4d4b1f7d3c9410d",
-        "alias": "0x09bc1cf4d9f0b59e1425a8fde4d4b1f7d3c9410d",
-        "coin": "BTC",
-        "side": "short",
-        "totalValue": 18139475.76,
-        "totalSize": 280.9273,
-        "entryValue": 17991876.557579998,
-        "entryPx": 64044.6
       },
       "0x939f95036d2e7b6d7419ec072bf9d967352204d2:HYPE:short": {
         "address": "0x939f95036d2e7b6d7419ec072bf9d967352204d2",
         "alias": "0x939f95036d2e7b6d7419ec072bf9d967352204d2",
         "coin": "HYPE",
         "side": "short",
-        "totalValue": 18872015.79,
+        "totalValue": 18708920.84,
         "totalSize": 311249.91,
         "entryValue": 18426772.796775,
         "entryPx": 59.2025
@@ -654,7 +648,7 @@
         "alias": "0x939f95036d2e7b6d7419ec072bf9d967352204d2",
         "coin": "XRP",
         "side": "short",
-        "totalValue": 1655922.13,
+        "totalValue": 1651609.08,
         "totalSize": 1437682.0,
         "entryValue": 1799489.05212,
         "entryPx": 1.25166
@@ -664,47 +658,47 @@
         "alias": "0x939f95036d2e7b6d7419ec072bf9d967352204d2",
         "coin": "XLM",
         "side": "short",
-        "totalValue": 1300292.88,
+        "totalValue": 1280929.91,
         "totalSize": 6915348.0,
         "entryValue": 1449961.761204,
         "entryPx": 0.209673
-      },
-      "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8:SOL:short": {
-        "address": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
-        "alias": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
-        "coin": "SOL",
-        "side": "short",
-        "totalValue": 10266061.85,
-        "totalSize": 149194.33,
-        "entryValue": 9901997.843233999,
-        "entryPx": 66.3698
       },
       "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8:BTC:short": {
         "address": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
         "alias": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
         "coin": "BTC",
         "side": "short",
-        "totalValue": 10258395.39,
-        "totalSize": 158.87247,
-        "entryValue": 10030508.716931999,
-        "entryPx": 63135.6
+        "totalValue": 10687665.98,
+        "totalSize": 166.09682,
+        "entryValue": 10496986.830360001,
+        "entryPx": 63198.0
+      },
+      "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8:SOL:short": {
+        "address": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
+        "alias": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
+        "coin": "SOL",
+        "side": "short",
+        "totalValue": 10225630.18,
+        "totalSize": 149194.33,
+        "entryValue": 9901997.843233999,
+        "entryPx": 66.3698
       },
       "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8:HYPE:short": {
         "address": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
         "alias": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
         "coin": "HYPE",
         "side": "short",
-        "totalValue": 6251641.86,
-        "totalSize": 103106.26,
-        "entryValue": 6804384.211813999,
-        "entryPx": 65.9939
+        "totalValue": 6385144.64,
+        "totalSize": 106226.1,
+        "entryValue": 6993660.858750001,
+        "entryPx": 65.8375
       },
       "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8:ETH:short": {
         "address": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
         "alias": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
         "coin": "ETH",
         "side": "short",
-        "totalValue": 6250319.53,
+        "totalValue": 6229530.92,
         "totalSize": 3712.2525,
         "entryValue": 6152501.680875,
         "entryPx": 1657.35
@@ -714,7 +708,7 @@
         "alias": "yixie10",
         "coin": "SKHX",
         "side": "long",
-        "totalValue": 4473326.26,
+        "totalValue": 4452514.56,
         "totalSize": 2973.1,
         "entryValue": 3686477.5064,
         "entryPx": 1239.944
@@ -724,7 +718,7 @@
         "alias": "yixie10",
         "coin": "MU",
         "side": "long",
-        "totalValue": 1319364.34,
+        "totalValue": 1317718.19,
         "totalSize": 1327.542,
         "entryValue": 1166667.8053559999,
         "entryPx": 878.818
@@ -734,7 +728,7 @@
         "alias": "0x0153...8052",
         "coin": "OIL",
         "side": "short",
-        "totalValue": 2169881.91,
+        "totalValue": 2166195.95,
         "totalSize": 26709.855,
         "entryValue": 2719170.07842,
         "entryPx": 101.804
@@ -744,27 +738,17 @@
         "alias": "0x2fcb...c4d8",
         "coin": "SILVER",
         "side": "short",
-        "totalValue": 1873382.5,
+        "totalValue": 1873135.0,
         "totalSize": 27500.0,
         "entryValue": 2234713.25,
         "entryPx": 81.2623
-      },
-      "0x8607a7d180de23645db594d90621d837749408d5:SKHX:short": {
-        "address": "0x8607a7d180de23645db594d90621d837749408d5",
-        "alias": "Wanyewest",
-        "coin": "SKHX",
-        "side": "short",
-        "totalValue": 1595134.79,
-        "totalSize": 1060.172,
-        "entryValue": 1432668.73306,
-        "entryPx": 1351.355
       },
       "0xa87a233e8a7d8951ff790a2e39738086cb5f71b7:SOL:short": {
         "address": "0xa87a233e8a7d8951ff790a2e39738086cb5f71b7",
         "alias": "0xa87a233e8a7d8951ff790a2e39738086cb5f71b7",
         "coin": "SOL",
         "side": "short",
-        "totalValue": 2432886.06,
+        "totalValue": 2423691.88,
         "totalSize": 35362.23,
         "entryValue": 5567012.216886001,
         "entryPx": 157.4282
@@ -774,77 +758,27 @@
         "alias": "0xa87a233e8a7d8951ff790a2e39738086cb5f71b7",
         "coin": "DOGE",
         "side": "short",
-        "totalValue": 593254.61,
+        "totalValue": 591633.46,
         "totalSize": 6754809.0,
         "entryValue": 1231340.887419,
         "entryPx": 0.182291
       },
-      "0xad59ed47c226987cf458a63428ca10887773ba81:ZEC:short": {
-        "address": "0xad59ed47c226987cf458a63428ca10887773ba81",
-        "alias": "0xad59ed47c226987cf458a63428ca10887773ba81",
-        "coin": "ZEC",
+      "0x8607a7d180de23645db594d90621d837749408d5:SKHX:short": {
+        "address": "0x8607a7d180de23645db594d90621d837749408d5",
+        "alias": "Wanyewest",
+        "coin": "SKHX",
         "side": "short",
-        "totalValue": 3502683.0,
-        "totalSize": 8300.0,
-        "entryValue": 2710230.54,
-        "entryPx": 326.5338
-      },
-      "0xad59ed47c226987cf458a63428ca10887773ba81:HYPE:short": {
-        "address": "0xad59ed47c226987cf458a63428ca10887773ba81",
-        "alias": "0xad59ed47c226987cf458a63428ca10887773ba81",
-        "coin": "HYPE",
-        "side": "short",
-        "totalValue": 551760.3,
-        "totalSize": 9100.0,
-        "entryValue": 415542.4,
-        "entryPx": 45.664
-      },
-      "0x795cfd1b03eafc11c4ec958b8a94cfc9aa64a242:HYPE:long": {
-        "address": "0x795cfd1b03eafc11c4ec958b8a94cfc9aa64a242",
-        "alias": "0x795cfd1b03eafc11c4ec958b8a94cfc9aa64a242",
-        "coin": "HYPE",
-        "side": "long",
-        "totalValue": 9438279.06,
-        "totalSize": 155675.25,
-        "entryValue": 8863930.78965,
-        "entryPx": 56.9386
-      },
-      "0x2d99fe0f36c1aebd28a1a2c0e82e8ca13c2ea351:HYPE:long": {
-        "address": "0x2d99fe0f36c1aebd28a1a2c0e82e8ca13c2ea351",
-        "alias": "0x2d99...a351",
-        "coin": "HYPE",
-        "side": "long",
-        "totalValue": 1394008.08,
-        "totalSize": 22992.81,
-        "entryValue": 1237047.667215,
-        "entryPx": 53.8015
-      },
-      "0x2d99fe0f36c1aebd28a1a2c0e82e8ca13c2ea351:MU:long": {
-        "address": "0x2d99fe0f36c1aebd28a1a2c0e82e8ca13c2ea351",
-        "alias": "0x2d99...a351",
-        "coin": "MU",
-        "side": "long",
-        "totalValue": 1010759.13,
-        "totalSize": 1017.024,
-        "entryValue": 1007977.57152,
-        "entryPx": 991.105
-      },
-      "0x2d99fe0f36c1aebd28a1a2c0e82e8ca13c2ea351:SPCX:long": {
-        "address": "0x2d99fe0f36c1aebd28a1a2c0e82e8ca13c2ea351",
-        "alias": "0x2d99...a351",
-        "coin": "SPCX",
-        "side": "long",
-        "totalValue": 826071.53,
-        "totalSize": 4987.15,
-        "entryValue": 825477.556435,
-        "entryPx": 165.5209
+        "totalValue": 1587713.59,
+        "totalSize": 1060.172,
+        "entryValue": 1432668.73306,
+        "entryPx": 1351.355
       },
       "0x350e33a777d510616fbdb483d1de3b50d1edfcfb:ETH:short": {
         "address": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
         "alias": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
         "coin": "ETH",
         "side": "short",
-        "totalValue": 6734800.0,
+        "totalValue": 6712400.0,
         "totalSize": 4000.0,
         "entryValue": 6610840.0,
         "entryPx": 1652.71
@@ -854,7 +788,7 @@
         "alias": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
         "coin": "BTC",
         "side": "short",
-        "totalValue": 4519900.0,
+        "totalValue": 4504220.0,
         "totalSize": 70.0,
         "entryValue": 4383414.0,
         "entryPx": 62620.2
@@ -864,7 +798,7 @@
         "alias": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
         "coin": "XYZ100",
         "side": "long",
-        "totalValue": 4453950.0,
+        "totalValue": 4452000.0,
         "totalSize": 150.0,
         "entryValue": 4442785.5,
         "entryPx": 29618.57
@@ -874,19 +808,49 @@
         "alias": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
         "coin": "HYPE",
         "side": "short",
-        "totalValue": 2425320.61,
+        "totalValue": 2404360.6,
         "totalSize": 40000.01,
         "entryValue": 2391944.597986,
         "entryPx": 59.7986
+      },
+      "0xad59ed47c226987cf458a63428ca10887773ba81:ZEC:short": {
+        "address": "0xad59ed47c226987cf458a63428ca10887773ba81",
+        "alias": "0xad59ed47c226987cf458a63428ca10887773ba81",
+        "coin": "ZEC",
+        "side": "short",
+        "totalValue": 3538871.0,
+        "totalSize": 8300.0,
+        "entryValue": 2710230.54,
+        "entryPx": 326.5338
+      },
+      "0xad59ed47c226987cf458a63428ca10887773ba81:HYPE:short": {
+        "address": "0xad59ed47c226987cf458a63428ca10887773ba81",
+        "alias": "0xad59ed47c226987cf458a63428ca10887773ba81",
+        "coin": "HYPE",
+        "side": "short",
+        "totalValue": 546991.9,
+        "totalSize": 9100.0,
+        "entryValue": 415542.4,
+        "entryPx": 45.664
+      },
+      "0x795cfd1b03eafc11c4ec958b8a94cfc9aa64a242:HYPE:long": {
+        "address": "0x795cfd1b03eafc11c4ec958b8a94cfc9aa64a242",
+        "alias": "0x795cfd1b03eafc11c4ec958b8a94cfc9aa64a242",
+        "coin": "HYPE",
+        "side": "long",
+        "totalValue": 9357016.58,
+        "totalSize": 155675.25,
+        "entryValue": 8863930.78965,
+        "entryPx": 56.9386
       },
       "0x418aa6bf98a2b2bc93779f810330d88cde488888:BTC:short": {
         "address": "0x418aa6bf98a2b2bc93779f810330d88cde488888",
         "alias": "0x418aa6bf98a2b2bc93779f810330d88cde488888",
         "coin": "BTC",
         "side": "short",
-        "totalValue": 4584470.0,
-        "totalSize": 71.0,
-        "entryValue": 4500824.9,
+        "totalValue": 4504220.0,
+        "totalSize": 70.0,
+        "entryValue": 4437433.0,
         "entryPx": 63391.9
       },
       "0x418aa6bf98a2b2bc93779f810330d88cde488888:ETH:short": {
@@ -894,7 +858,7 @@
         "alias": "0x418aa6bf98a2b2bc93779f810330d88cde488888",
         "coin": "ETH",
         "side": "short",
-        "totalValue": 4209250.0,
+        "totalValue": 4195250.0,
         "totalSize": 2500.0,
         "entryValue": 5428850.0,
         "entryPx": 2171.54
@@ -904,7 +868,7 @@
         "alias": "0x418aa6bf98a2b2bc93779f810330d88cde488888",
         "coin": "BNB",
         "side": "short",
-        "totalValue": 1156739.0,
+        "totalValue": 1157632.0,
         "totalSize": 1900.0,
         "entryValue": 1273704.9,
         "entryPx": 670.371
@@ -914,7 +878,7 @@
         "alias": "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
         "coin": "BB",
         "side": "long",
-        "totalValue": 901866.95,
+        "totalValue": 909040.03,
         "totalSize": 97064.7,
         "entryValue": 834145.883037,
         "entryPx": 8.59371
@@ -924,7 +888,7 @@
         "alias": "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
         "coin": "BTC",
         "side": "short",
-        "totalValue": 808986.94,
+        "totalValue": 806192.96,
         "totalSize": 12.52903,
         "entryValue": 777775.8714370001,
         "entryPx": 62077.9
@@ -934,7 +898,7 @@
         "alias": "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
         "coin": "ETH",
         "side": "short",
-        "totalValue": 684327.67,
+        "totalValue": 682092.1,
         "totalSize": 406.4669,
         "entryValue": 666662.621366,
         "entryPx": 1640.14
@@ -944,7 +908,7 @@
         "alias": "0x8bae3527e5a33fa0cf184f37bc112d071463ab6d",
         "coin": "cash:META",
         "side": "long",
-        "totalValue": 1656639.24,
+        "totalValue": 1658397.85,
         "totalSize": 2901.996,
         "entryValue": 1638603.3354120003,
         "entryPx": 564.647
@@ -954,17 +918,37 @@
         "alias": "0x8bae3527e5a33fa0cf184f37bc112d071463ab6d",
         "coin": "cash:AMZN",
         "side": "long",
-        "totalValue": 1506264.66,
+        "totalValue": 1506919.57,
         "totalSize": 6297.251,
         "entryValue": 1386333.510399,
         "entryPx": 220.149
+      },
+      "0x2d99fe0f36c1aebd28a1a2c0e82e8ca13c2ea351:MU:long": {
+        "address": "0x2d99fe0f36c1aebd28a1a2c0e82e8ca13c2ea351",
+        "alias": "0x2d99...a351",
+        "coin": "MU",
+        "side": "long",
+        "totalValue": 1009498.02,
+        "totalSize": 1017.024,
+        "entryValue": 1007977.57152,
+        "entryPx": 991.105
+      },
+      "0x2d99fe0f36c1aebd28a1a2c0e82e8ca13c2ea351:SPCX:long": {
+        "address": "0x2d99fe0f36c1aebd28a1a2c0e82e8ca13c2ea351",
+        "alias": "0x2d99...a351",
+        "coin": "SPCX",
+        "side": "long",
+        "totalValue": 824126.54,
+        "totalSize": 4987.15,
+        "entryValue": 825477.556435,
+        "entryPx": 165.5209
       },
       "0x69906b0ed626ca01a4b7c001e5711e5714ccf207:HYPE:short": {
         "address": "0x69906b0ed626ca01a4b7c001e5711e5714ccf207",
         "alias": "0x69906b0ed626ca01a4b7c001e5711e5714ccf207",
         "coin": "HYPE",
         "side": "short",
-        "totalValue": 4123916.56,
+        "totalValue": 4088614.18,
         "totalSize": 68020.0,
         "entryValue": 4084723.436,
         "entryPx": 60.0518
@@ -974,7 +958,7 @@
         "alias": "0x69906b0ed626ca01a4b7c001e5711e5714ccf207",
         "coin": "BTC",
         "side": "short",
-        "totalValue": 1743363.0,
+        "totalValue": 1737342.0,
         "totalSize": 27.0,
         "entryValue": 1698545.7,
         "entryPx": 62909.1
@@ -984,7 +968,7 @@
         "alias": "0x69906b0ed626ca01a4b7c001e5711e5714ccf207",
         "coin": "NVDA",
         "side": "long",
-        "totalValue": 1236108.53,
+        "totalValue": 1235146.57,
         "totalSize": 6012.201,
         "entryValue": 1223597.135319,
         "entryPx": 203.519
@@ -994,7 +978,7 @@
         "alias": "0x69906b0ed626ca01a4b7c001e5711e5714ccf207",
         "coin": "GOOGL",
         "side": "long",
-        "totalValue": 730504.36,
+        "totalValue": 731330.28,
         "totalSize": 2014.462,
         "entryValue": 723260.349708,
         "entryPx": 359.034
@@ -1004,7 +988,7 @@
         "alias": "0x69906b0ed626ca01a4b7c001e5711e5714ccf207",
         "coin": "XYZ100",
         "side": "long",
-        "totalValue": 593840.0,
+        "totalValue": 593600.0,
         "totalSize": 20.0,
         "entryValue": 590648.6,
         "entryPx": 29532.43
@@ -1014,7 +998,7 @@
         "alias": "Manifold Trading",
         "coin": "ZRO",
         "side": "short",
-        "totalValue": 984676.47,
+        "totalValue": 979749.64,
         "totalSize": 1046037.0,
         "entryValue": 1646294.87208,
         "entryPx": 1.57384
@@ -1024,7 +1008,7 @@
         "alias": "Manifold Trading",
         "coin": "XMR",
         "side": "short",
-        "totalValue": 765255.54,
+        "totalValue": 777359.52,
         "totalSize": 2254.0,
         "entryValue": 921500.566,
         "entryPx": 408.829
@@ -1034,7 +1018,7 @@
         "alias": "Manifold Trading",
         "coin": "LIT",
         "side": "short",
-        "totalValue": 748304.64,
+        "totalValue": 744010.21,
         "totalSize": 466786.0,
         "entryValue": 704932.281838,
         "entryPx": 1.510183
@@ -1044,7 +1028,7 @@
         "alias": "0x3d89bcea338f35edfaeb313b1c713978c6dceb14",
         "coin": "HYPE",
         "side": "short",
-        "totalValue": 636646.5,
+        "totalValue": 631144.5,
         "totalSize": 10500.0,
         "entryValue": 620793.6,
         "entryPx": 59.1232
@@ -1054,7 +1038,7 @@
         "alias": "0xb3e475368ed0fa0ad23c04de0423d48a0758806f",
         "coin": "HYPE",
         "side": "short",
-        "totalValue": 1212660.0,
+        "totalValue": 1202180.0,
         "totalSize": 20000.0,
         "entryValue": 748494.0,
         "entryPx": 37.4247
@@ -1064,20 +1048,18 @@
         "alias": "0x5bc4...3b0c",
         "coin": "PAXG",
         "side": "short",
-        "totalValue": 608259.57,
+        "totalValue": 608677.32,
         "totalSize": 144.052,
         "entryValue": 679755.746744,
         "entryPx": 4718.822
       }
     },
-    "lastCheckedAt": "2026-06-14T01:57:29.830808Z",
-    "lastSentAt": "2026-06-14T01:57:29.830808Z",
-    "lastHourlySyncedAt": "2026-06-13T23:34:32.467553Z",
+    "lastCheckedAt": "2026-06-14T05:11:23.184231Z",
+    "lastSentAt": "2026-06-14T05:11:23.184231Z",
+    "lastHourlySyncedAt": "2026-06-14T05:11:23.184231Z",
     "alertDedupe": {
-      "position:open:0x45d26f28196d226497130c4bac709d808fed4029:TAO:short:s19:v50": 1781402249453,
-      "position:add:0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8:SOL:short:s145:v100": 1781402249453,
-      "position:add:0x8def9f50456c6c4e37fa5d3d57f108ed23992dae:NEAR:long:s25:v54": 1781402249453,
-      "position:add:0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8:BTC:short:s83:v53": 1781402249453
+      "position:add:0x8def9f50456c6c4e37fa5d3d57f108ed23992dae:NEAR:long:s39:v82": 1781413882752,
+      "position:close:0x2d99fe0f36c1aebd28a1a2c0e82e8ca13c2ea351:HYPE:long:s230:v14": 1781413882752
     },
     "topConvictionWallets": {
       "month": "2026-06",
@@ -1093,7 +1075,7 @@
         "0xad59ed47c226987cf458a63428ca10887773ba81",
         "0x09bc1cf4d9f0b59e1425a8fde4d4b1f7d3c9410d"
       ],
-      "updatedAt": "2026-06-14T01:57:29.440298Z",
+      "updatedAt": "2026-06-14T05:11:22.284171Z",
       "demoted": []
     }
   }
