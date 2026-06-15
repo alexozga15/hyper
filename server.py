@@ -54,7 +54,8 @@ POSITION_INCREASE_ALERT_MIN_DELTA = LARGE_POSITION_ALERT_MIN_VALUE
 POSITION_INCREASE_ALERT_MIN_PCT = 0.5
 ALERT_DEDUPE_COOLDOWN_MS = 30 * 60 * 1000
 CLUSTERED_OPEN_ALERT_MIN_WALLETS = 3
-CLUSTERED_OPEN_ALERT_WINDOW_MS = 10 * 60 * 1000
+OPEN_POSITION_ALERT_WINDOW_MS = 5 * 60 * 1000
+CLUSTERED_OPEN_ALERT_WINDOW_MS = OPEN_POSITION_ALERT_WINDOW_MS
 COUNTED_POSITION_MAX_UNREALIZED_LOSS = -1_000_000
 COUNTED_POSITION_MIN_TREND_PROFIT = 1_000_000
 RECENT_ADD_POSITION_MIN_PCT = 0.20
@@ -2014,18 +2015,26 @@ class WalletTrackerService:
         previous_positions: dict[str, Any],
         current_positions: dict[str, Any],
         fill_prices: dict[str, Any] | None = None,
+        *,
+        now_ms: int | None = None,
+        open_window_ms: int | None = OPEN_POSITION_ALERT_WINDOW_MS,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
         previous_map = previous_positions if isinstance(previous_positions, dict) else {}
         current_map = current_positions if isinstance(current_positions, dict) else {}
         fill_price_map = fill_prices if isinstance(fill_prices, dict) else {}
+        checked_ms = current_time_ms() if now_ms is None else now_ms
         added = []
         for key in current_map.keys() - previous_map.keys():
             item = dict(current_map[key])
             fill_price = fill_price_map.get(f"{key}:add", {})
+            fill_time = int(to_float(fill_price.get("latestTime"))) if isinstance(fill_price, dict) else 0
+            if open_window_ms and (fill_time <= 0 or fill_time < checked_ms - open_window_ms or fill_time > checked_ms):
+                continue
             open_price = to_float(fill_price.get("price")) if isinstance(fill_price, dict) else 0.0
             if open_price > 0:
                 item["entryPx"] = open_price
                 item["entryPriceSource"] = "fill"
+                item["openFillTime"] = fill_time
             added.append(item)
         closed = []
         for key in previous_map.keys() - current_map.keys():
@@ -2090,6 +2099,8 @@ class WalletTrackerService:
         previous_positions: dict[str, Any],
         current_positions: dict[str, Any],
         fill_prices: dict[str, Any] | None = None,
+        *,
+        now_ms: int | None = None,
     ) -> dict[str, Any]:
         previous_positions = self.filter_counted_large_positions(previous_positions)
         current_positions = self.filter_counted_large_positions(current_positions)
@@ -2097,6 +2108,7 @@ class WalletTrackerService:
             previous_positions,
             current_positions,
             fill_prices,
+            now_ms=now_ms,
         )
         return {
             "biasChanged": False,
@@ -2390,7 +2402,7 @@ class WalletTrackerService:
                     move_note = f' ({to_float(item.get("fromProbabilityScore")):.0f}->{to_float(item.get("toProbabilityScore")):.0f})'
                 activity_bits = []
                 if int(to_float(item.get("freshActivityWalletCount"))):
-                    activity_bits.append(f'{int(to_float(item.get("freshActivityWalletCount")))} 10m activity')
+                    activity_bits.append(f'{int(to_float(item.get("freshActivityWalletCount")))} 5m activity')
                 if int(to_float(item.get("recentAddWalletCount"))):
                     activity_bits.append(f'{int(to_float(item.get("recentAddWalletCount")))} adds')
                 activity_note = f', {"/".join(activity_bits)}' if activity_bits else ""
@@ -2405,7 +2417,7 @@ class WalletTrackerService:
         if changes.get("clusteredOpenPositions"):
             lines.append("")
             lines.append(
-                f"{CLUSTERED_OPEN_ALERT_MIN_WALLETS}+ opens >{format_money_compact(NEW_POSITION_ALERT_MIN_VALUE)} in 10m"
+                f"{CLUSTERED_OPEN_ALERT_MIN_WALLETS}+ opens >{format_money_compact(NEW_POSITION_ALERT_MIN_VALUE)} in 5m"
             )
             for item in changes["clusteredOpenPositions"][:10]:
                 size_note = ""
@@ -2506,7 +2518,7 @@ class WalletTrackerService:
                         net_note += f', qnet +{to_float(item.get("netWeightedWalletCount")):.1f}'
                     activity_bits = []
                     if int(to_float(item.get("freshActivityWalletCount"))):
-                        activity_bits.append(f'{int(to_float(item.get("freshActivityWalletCount")))} 10m activity')
+                        activity_bits.append(f'{int(to_float(item.get("freshActivityWalletCount")))} 5m activity')
                     if int(to_float(item.get("recentAddWalletCount"))):
                         activity_bits.append(f'{int(to_float(item.get("recentAddWalletCount")))} adds')
                     activity_note = f', {"/".join(activity_bits)}' if activity_bits else ""
@@ -2687,7 +2699,7 @@ class WalletTrackerService:
                     net_note += f', qnet +{to_float(item.get("netWeightedWalletCount")):.1f}'
                 activity_bits = []
                 if int(to_float(item.get("freshActivityWalletCount"))):
-                    activity_bits.append(f'{int(to_float(item.get("freshActivityWalletCount")))} 10m activity')
+                    activity_bits.append(f'{int(to_float(item.get("freshActivityWalletCount")))} 5m activity')
                 if int(to_float(item.get("recentAddWalletCount"))):
                     activity_bits.append(f'{int(to_float(item.get("recentAddWalletCount")))} adds')
                 activity_note = f', {"/".join(activity_bits)}' if activity_bits else ""
@@ -3011,7 +3023,12 @@ class WalletTrackerService:
         # Keep HIP-3 available for explicit commands like /hip3, but exclude it
         # from automatic Telegram alerts and change-trigger decisions.
         changes = self.summarize_changes(previous_summary, summary, track_hip3=False)
-        position_changes = self.build_large_position_alert_changes(previous_positions, current_positions, fill_prices)
+        position_changes = self.build_large_position_alert_changes(
+            previous_positions,
+            current_positions,
+            fill_prices,
+            now_ms=dedupe_now_ms,
+        )
         clustered_open_positions = self.build_clustered_open_position_alerts(
             dashboard,
             current_positions,
@@ -3114,8 +3131,13 @@ class WalletTrackerService:
         previous_positions = state.get("largePositions", {}) if isinstance(state, dict) else {}
         previous_dedupe = state.get("alertDedupe", {}) if isinstance(state, dict) else {}
         fill_prices = self.build_recent_fill_price_map(dashboard, since_ms=iso_to_ms(state.get("lastCheckedAt")))
-        position_changes = self.build_large_position_alert_changes(previous_positions, current_positions, fill_prices)
         dedupe_now_ms = current_time_ms()
+        position_changes = self.build_large_position_alert_changes(
+            previous_positions,
+            current_positions,
+            fill_prices,
+            now_ms=dedupe_now_ms,
+        )
         position_changes["clusteredOpenPositions"] = self.build_clustered_open_position_alerts(
             dashboard,
             current_positions,

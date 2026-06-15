@@ -1722,6 +1722,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("BUY BTC long: p82", sent_message)
 
     def test_check_alerts_notifies_on_new_large_positions(self) -> None:
+        now_ms = 1_700_000_000_000
         previous_summary = {
             "overallBias": "mixed",
             "consensus": [],
@@ -1740,13 +1741,16 @@ class AlertSummaryTests(unittest.TestCase):
                     "positions": [
                         {"coin": "BTC", "side": "Long", "positionValue": 1_200_000.0, "size": 12.0, "entryPx": 100000.0},
                     ],
+                    "recentFills": [
+                        {"coin": "BTC", "direction": "Open Long", "price": 100000.0, "size": 12.0, "time": now_ms - 60_000}
+                    ],
                 }
             ]
         }
 
         with patch("server.load_json_file", return_value={"config": {"enabled": True, "botToken": "token", "chatId": "chat"}, "state": {"summary": previous_summary, "largePositions": {}}}), patch(
             "server.save_json_file"
-        ), patch.object(self.service, "dashboard", return_value=dashboard), patch.object(
+        ), patch("server.current_time_ms", return_value=now_ms), patch.object(self.service, "dashboard", return_value=dashboard), patch.object(
             self.service, "build_sentiment_summary", return_value=current_summary
         ), patch.object(self.service, "send_telegram_message") as send_telegram_message:
             result = self.service.check_alerts(send_notification=True)
@@ -1757,7 +1761,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(result["changes"]["newLargePositions"][0]["coin"], "BTC")
         sent_message = send_telegram_message.call_args.args[2]
         self.assertIn("Open >$500K", sent_message)
-        self.assertIn("Trader One: BTC long $1.2M sz 12 @$100,000", sent_message)
+        self.assertIn("Trader One: BTC long $1.2M sz 12 open @$100,000", sent_message)
 
     def test_check_alerts_notifies_on_closed_large_positions(self) -> None:
         previous_summary = {
@@ -1797,6 +1801,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("Trader One: ETH short $1.2M sz 400 last ~$3,000", sent_message)
 
     def test_check_alerts_preview_does_not_sync_alert_baseline(self) -> None:
+        now_ms = 1_700_000_000_000
         previous_summary = {
             "overallBias": "mixed",
             "consensus": [],
@@ -1813,6 +1818,9 @@ class AlertSummaryTests(unittest.TestCase):
                     "address": "0x1111111111111111111111111111111111111111",
                     "alias": "Trader One",
                     "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_200_000.0}],
+                    "recentFills": [
+                        {"coin": "BTC", "direction": "Open Long", "price": 100000.0, "size": 12.0, "time": now_ms - 60_000}
+                    ],
                 }
             ]
         }
@@ -1823,7 +1831,7 @@ class AlertSummaryTests(unittest.TestCase):
                 "config": {"enabled": True, "botToken": "token", "chatId": "chat"},
                 "state": {"summary": previous_summary, "largePositions": {}},
             },
-        ), patch("server.save_json_file") as save_json_file, patch.object(
+        ), patch("server.save_json_file") as save_json_file, patch("server.current_time_ms", return_value=now_ms), patch.object(
             self.service, "dashboard", return_value=dashboard
         ), patch.object(
             self.service, "build_sentiment_summary", return_value=current_summary
@@ -1838,6 +1846,7 @@ class AlertSummaryTests(unittest.TestCase):
         send_telegram_message.assert_not_called()
 
     def test_check_alerts_suppresses_recent_duplicate_position_alert(self) -> None:
+        now_ms = 1_700_000_000_000
         previous_summary = {
             "overallBias": "mixed",
             "consensus": [],
@@ -1857,6 +1866,9 @@ class AlertSummaryTests(unittest.TestCase):
                     "positions": [
                         {"coin": "BTC", "side": "Long", "positionValue": 1_200_000.0, "size": 12.0, "entryPx": 100000.0},
                     ],
+                    "recentFills": [
+                        {"coin": "BTC", "direction": "Open Long", "price": 100000.0, "size": 12.0, "time": now_ms - 60_000}
+                    ],
                 }
             ]
         }
@@ -1875,7 +1887,7 @@ class AlertSummaryTests(unittest.TestCase):
                     "alertDedupe": {duplicate_key: 9_999_999_000_000},
                 },
             },
-        ), patch("server.save_json_file") as save_json_file, patch.object(
+        ), patch("server.save_json_file") as save_json_file, patch("server.current_time_ms", return_value=now_ms), patch.object(
             self.service, "dashboard", return_value=dashboard
         ), patch.object(
             self.service, "build_sentiment_summary", return_value=current_summary
@@ -1893,6 +1905,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn(f"{address}:BTC:long", saved_state["largePositions"])
 
     def test_check_alerts_records_dedupe_after_successful_alert(self) -> None:
+        now_ms = 1_700_000_000_000
         previous_summary = {
             "overallBias": "mixed",
             "consensus": [],
@@ -1911,6 +1924,9 @@ class AlertSummaryTests(unittest.TestCase):
                     "positions": [
                         {"coin": "BTC", "side": "Long", "positionValue": 1_200_000.0, "size": 12.0, "entryPx": 100000.0},
                     ],
+                    "recentFills": [
+                        {"coin": "BTC", "direction": "Open Long", "price": 100000.0, "size": 12.0, "time": now_ms - 60_000}
+                    ],
                 }
             ]
         }
@@ -1921,7 +1937,7 @@ class AlertSummaryTests(unittest.TestCase):
                 "config": {"enabled": True, "botToken": "token", "chatId": "chat"},
                 "state": {"summary": previous_summary, "largePositions": {}, "alertDedupe": {}},
             },
-        ), patch("server.save_json_file") as save_json_file, patch.object(
+        ), patch("server.save_json_file") as save_json_file, patch("server.current_time_ms", return_value=now_ms), patch.object(
             self.service, "dashboard", return_value=dashboard
         ), patch.object(
             self.service, "build_sentiment_summary", return_value=current_summary
@@ -1976,7 +1992,7 @@ class AlertSummaryTests(unittest.TestCase):
                         {"coin": "BTC", "side": "Long", "positionValue": 1_300_000.0, "size": 13.0, "entryPx": 100000.0},
                     ],
                     "recentFills": [
-                        {"coin": "BTC", "direction": "Open Long", "price": 100000.0, "size": 13.0, "time": now_ms - 540_000}
+                        {"coin": "BTC", "direction": "Open Long", "price": 100000.0, "size": 13.0, "time": now_ms - 240_000}
                     ],
                 },
             ]
@@ -2004,7 +2020,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(result["changes"]["clusteredOpenPositions"][0]["coin"], "BTC")
         self.assertEqual(result["changes"]["clusteredOpenPositions"][0]["walletCount"], 3)
         sent_message = send_telegram_message.call_args.args[2]
-        self.assertIn("3+ opens >$500K in 10m", sent_message)
+        self.assertIn("3+ opens >$500K in 5m", sent_message)
         self.assertIn("- BTC long: 3 wallets, $3.6M", sent_message)
         self.assertIn("Trader One: $1.2M", sent_message)
         saved_dedupe = save_json_file.call_args.args[1]["state"]["alertDedupe"]
@@ -2109,6 +2125,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(saved_state["largePositions"], previous_positions)
 
     def test_send_hourly_update_syncs_alert_baseline(self) -> None:
+        now_ms = 1_700_000_000_000
         summary = {
             "overallBias": "mixed",
             "consensus": [{"coin": "BTC", "side": "long", "walletCount": 8, "totalValue": 75_000_000.0}],
@@ -2121,6 +2138,9 @@ class AlertSummaryTests(unittest.TestCase):
                     "alias": "Trader One",
                     "positions": [
                         {"coin": "BTC", "side": "Long", "positionValue": 1_207_800.0},
+                    ],
+                    "recentFills": [
+                        {"coin": "BTC", "direction": "Open Long", "price": 100000.0, "size": 12.078, "time": now_ms - 60_000}
                     ],
                 }
             ]
@@ -2138,7 +2158,7 @@ class AlertSummaryTests(unittest.TestCase):
                     }
                 },
             },
-        ), patch("server.save_json_file") as save_json_file, patch.object(
+        ), patch("server.save_json_file") as save_json_file, patch("server.current_time_ms", return_value=now_ms), patch.object(
             self.service, "dashboard", return_value=dashboard
         ), patch.object(
             self.service, "build_sentiment_summary", return_value=summary
@@ -2346,6 +2366,28 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(changes["newLargePositions"], [])
         self.assertEqual(changes["increasedLargePositions"], [])
         self.assertEqual(changes["closedLargePositions"], [])
+
+    def test_new_large_position_alert_requires_open_fill_inside_five_minutes(self) -> None:
+        now_ms = 1_700_000_000_000
+        current = {
+            "wallet:BTC:long": {
+                "address": "wallet",
+                "alias": "wallet",
+                "coin": "BTC",
+                "side": "long",
+                "totalValue": 1_200_000.0,
+                "totalSize": 12.0,
+            }
+        }
+        stale_fill = {"wallet:BTC:long:add": {"price": 100000.0, "size": 12.0, "latestTime": now_ms - 6 * 60 * 1000}}
+        fresh_fill = {"wallet:BTC:long:add": {"price": 100000.0, "size": 12.0, "latestTime": now_ms - 5 * 60 * 1000}}
+
+        stale_changes = self.service.build_large_position_alert_changes({}, current, stale_fill, now_ms=now_ms)
+        fresh_changes = self.service.build_large_position_alert_changes({}, current, fresh_fill, now_ms=now_ms)
+
+        self.assertEqual(stale_changes["newLargePositions"], [])
+        self.assertEqual(len(fresh_changes["newLargePositions"]), 1)
+        self.assertEqual(fresh_changes["newLargePositions"][0]["entryPriceSource"], "fill")
 
     def test_large_position_changes_use_recent_fill_add_price(self) -> None:
         previous = {
