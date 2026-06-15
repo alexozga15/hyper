@@ -2941,7 +2941,7 @@ class WalletTrackerService:
     def build_hourly_update_message(self, dashboard: dict[str, Any], summary: dict[str, Any], min_wallets: int) -> str:
         return "\n\n".join(
             [
-                self.build_summary_message(summary, min_wallets, title="4-hour wallet update", include_signals=False),
+                self.build_summary_message(summary, min_wallets, title="Hourly wallet update", include_signals=False),
                 self.build_positions_message(dashboard),
             ]
         )
