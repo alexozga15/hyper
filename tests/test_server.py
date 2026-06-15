@@ -1756,7 +1756,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(len(result["changes"]["newLargePositions"]), 1)
         self.assertEqual(result["changes"]["newLargePositions"][0]["coin"], "BTC")
         sent_message = send_telegram_message.call_args.args[2]
-        self.assertIn("Open >$1.0M", sent_message)
+        self.assertIn("Open >$500K", sent_message)
         self.assertIn("Trader One: BTC long $1.2M sz 12 @$100,000", sent_message)
 
     def test_check_alerts_notifies_on_closed_large_positions(self) -> None:
@@ -1793,7 +1793,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertTrue(result["sent"])
         self.assertEqual(len(result["changes"]["closedLargePositions"]), 1)
         sent_message = send_telegram_message.call_args.args[2]
-        self.assertIn("Closed >$1.0M", sent_message)
+        self.assertIn("Closed >$500K", sent_message)
         self.assertIn("Trader One: ETH short $1.2M sz 400 last ~$3,000", sent_message)
 
     def test_check_alerts_preview_does_not_sync_alert_baseline(self) -> None:
@@ -2004,7 +2004,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(result["changes"]["clusteredOpenPositions"][0]["coin"], "BTC")
         self.assertEqual(result["changes"]["clusteredOpenPositions"][0]["walletCount"], 3)
         sent_message = send_telegram_message.call_args.args[2]
-        self.assertIn("3+ opens >$1.0M in 10m", sent_message)
+        self.assertIn("3+ opens >$500K in 10m", sent_message)
         self.assertIn("- BTC long: 3 wallets, $3.6M", sent_message)
         self.assertIn("Trader One: $1.2M", sent_message)
         saved_dedupe = save_json_file.call_args.args[1]["state"]["alertDedupe"]
@@ -2154,7 +2154,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertNotIn("Wallet ranks by 7D hit rate + PnL", hourly_message)
         self.assertNotIn("High-conviction signals", hourly_message)
         alert_message = send_telegram_message.call_args_list[1].args[2]
-        self.assertIn("Open >$1.0M", alert_message)
+        self.assertIn("Open >$500K", alert_message)
         self.assertIn("Trader One: BTC long $1.2M", alert_message)
         saved_state = save_json_file.call_args.args[1]["state"]
         self.assertEqual(saved_state["summary"]["consensus"][0]["walletCount"], 8)
@@ -2254,7 +2254,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertTrue(result["sent"])
         self.assertEqual(len(result["changes"]["increasedLargePositions"]), 1)
         sent_message = send_telegram_message.call_args.args[2]
-        self.assertIn("Added >$1.0M", sent_message)
+        self.assertIn("Added >$500K", sent_message)
         self.assertIn("Trader One: BTC long $1.2M->$2.4M (+$1.2M +10 add ~$120,000)", sent_message)
         self.assertNotIn("@$78,000", sent_message)
 
