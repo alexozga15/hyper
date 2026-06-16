@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import patch
 from pathlib import Path
+from typing import Any
 
 from server import (
     ALERTS_FILE,
@@ -925,6 +926,109 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("Actionable wallet signals", message)
         self.assertIn("1. BUY BTC long (3 wallets, p94/100)", message)
         self.assertNotIn("$1.2M", message)
+
+    def test_build_cmm_signal_summary_scores_cohort_bias(self) -> None:
+        class FakeCmmClient:
+            token = "token"
+
+            def position_metrics(self, coin: str, segment_id: int, **kwargs: Any) -> dict[str, Any]:
+                return {
+                    "metrics": [
+                        {
+                            "createdAt": "2026-06-16T00:00:00Z",
+                            "coin": coin,
+                            "segmentId": segment_id,
+                            "positionCount": 100,
+                            "positionCountLong": 15,
+                            "totalPositionValue": 10_000_000,
+                            "totalPositionValueLong": 1_000_000,
+                            "totalUnrealizedPnl": 250_000,
+                        }
+                    ]
+                }
+
+        self.service.cmm_client = FakeCmmClient()
+
+        summary = self.service.build_cmm_signal_summary(coins=["BTC"], segment_ids=[8, 7, 9])
+
+        self.assertTrue(summary["enabled"])
+        self.assertEqual(summary["signalCount"], 1)
+        self.assertEqual(summary["signals"][0]["coin"], "BTC")
+        self.assertEqual(summary["signals"][0]["side"], "short")
+        self.assertGreaterEqual(summary["signals"][0]["probabilityScore"], 70)
+
+    def test_build_signals_message_includes_cmm_section(self) -> None:
+        summary = {"generatedAt": "2026-06-16T00:00:00Z", "signals": []}
+        cmm_summary = {
+            "enabled": True,
+            "timeframe": "7d",
+            "signals": [
+                {
+                    "coin": "ETH",
+                    "side": "short",
+                    "action": "sell",
+                    "probabilityScore": 81.0,
+                    "cohortCount": 3,
+                    "valueBias": -0.71,
+                    "totalValue": 12_000_000,
+                    "components": [{"segment": "Money Printer"}],
+                }
+            ],
+            "generatedAt": "2026-06-16T00:00:00Z",
+        }
+
+        message = self.service.build_signals_message(summary, cmm_summary=cmm_summary)
+
+        self.assertIn("CMM cohort signals", message)
+        self.assertIn("SELL ETH short", message)
+
+    def test_check_alerts_notifies_on_new_cmm_signal(self) -> None:
+        current_summary = {
+            "overallBias": "mixed",
+            "consensus": [],
+            "hip3Consensus": [],
+            "signals": [],
+        }
+        cmm_summary = {
+            "enabled": True,
+            "signals": [
+                {
+                    "coin": "SOL",
+                    "side": "short",
+                    "action": "sell",
+                    "probabilityScore": 86.0,
+                    "cohortCount": 2,
+                    "valueBias": -0.8,
+                    "totalValue": 7_500_000,
+                    "components": [{"segment": "Money Printer"}, {"segment": "Leviathan"}],
+                }
+            ],
+            "generatedAt": "2026-06-16T00:00:00Z",
+        }
+
+        with patch(
+            "server.load_json_file",
+            return_value={
+                "config": {"enabled": True, "botToken": "token", "chatId": "chat"},
+                "state": {"summary": current_summary, "largePositions": {}, "cmmSignals": {"signals": []}},
+            },
+        ), patch("server.save_json_file"), patch.object(
+            self.service, "dashboard", return_value={"wallets": []}
+        ), patch.object(
+            self.service, "build_sentiment_summary", return_value=current_summary
+        ), patch.object(
+            self.service, "build_cmm_signal_summary", return_value=cmm_summary
+        ), patch.object(
+            self.service, "send_telegram_message"
+        ) as send_telegram_message:
+            result = self.service.check_alerts(send_notification=True)
+
+        self.assertTrue(result["shouldNotify"])
+        self.assertTrue(result["sent"])
+        self.assertEqual(result["changes"]["addedCmmSignals"][0]["coin"], "SOL")
+        sent_message = send_telegram_message.call_args.args[2]
+        self.assertIn("CMM cohort signals", sent_message)
+        self.assertIn("SELL SOL short", sent_message)
 
     def test_build_holding_only_wallets_returns_30d_holders_by_notional(self) -> None:
         wallets = [

@@ -87,6 +87,7 @@ If you want on-demand bot replies, enable [`.github/workflows/telegram-commands.
   - `/sentiment`
   - `/consensus`
   - `/signals`
+  - `/cmm`
   - `/hip3`
   - `/positions`
   - `/ranks`

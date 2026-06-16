@@ -166,6 +166,7 @@ class DispatchUpdateTests(unittest.TestCase):
             ("BTC", "long"),
             None,
             {"generatedAt": "now"},
+            None,
             3,
         )
 

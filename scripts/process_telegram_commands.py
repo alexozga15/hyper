@@ -22,8 +22,9 @@ from server import (
 )
 
 
-LIVE_COMMANDS = {"/update", "/sentiment", "/consensus", "/signals", "/hip3", "/positions", "/ranks", "/elite"}
+LIVE_COMMANDS = {"/update", "/sentiment", "/consensus", "/signals", "/cmm", "/hip3", "/positions", "/ranks", "/elite"}
 SUMMARY_COMMANDS = {"/update", "/sentiment", "/consensus", "/signals", "/hip3"}
+CMM_COMMANDS = {"/signals", "/cmm"}
 
 
 def normalize_command(text: str) -> str:
@@ -62,6 +63,7 @@ def build_help_message() -> str:
             "/sentiment - full live sentiment update",
             "/consensus - current consensus only",
             "/signals - high-conviction trade signals",
+            "/cmm - CoinMarketMan cohort API signals",
             "/hip3 - current HIP-3 consensus only",
             "/positions - all open positions now",
             "/ranks - tracked wallets ranked by 7D hit rate plus 7D PnL",
@@ -162,6 +164,7 @@ def build_reply(
     position_query: tuple[str, str] | None,
     summary_cache: dict[str, Any] | None,
     dashboard_cache: dict[str, Any] | None,
+    cmm_cache: dict[str, Any] | None,
     min_wallets: int,
 ) -> str:
     if command == "/update":
@@ -174,7 +177,9 @@ def build_reply(
     if command == "/sentiment":
         return service.build_summary_message(summary_cache, min_wallets)
     if command == "/signals":
-        return service.build_signals_message(summary_cache)
+        return service.build_signals_message(summary_cache, cmm_summary=cmm_cache)
+    if command == "/cmm":
+        return service.build_cmm_signals_message(cmm_cache)
     if command == "/consensus":
         return service.build_summary_message(
             summary_cache,
@@ -263,13 +268,17 @@ def main() -> int:
             continue
 
         position_query = parse_position_wallet_query(message_text)
-        if command in LIVE_COMMANDS or position_query:
+        if (command in LIVE_COMMANDS and command not in {"/cmm"}) or position_query:
             if dashboard_cache is None:
                 dashboard_cache = service.dashboard()
             if command in SUMMARY_COMMANDS and summary_cache is None:
                 summary_cache = build_summary_cache(service, dashboard_cache, min_wallets)
 
-        reply = build_reply(service, command, position_query, summary_cache, dashboard_cache, min_wallets)
+        cmm_cache = None
+        if command in CMM_COMMANDS:
+            cmm_cache = service.build_cmm_signal_summary()
+
+        reply = build_reply(service, command, position_query, summary_cache, dashboard_cache, cmm_cache, min_wallets)
 
         service.send_telegram_message(bot_token, chat_id, reply)
         latest_seen = max(latest_seen, update_id)
