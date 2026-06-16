@@ -105,6 +105,9 @@ class CoinMarketManClient:
     def cohort_summary(self, segment_id: int, *, position_age: str = "7d") -> Any:
         return self.request(f"segments/{segment_id}/summary", {"positionAge": position_age})
 
+    def positions_heatmap(self, *, opened_within: str = "7d") -> Any:
+        return self.request("positions/heatmap", {"openedWithin": opened_within})
+
     def position_metrics(
         self,
         coin: str,
@@ -262,6 +265,9 @@ def build_parser() -> argparse.ArgumentParser:
     summary.add_argument("segment_id", type=int)
     summary.add_argument("--position-age", default="7d", choices=["all", "24h", "7d", "30d"])
 
+    heatmap = subparsers.add_parser("positions-heatmap")
+    heatmap.add_argument("--opened-within", default="7d", choices=["all", "24h", "7d", "30d"])
+
     metrics = subparsers.add_parser("position-metrics")
     metrics.add_argument("coin")
     metrics.add_argument("segment_id", type=int)
@@ -313,6 +319,8 @@ def main(argv: list[str] | None = None) -> int:
             )
     elif args.command == "cohort-summary":
         payload = client.cohort_summary(args.segment_id, position_age=args.position_age)
+    elif args.command == "positions-heatmap":
+        payload = client.positions_heatmap(opened_within=args.opened_within)
     elif args.command == "position-metrics":
         payload = client.position_metrics(
             args.coin,

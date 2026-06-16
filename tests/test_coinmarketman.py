@@ -55,6 +55,14 @@ class CoinMarketManClientTests(unittest.TestCase):
             },
         )
 
+    def test_positions_heatmap_uses_opened_within_filter(self) -> None:
+        client = CoinMarketManClient(token="token", base_url="https://example.test")
+
+        with patch.object(client, "request", return_value={}) as request:
+            client.positions_heatmap(opened_within="24h")
+
+        request.assert_called_once_with("positions/heatmap", {"openedWithin": "24h"})
+
     def test_encode_params_repeats_list_values(self) -> None:
         query = CoinMarketManClient._encode_params({"segmentIds": ["7", "8"], "limit": 50})
         self.assertEqual(query, "segmentIds=7&segmentIds=8&limit=50")

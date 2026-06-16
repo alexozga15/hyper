@@ -957,6 +957,62 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(summary["signals"][0]["side"], "short")
         self.assertGreaterEqual(summary["signals"][0]["probabilityScore"], 70)
 
+    def test_build_cmm_signal_summary_prefers_heatmap(self) -> None:
+        class FakeCmmClient:
+            token = "token"
+
+            def positions_heatmap(self, *, opened_within: str) -> list[dict[str, Any]]:
+                self.opened_within = opened_within
+                return [
+                    {
+                        "coin": "BTC",
+                        "segments": [
+                            {
+                                "segmentId": 8,
+                                "count": 100,
+                                "countLong": 10,
+                                "totalValue": 10_000_000,
+                                "totalLongValue": 1_000_000,
+                                "totalShortValue": 9_000_000,
+                                "bias": 0.1,
+                            },
+                            {
+                                "segmentId": 7,
+                                "positionCount": 80,
+                                "positionCountLong": 12,
+                                "totalPositionValue": 8_000_000,
+                                "totalPositionValueLong": 1_200_000,
+                                "totalPositionValueShort": 6_800_000,
+                                "bias": 0.15,
+                            },
+                            {
+                                "segmentId": 9,
+                                "totalCount": 90,
+                                "longCount": 20,
+                                "positionValue": 6_000_000,
+                                "longValue": 1_400_000,
+                                "shortValue": 4_600_000,
+                                "bias": 0.23,
+                            },
+                        ],
+                    }
+                ]
+
+            def position_metrics(self, coin: str, segment_id: int, **kwargs: Any) -> dict[str, Any]:
+                raise AssertionError("position_metrics should not be called when heatmap succeeds")
+
+        fake_client = FakeCmmClient()
+        self.service.cmm_client = fake_client
+
+        summary = self.service.build_cmm_signal_summary(coins=["BTC"], segment_ids=[8, 7, 9])
+
+        self.assertEqual(fake_client.opened_within, "7d")
+        self.assertTrue(summary["enabled"])
+        self.assertEqual(summary["signalCount"], 1)
+        self.assertEqual(summary["signals"][0]["coin"], "BTC")
+        self.assertEqual(summary["signals"][0]["side"], "short")
+        self.assertGreaterEqual(summary["signals"][0]["probabilityScore"], 70)
+
     def test_build_signals_message_includes_cmm_section(self) -> None:
         summary = {"generatedAt": "2026-06-16T00:00:00Z", "signals": []}
         cmm_summary = {

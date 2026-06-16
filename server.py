@@ -171,6 +171,14 @@ def to_float(value: Any) -> float:
         return 0.0
 
 
+def first_present(source: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = source.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
 def normalize_position_coin(coin: Any) -> str:
     label = str(coin or "Unknown")
     if label in OIL_POSITION_ALIASES:
@@ -2792,6 +2800,45 @@ class WalletTrackerService:
             "createdAt": metric.get("createdAt", ""),
         }
 
+    def cmm_heatmap_signal_component(self, coin: str, segment_id: int, segment: dict[str, Any]) -> dict[str, Any] | None:
+        position_count = int(to_float(first_present(segment, "count", "positionCount", "totalCount")))
+        long_count = int(to_float(first_present(segment, "countLong", "longCount", "positionCountLong")))
+        short_count = int(to_float(first_present(segment, "countShort", "shortCount", "positionCountShort")))
+        total_value = to_float(first_present(segment, "totalValue", "positionValue", "totalPositionValue"))
+        long_value = to_float(first_present(segment, "totalLongValue", "longValue", "totalPositionValueLong"))
+        short_value = to_float(first_present(segment, "totalShortValue", "shortValue", "totalPositionValueShort"))
+        if not short_value and total_value and long_value:
+            short_value = max(0.0, total_value - long_value)
+        if position_count <= 0 or total_value <= 0:
+            return None
+
+        if short_count <= 0:
+            short_count = max(0, position_count - long_count)
+        if "bias" in segment:
+            value_bias = (to_float(segment.get("bias")) - 0.5) * 2.0
+        else:
+            value_bias = ((long_value - short_value) / total_value) if total_value else 0.0
+        count_bias = ((long_count - short_count) / position_count) if position_count else 0.0
+        weight = CMM_SIGNAL_SEGMENT_WEIGHTS.get(segment_id, 0.5)
+        side = "long" if value_bias > 0 else "short" if value_bias < 0 else "mixed"
+        return {
+            "coin": coin.upper(),
+            "segmentId": segment_id,
+            "segment": CMM_SIGNAL_SEGMENT_LABELS.get(segment_id, f"Segment {segment_id}"),
+            "side": side,
+            "positionCount": position_count,
+            "longCount": long_count,
+            "shortCount": short_count,
+            "totalValue": total_value,
+            "longValue": long_value,
+            "shortValue": short_value,
+            "valueBias": value_bias,
+            "countBias": count_bias,
+            "weight": weight,
+            "unrealizedPnl": to_float(segment.get("unrealizedPnl") or segment.get("totalUnrealizedPnl")),
+            "createdAt": segment.get("createdAt", ""),
+        }
+
     def score_cmm_components(self, coin: str, components: list[dict[str, Any]]) -> dict[str, Any] | None:
         if not components:
             return None
@@ -2835,6 +2882,39 @@ class WalletTrackerService:
             "components": agreeing,
         }
 
+    def build_cmm_signal_summary_from_heatmap(
+        self,
+        payload: Any,
+        *,
+        coins: list[str],
+        segment_ids: list[int],
+        min_probability: float,
+    ) -> list[dict[str, Any]]:
+        coin_filter = {coin.upper() for coin in coins}
+        segment_filter = set(segment_ids)
+        rows = payload if isinstance(payload, list) else payload.get("items", []) if isinstance(payload, dict) else []
+        signals: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            coin = str(row.get("coin") or "").upper()
+            if not coin or coin not in coin_filter:
+                continue
+            components: list[dict[str, Any]] = []
+            for segment in row.get("segments", []):
+                if not isinstance(segment, dict):
+                    continue
+                segment_id = int(to_float(segment.get("segmentId")))
+                if segment_id not in segment_filter:
+                    continue
+                component = self.cmm_heatmap_signal_component(coin, segment_id, segment)
+                if component:
+                    components.append(component)
+            signal = self.score_cmm_components(coin, components)
+            if signal and to_float(signal.get("probabilityScore")) >= min_probability:
+                signals.append(signal)
+        return signals
+
     def build_cmm_signal_summary(
         self,
         *,
@@ -2857,8 +2937,21 @@ class WalletTrackerService:
         timeframe = position_recency_timeframe or os.environ.get("CMM_SIGNAL_POSITION_RECENCY", "7d")
         signals: list[dict[str, Any]] = []
         errors: list[str] = []
+        heatmap_failed = False
 
-        for coin in target_coins:
+        try:
+            heatmap = self.cmm_client.positions_heatmap(opened_within=timeframe)
+            signals = self.build_cmm_signal_summary_from_heatmap(
+                heatmap,
+                coins=target_coins,
+                segment_ids=target_segments,
+                min_probability=min_probability,
+            )
+        except (AttributeError, CoinMarketManApiError) as exc:
+            errors.append(f"heatmap: {exc}")
+            heatmap_failed = True
+
+        for coin in target_coins if heatmap_failed else []:
             components: list[dict[str, Any]] = []
             for segment_id in target_segments:
                 try:
