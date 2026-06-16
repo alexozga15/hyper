@@ -957,7 +957,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(summary["signals"][0]["side"], "short")
         self.assertGreaterEqual(summary["signals"][0]["probabilityScore"], 70)
 
-    def test_build_cmm_signal_summary_prefers_heatmap(self) -> None:
+    def test_build_cmm_signal_summary_uses_heatmap_and_trend_metrics(self) -> None:
         class FakeCmmClient:
             token = "token"
 
@@ -999,7 +999,24 @@ class AlertSummaryTests(unittest.TestCase):
                 ]
 
             def position_metrics(self, coin: str, segment_id: int, **kwargs: Any) -> dict[str, Any]:
-                raise AssertionError("position_metrics should not be called when heatmap succeeds")
+                return {
+                    "metrics": [
+                        {
+                            "createdAt": "2026-06-16T00:00:00Z",
+                            "positionCount": 100,
+                            "positionCountLong": 25,
+                            "totalPositionValue": 10_000_000,
+                            "totalPositionValueLong": 2_000_000,
+                        },
+                        {
+                            "createdAt": "2026-06-16T01:00:00Z",
+                            "positionCount": 100,
+                            "positionCountLong": 10,
+                            "totalPositionValue": 10_000_000,
+                            "totalPositionValueLong": 1_000_000,
+                        },
+                    ]
+                }
 
         fake_client = FakeCmmClient()
         self.service.cmm_client = fake_client
@@ -1012,6 +1029,108 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(summary["signals"][0]["coin"], "BTC")
         self.assertEqual(summary["signals"][0]["side"], "short")
         self.assertGreaterEqual(summary["signals"][0]["probabilityScore"], 70)
+        self.assertGreater(summary["signals"][0]["trendScore"], 0)
+
+    def test_build_cmm_signal_summary_scans_all_heatmap_assets_by_default(self) -> None:
+        class FakeCmmClient:
+            token = "token"
+
+            def positions_heatmap(self, *, opened_within: str) -> list[dict[str, Any]]:
+                return [
+                    {
+                        "coin": "AAVE",
+                        "segments": [
+                            {
+                                "segmentId": 8,
+                                "count": 100,
+                                "countLong": 90,
+                                "totalValue": 10_000_000,
+                                "totalLongValue": 9_000_000,
+                                "totalShortValue": 1_000_000,
+                                "bias": 0.9,
+                            },
+                            {
+                                "segmentId": 7,
+                                "count": 80,
+                                "countLong": 70,
+                                "totalValue": 8_000_000,
+                                "totalLongValue": 7_000_000,
+                                "totalShortValue": 1_000_000,
+                                "bias": 0.875,
+                            },
+                        ],
+                    }
+                ]
+
+            def position_metrics(self, coin: str, segment_id: int, **kwargs: Any) -> dict[str, Any]:
+                return {"metrics": []}
+
+        self.service.cmm_client = FakeCmmClient()
+
+        summary = self.service.build_cmm_signal_summary()
+
+        self.assertEqual(summary["coins"], [])
+        self.assertEqual(summary["signals"][0]["coin"], "AAVE")
+        self.assertEqual(summary["signals"][0]["side"], "long")
+
+    def test_cmm_confirmation_filters_unconfirmed_wallet_alerts(self) -> None:
+        summary = {
+            "signals": [
+                {
+                    "coin": "BTC",
+                    "side": "long",
+                    "probabilityScore": 95.0,
+                    "walletCount": 6,
+                    "netWeightedWalletCount": 4.0,
+                }
+            ],
+            "signalCount": 1,
+        }
+        cmm_summary = {"enabled": True, "signals": []}
+
+        filtered = self.service.apply_cmm_confirmation_to_summary(
+            summary,
+            cmm_summary,
+            require_confirmation=True,
+        )
+
+        self.assertEqual(filtered["signals"], [])
+
+    def test_cmm_confirmation_keeps_strong_agreement(self) -> None:
+        summary = {
+            "signals": [
+                {
+                    "coin": "BTC",
+                    "side": "short",
+                    "probabilityScore": 95.0,
+                    "walletCount": 6,
+                    "netWeightedWalletCount": 4.0,
+                }
+            ],
+            "signalCount": 1,
+        }
+        cmm_summary = {
+            "enabled": True,
+            "signals": [
+                {
+                    "coin": "BTC",
+                    "side": "short",
+                    "probabilityScore": 95.0,
+                    "trendScore": 100.0,
+                    "contrarianScore": 100.0,
+                    "cohortCount": 3,
+                }
+            ],
+        }
+
+        filtered = self.service.apply_cmm_confirmation_to_summary(
+            summary,
+            cmm_summary,
+            require_confirmation=True,
+        )
+
+        self.assertEqual(filtered["signals"][0]["cmmConfirmation"], "confirmed")
+        self.assertGreaterEqual(filtered["signals"][0]["probabilityScore"], 80)
 
     def test_build_signals_message_includes_cmm_section(self) -> None:
         summary = {"generatedAt": "2026-06-16T00:00:00Z", "signals": []}
@@ -1083,7 +1202,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertTrue(result["sent"])
         self.assertEqual(result["changes"]["addedCmmSignals"][0]["coin"], "SOL")
         sent_message = send_telegram_message.call_args.args[2]
-        self.assertIn("CMM cohort signals", sent_message)
+        self.assertIn("CMM cohort alerts", sent_message)
         self.assertIn("SELL SOL short", sent_message)
 
     def test_build_holding_only_wallets_returns_30d_holders_by_notional(self) -> None:

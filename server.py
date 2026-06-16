@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -48,12 +48,23 @@ ACTIONABLE_SIGNAL_MIN_NET_WALLETS = 2
 ACTIONABLE_SIGNAL_MIN_QNET = 1.5
 ACTIONABLE_SIGNAL_MIN_VALUE = 1_000_000
 CMM_SIGNAL_PROBABILITY_THRESHOLD = 70.0
-CMM_SIGNAL_DEFAULT_COINS = ("BTC", "ETH", "SOL", "HYPE")
+CMM_WATCH_PROBABILITY_THRESHOLD = 55.0
+CMM_ALERT_PROBABILITY_THRESHOLD = 80.0
+CMM_SIGNAL_DEFAULT_COINS: tuple[str, ...] = ()
+CMM_SIGNAL_FALLBACK_COINS = ("BTC", "ETH", "SOL", "HYPE")
 CMM_SIGNAL_DEFAULT_SEGMENTS = (8, 7, 9)
+CMM_CONTRARIAN_DEFAULT_SEGMENTS = (12, 13, 14, 15, 16)
+CMM_SIGNAL_TREND_LOOKBACK_HOURS = 4
+CMM_SIGNAL_MAX_TREND_COINS = 10
 CMM_SIGNAL_SEGMENT_LABELS = {
     7: "Leviathan",
     8: "Money Printer",
     9: "Smart Money",
+    12: "Exit Liquidity",
+    13: "Semi-Rekt",
+    14: "Full Rekt",
+    15: "Giga-Rekt",
+    16: "Shrimp",
 }
 CMM_SIGNAL_SEGMENT_WEIGHTS = {
     7: 0.85,
@@ -126,6 +137,10 @@ PROFITABILITY_BANDS = [
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def iso_hours_ago(hours: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat().replace("+00:00", "Z")
 
 
 def iso_to_ms(value: Any) -> int:
@@ -2463,18 +2478,24 @@ class WalletTrackerService:
                 if int(to_float(item.get("recentAddWalletCount"))):
                     activity_bits.append(f'{int(to_float(item.get("recentAddWalletCount")))} adds')
                 activity_note = f', {"/".join(activity_bits)}' if activity_bits else ""
+                cmm_note = ""
+                if item.get("cmmConfirmation") == "confirmed":
+                    cmm_note = (
+                        f', CMM p{to_float(item.get("cmmProbabilityScore")):.0f}'
+                        f'/trend {to_float(item.get("cmmTrendScore")):.0f}'
+                    )
                 lines.append(
                     f'- {str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]}: '
                     f'p{to_float(item.get("probabilityScore")):.0f}{move_note}, '
                     f'{item["walletCount"]}w net +{int(to_float(item.get("netWalletCount")))}, '
                     f'qnet +{to_float(item.get("netWeightedWalletCount")):.1f}, '
-                    f'{format_money_compact(item.get("totalValue"))}{activity_note}'
+                    f'{format_money_compact(item.get("totalValue"))}{activity_note}{cmm_note}'
                 )
 
         cmm_signals = changes.get("addedCmmSignals", []) + changes.get("changedCmmSignals", [])
         if cmm_signals:
             lines.append("")
-            lines.append(f"CMM cohort signals >={CMM_SIGNAL_PROBABILITY_THRESHOLD:.0f}/100")
+            lines.append(f"CMM cohort alerts >={CMM_ALERT_PROBABILITY_THRESHOLD:.0f}/100")
             for item in cmm_signals[:8]:
                 move_note = ""
                 if "fromProbabilityScore" in item:
@@ -2768,6 +2789,31 @@ class WalletTrackerService:
     def cmm_signal_segments(self) -> list[int]:
         return env_int_csv("CMM_SIGNAL_SEGMENTS", CMM_SIGNAL_DEFAULT_SEGMENTS)
 
+    def cmm_contrarian_segments(self) -> list[int]:
+        return env_int_csv("CMM_CONTRARIAN_SEGMENTS", CMM_CONTRARIAN_DEFAULT_SEGMENTS)
+
+    def cmm_signal_tier(self, probability: float) -> str:
+        if probability >= CMM_ALERT_PROBABILITY_THRESHOLD:
+            return "alert"
+        if probability >= CMM_SIGNAL_PROBABILITY_THRESHOLD:
+            return "actionable"
+        return "watch"
+
+    def cmm_contrarian_score(self, side: str, components: list[dict[str, Any]]) -> tuple[float, float]:
+        if not components:
+            return 0.0, 0.0
+        total_weight = sum(to_float(item.get("weight")) for item in components)
+        if total_weight <= 0:
+            return 0.0, 0.0
+        weak_bias = sum(to_float(item.get("valueBias")) * to_float(item.get("weight")) for item in components) / total_weight
+        wants_opposite = (side == "long" and weak_bias < 0) or (side == "short" and weak_bias > 0)
+        agrees_with_side = (side == "long" and weak_bias > 0) or (side == "short" and weak_bias < 0)
+        if wants_opposite:
+            return min(100.0, abs(weak_bias) * 100.0), weak_bias
+        if agrees_with_side:
+            return -min(40.0, abs(weak_bias) * 60.0), weak_bias
+        return 0.0, weak_bias
+
     def cmm_metric_signal_component(self, coin: str, segment_id: int, metric: dict[str, Any]) -> dict[str, Any] | None:
         position_count = int(to_float(metric.get("positionCount")))
         long_count = int(to_float(metric.get("positionCountLong")))
@@ -2839,7 +2885,14 @@ class WalletTrackerService:
             "createdAt": segment.get("createdAt", ""),
         }
 
-    def score_cmm_components(self, coin: str, components: list[dict[str, Any]]) -> dict[str, Any] | None:
+    def score_cmm_components(
+        self,
+        coin: str,
+        components: list[dict[str, Any]],
+        *,
+        contrarian_components: list[dict[str, Any]] | None = None,
+        trend_score: float = 0.0,
+    ) -> dict[str, Any] | None:
         if not components:
             return None
         weighted_bias = sum(to_float(item.get("valueBias")) * to_float(item.get("weight")) for item in components)
@@ -2860,11 +2913,20 @@ class WalletTrackerService:
         total_value = sum(to_float(item.get("totalValue")) for item in agreeing)
         total_positions = sum(int(to_float(item.get("positionCount"))) for item in agreeing)
         total_unrealized = sum(to_float(item.get("unrealizedPnl")) for item in agreeing)
-        value_score = abs(aggregate_bias) * 100.0
+        smart_score = abs(aggregate_bias) * 100.0
         count_score = aligned_count_bias * 100.0
-        agreement_score = (len(agreeing) / max(1, len(components))) * 15.0
-        pnl_score = 5.0 if total_unrealized > 0 else -10.0 if total_unrealized < -1_000_000 else 0.0
-        probability = clamp((value_score * 0.68) + (count_score * 0.20) + agreement_score + pnl_score)
+        agreement_score = min(10.0, (len(agreeing) / 2.0) * 10.0)
+        contrarian_score, weak_bias = self.cmm_contrarian_score(side, contrarian_components or [])
+        pnl_score = 4.0 if total_unrealized > 0 else -10.0 if total_unrealized < -1_000_000 else 0.0
+        probability = clamp(
+            (smart_score * 0.58)
+            + (count_score * 0.14)
+            + (max(0.0, min(trend_score, 100.0)) * 0.14)
+            + (contrarian_score * 0.10)
+            + agreement_score
+            + pnl_score
+        )
+        tier = self.cmm_signal_tier(probability)
 
         return {
             "source": "coinmarketman",
@@ -2872,14 +2934,22 @@ class WalletTrackerService:
             "side": side,
             "action": signal_action_from_side(side),
             "probabilityScore": round(probability, 1),
+            "signalTier": tier,
+            "alertEligible": tier == "alert",
             "valueBias": round(aggregate_bias, 4),
             "countBias": round(count_bias, 4),
+            "smartCohortScore": round(smart_score, 1),
+            "trendScore": round(max(0.0, min(trend_score, 100.0)), 1),
+            "contrarianScore": round(contrarian_score, 1),
+            "weakCohortBias": round(weak_bias, 4),
             "cohortCount": len(agreeing),
             "sampledCohortCount": len(components),
             "positionCount": total_positions,
             "totalValue": round(total_value, 2),
             "unrealizedPnl": round(total_unrealized, 2),
             "components": agreeing,
+            "strongComponents": components,
+            "contrarianComponents": contrarian_components or [],
         }
 
     def build_cmm_signal_summary_from_heatmap(
@@ -2888,32 +2958,116 @@ class WalletTrackerService:
         *,
         coins: list[str],
         segment_ids: list[int],
+        contrarian_segment_ids: list[int],
         min_probability: float,
     ) -> list[dict[str, Any]]:
         coin_filter = {coin.upper() for coin in coins}
         segment_filter = set(segment_ids)
+        contrarian_filter = set(contrarian_segment_ids)
         rows = payload if isinstance(payload, list) else payload.get("items", []) if isinstance(payload, dict) else []
         signals: list[dict[str, Any]] = []
         for row in rows:
             if not isinstance(row, dict):
                 continue
             coin = str(row.get("coin") or "").upper()
-            if not coin or coin not in coin_filter:
+            if not coin or (coin_filter and coin not in coin_filter):
                 continue
             components: list[dict[str, Any]] = []
+            contrarian_components: list[dict[str, Any]] = []
             for segment in row.get("segments", []):
                 if not isinstance(segment, dict):
                     continue
                 segment_id = int(to_float(segment.get("segmentId")))
-                if segment_id not in segment_filter:
-                    continue
                 component = self.cmm_heatmap_signal_component(coin, segment_id, segment)
-                if component:
+                if not component:
+                    continue
+                if segment_id in segment_filter:
                     components.append(component)
-            signal = self.score_cmm_components(coin, components)
+                elif segment_id in contrarian_filter:
+                    contrarian_components.append(component)
+            signal = self.score_cmm_components(coin, components, contrarian_components=contrarian_components)
             if signal and to_float(signal.get("probabilityScore")) >= min_probability:
                 signals.append(signal)
         return signals
+
+    def cmm_metric_trend_score(self, side: str, metrics: list[dict[str, Any]], segment_id: int, coin: str) -> float:
+        components = [
+            self.cmm_metric_signal_component(coin, segment_id, metric)
+            for metric in sorted(metrics, key=lambda item: str(item.get("createdAt") or ""))
+            if isinstance(metric, dict)
+        ]
+        components = [component for component in components if component]
+        if len(components) < 2:
+            return 0.0
+        first_bias = to_float(components[0].get("valueBias"))
+        last_bias = to_float(components[-1].get("valueBias"))
+        aligned_delta = last_bias - first_bias if side == "long" else first_bias - last_bias
+        return max(0.0, min(100.0, aligned_delta * 400.0))
+
+    def enrich_cmm_signals_with_trends(self, signals: list[dict[str, Any]], timeframe: str) -> list[dict[str, Any]]:
+        if not signals:
+            return signals
+        start = iso_hours_ago(CMM_SIGNAL_TREND_LOOKBACK_HOURS)
+        end = now_iso()
+        enriched: list[dict[str, Any]] = []
+        trend_targets = {
+            str(item.get("coin")).upper()
+            for item in sorted(signals, key=lambda signal: to_float(signal.get("probabilityScore")), reverse=True)[
+                :CMM_SIGNAL_MAX_TREND_COINS
+            ]
+        }
+        for signal in signals:
+            coin = str(signal.get("coin") or "").upper()
+            if coin not in trend_targets:
+                enriched.append(signal)
+                continue
+            side = str(signal.get("side") or "")
+            segment_scores: list[float] = []
+            latest_metric_ms = 0
+            for component in signal.get("components", []):
+                if not isinstance(component, dict):
+                    continue
+                segment_id = int(to_float(component.get("segmentId")))
+                try:
+                    payload = self.cmm_client.position_metrics(
+                        coin,
+                        segment_id,
+                        start=start,
+                        end=end,
+                        limit=4,
+                        position_recency_timeframe=timeframe,
+                    )
+                except CoinMarketManApiError:
+                    continue
+                metrics = payload.get("metrics", []) if isinstance(payload, dict) else []
+                if metrics:
+                    segment_scores.append(self.cmm_metric_trend_score(side, metrics, segment_id, coin))
+                    metric_times = [iso_to_ms(metric.get("createdAt")) for metric in metrics if isinstance(metric, dict)]
+                    if metric_times:
+                        latest_metric_ms = max(latest_metric_ms, max(metric_times))
+            if not segment_scores:
+                enriched.append(signal)
+                continue
+            trend_score = sum(segment_scores) / len(segment_scores)
+            rescored = self.score_cmm_components(
+                coin,
+                [item for item in signal.get("strongComponents", []) if isinstance(item, dict)],
+                contrarian_components=[
+                    item for item in signal.get("contrarianComponents", []) if isinstance(item, dict)
+                ],
+                trend_score=trend_score,
+            )
+            if rescored and latest_metric_ms:
+                lag_minutes = max(0.0, (current_time_ms() - latest_metric_ms) / 60_000)
+                rescored["latestMetricAt"] = (
+                    datetime.fromtimestamp(latest_metric_ms / 1000, timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z")
+                )
+                rescored["metricLagMinutes"] = round(lag_minutes, 1)
+                rescored["dataFreshness"] = "fresh" if lag_minutes <= 20 else "stale"
+            enriched.append(rescored or signal)
+        return enriched
 
     def build_cmm_signal_summary(
         self,
@@ -2921,7 +3075,7 @@ class WalletTrackerService:
         coins: list[str] | None = None,
         segment_ids: list[int] | None = None,
         position_recency_timeframe: str | None = None,
-        min_probability: float = CMM_SIGNAL_PROBABILITY_THRESHOLD,
+        min_probability: float = CMM_WATCH_PROBABILITY_THRESHOLD,
     ) -> dict[str, Any]:
         if not self.cmm_client.token:
             return {
@@ -2934,6 +3088,7 @@ class WalletTrackerService:
 
         target_coins = coins or self.cmm_signal_coins()
         target_segments = segment_ids or self.cmm_signal_segments()
+        contrarian_segments = self.cmm_contrarian_segments()
         timeframe = position_recency_timeframe or os.environ.get("CMM_SIGNAL_POSITION_RECENCY", "7d")
         signals: list[dict[str, Any]] = []
         errors: list[str] = []
@@ -2945,19 +3100,26 @@ class WalletTrackerService:
                 heatmap,
                 coins=target_coins,
                 segment_ids=target_segments,
+                contrarian_segment_ids=contrarian_segments,
                 min_probability=min_probability,
             )
+            signals = self.enrich_cmm_signals_with_trends(signals, timeframe)
+            signals = [signal for signal in signals if to_float(signal.get("probabilityScore")) >= min_probability]
         except (AttributeError, CoinMarketManApiError) as exc:
             errors.append(f"heatmap: {exc}")
             heatmap_failed = True
 
-        for coin in target_coins if heatmap_failed else []:
+        for coin in (target_coins or list(CMM_SIGNAL_FALLBACK_COINS)) if heatmap_failed else []:
             components: list[dict[str, Any]] = []
+            start = iso_hours_ago(CMM_SIGNAL_TREND_LOOKBACK_HOURS)
+            end = now_iso()
             for segment_id in target_segments:
                 try:
                     payload = self.cmm_client.position_metrics(
                         coin,
                         segment_id,
+                        start=start,
+                        end=end,
                         limit=1,
                         position_recency_timeframe=timeframe,
                     )
@@ -2988,6 +3150,10 @@ class WalletTrackerService:
             "timeframe": timeframe,
             "coins": target_coins,
             "segments": target_segments,
+            "contrarianSegments": contrarian_segments,
+            "watchThreshold": CMM_WATCH_PROBABILITY_THRESHOLD,
+            "signalThreshold": CMM_SIGNAL_PROBABILITY_THRESHOLD,
+            "alertThreshold": CMM_ALERT_PROBABILITY_THRESHOLD,
             "signals": signals,
             "signalCount": len(signals),
             "error": "; ".join(errors[:3]),
@@ -3003,10 +3169,14 @@ class WalletTrackerService:
         current: dict[str, Any],
     ) -> dict[str, list[dict[str, Any]]]:
         previous_signals = {
-            self.cmm_signal_key(item): item for item in previous.get("signals", []) if isinstance(item, dict)
+            self.cmm_signal_key(item): item
+            for item in previous.get("signals", [])
+            if isinstance(item, dict) and to_float(item.get("probabilityScore")) >= CMM_ALERT_PROBABILITY_THRESHOLD
         }
         current_signals = {
-            self.cmm_signal_key(item): item for item in current.get("signals", []) if isinstance(item, dict)
+            self.cmm_signal_key(item): item
+            for item in current.get("signals", [])
+            if isinstance(item, dict) and to_float(item.get("probabilityScore")) >= CMM_ALERT_PROBABILITY_THRESHOLD
         }
         added = [current_signals[key] for key in current_signals.keys() - previous_signals.keys()]
         changed: list[dict[str, Any]] = []
@@ -3020,12 +3190,111 @@ class WalletTrackerService:
                 changed.append(new_item)
         return {"addedCmmSignals": added, "changedCmmSignals": changed}
 
+    def combined_wallet_cmm_probability(self, wallet_signal: dict[str, Any], cmm_signal: dict[str, Any]) -> float:
+        wallet_score = to_float(wallet_signal.get("probabilityScore", wallet_signal.get("convictionScore")))
+        cmm_score = to_float(cmm_signal.get("probabilityScore"))
+        trend_score = to_float(cmm_signal.get("trendScore"))
+        contrarian_score = max(0.0, to_float(cmm_signal.get("contrarianScore")))
+        return round(
+            clamp(
+                (wallet_score * 0.45)
+                + (cmm_score * 0.30)
+                + (trend_score * 0.15)
+                + (contrarian_score * 0.10)
+            ),
+            1,
+        )
+
+    def apply_cmm_confirmation_to_summary(
+        self,
+        summary: dict[str, Any],
+        cmm_summary: dict[str, Any],
+        *,
+        require_confirmation: bool = False,
+    ) -> dict[str, Any]:
+        if not cmm_summary.get("enabled"):
+            return summary
+        cmm_by_key = {
+            self.cmm_signal_key(signal): signal
+            for signal in cmm_summary.get("signals", [])
+            if isinstance(signal, dict)
+        }
+        adjusted_signals: list[dict[str, Any]] = []
+        for signal in summary.get("signals", []):
+            if not isinstance(signal, dict):
+                continue
+            coin = str(signal.get("coin") or "Unknown")
+            side = str(signal.get("side") or "").lower()
+            opposite_side = "short" if side == "long" else "long"
+            same_cmm = cmm_by_key.get(f"cmm:{coin}:{side}")
+            opposite_cmm = cmm_by_key.get(f"cmm:{coin}:{opposite_side}")
+            original_probability = to_float(signal.get("probabilityScore", signal.get("convictionScore")))
+
+            if same_cmm and to_float(same_cmm.get("probabilityScore")) >= CMM_WATCH_PROBABILITY_THRESHOLD:
+                combined_probability = self.combined_wallet_cmm_probability(signal, same_cmm)
+                if require_confirmation and combined_probability < CMM_ALERT_PROBABILITY_THRESHOLD:
+                    continue
+                adjusted_signals.append(
+                    {
+                        **signal,
+                        "originalProbabilityScore": round(original_probability, 1),
+                        "probabilityScore": combined_probability,
+                        "cmmConfirmation": "confirmed",
+                        "cmmProbabilityScore": to_float(same_cmm.get("probabilityScore")),
+                        "cmmTrendScore": to_float(same_cmm.get("trendScore")),
+                        "cmmContrarianScore": to_float(same_cmm.get("contrarianScore")),
+                        "cmmCohortCount": int(to_float(same_cmm.get("cohortCount"))),
+                    }
+                )
+                continue
+
+            if opposite_cmm and to_float(opposite_cmm.get("probabilityScore")) >= CMM_WATCH_PROBABILITY_THRESHOLD:
+                downgraded_probability = max(0.0, original_probability - 25.0)
+                if require_confirmation or downgraded_probability < ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD:
+                    continue
+                adjusted_signals.append(
+                    {
+                        **signal,
+                        "originalProbabilityScore": round(original_probability, 1),
+                        "probabilityScore": round(downgraded_probability, 1),
+                        "cmmConfirmation": "conflict",
+                        "cmmConflictProbabilityScore": to_float(opposite_cmm.get("probabilityScore")),
+                    }
+                )
+                continue
+
+            downgraded_probability = max(0.0, original_probability - 10.0)
+            if require_confirmation or downgraded_probability < ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD:
+                continue
+            adjusted_signals.append(
+                {
+                    **signal,
+                    "originalProbabilityScore": round(original_probability, 1),
+                    "probabilityScore": round(downgraded_probability, 1),
+                    "cmmConfirmation": "unconfirmed",
+                }
+            )
+
+        adjusted_signals.sort(
+            key=lambda item: (
+                -to_float(item.get("probabilityScore")),
+                -to_float(item.get("netWeightedWalletCount")),
+                -int(to_float(item.get("walletCount"))),
+                str(item.get("coin")),
+                str(item.get("side")),
+            )
+        )
+        return {**summary, "signals": adjusted_signals, "signalCount": len(adjusted_signals)}
+
     def build_cmm_signals_message(self, cmm_summary: dict[str, Any] | None = None) -> str:
         summary = cmm_summary or self.build_cmm_signal_summary()
         lines = [
             "CMM cohort signals",
             f'Timeframe: {summary.get("timeframe", os.environ.get("CMM_SIGNAL_POSITION_RECENCY", "7d"))}',
-            f"Threshold: {CMM_SIGNAL_PROBABILITY_THRESHOLD:.0f}/100 probability",
+            (
+                f"Watch/action/alert: {CMM_WATCH_PROBABILITY_THRESHOLD:.0f}/"
+                f"{CMM_SIGNAL_PROBABILITY_THRESHOLD:.0f}/{CMM_ALERT_PROBABILITY_THRESHOLD:.0f}"
+            ),
         ]
         if not summary.get("enabled"):
             lines.append(f'- Disabled: {summary.get("error", "missing API token")}')
@@ -3033,13 +3302,19 @@ class WalletTrackerService:
             for index, item in enumerate(summary.get("signals", [])[:20], start=1):
                 cohorts = "/".join(str(component.get("segment")) for component in item.get("components", [])[:3])
                 bias_pct = abs(to_float(item.get("valueBias"))) * 100
+                freshness_note = ""
+                if item.get("dataFreshness"):
+                    freshness_note = f', {item.get("dataFreshness")} {to_float(item.get("metricLagMinutes")):.0f}m'
                 lines.append(
-                    f'{index}. {str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]} '
+                    f'{index}. {str(item.get("signalTier", "watch")).upper()} '
+                    f'{str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]} '
                     f'(p{to_float(item.get("probabilityScore")):.0f}/100, {item.get("cohortCount", 0)} cohorts, '
-                    f'bias {bias_pct:.0f}%, {format_money_compact(item.get("totalValue"))}, {cohorts})'
+                    f'bias {bias_pct:.0f}%, trend {to_float(item.get("trendScore")):.0f}, '
+                    f'contra {to_float(item.get("contrarianScore")):.0f}, '
+                    f'{format_money_compact(item.get("totalValue"))}, {cohorts}{freshness_note})'
                 )
         else:
-            lines.append("- No CMM signals above threshold")
+            lines.append("- No CMM watch candidates above threshold")
         if summary.get("error") and summary.get("enabled"):
             lines.append(f'Partial error: {summary.get("error")}')
         lines.append("")
@@ -3067,9 +3342,16 @@ class WalletTrackerService:
                 if int(to_float(item.get("recentAddWalletCount"))):
                     activity_bits.append(f'{int(to_float(item.get("recentAddWalletCount")))} adds')
                 activity_note = f', {"/".join(activity_bits)}' if activity_bits else ""
+                cmm_note = ""
+                if item.get("cmmConfirmation") == "confirmed":
+                    cmm_note = f', CMM p{to_float(item.get("cmmProbabilityScore")):.0f}'
+                elif item.get("cmmConfirmation") == "conflict":
+                    cmm_note = f', CMM conflict p{to_float(item.get("cmmConflictProbabilityScore")):.0f}'
+                elif item.get("cmmConfirmation") == "unconfirmed":
+                    cmm_note = ", CMM unconfirmed"
                 lines.append(
                     f'{index}. {str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]} '
-                    f'({item["walletCount"]} wallets{net_note}, p{probability:.0f}/100{activity_note})'
+                    f'({item["walletCount"]} wallets{net_note}, p{probability:.0f}/100{activity_note}{cmm_note})'
                 )
         else:
             lines.append("- No actionable signals right now")
@@ -3381,6 +3663,12 @@ class WalletTrackerService:
 
         dashboard = self.dashboard()
         summary, top_cohort = self.build_monthly_sentiment_summary(dashboard, min_wallets, state)
+        cmm_summary = self.build_cmm_signal_summary()
+        alert_summary = self.apply_cmm_confirmation_to_summary(
+            summary,
+            cmm_summary,
+            require_confirmation=True,
+        )
         previous_summary = state.get("summary", {}) if isinstance(state, dict) else {}
         previous_positions = state.get("largePositions", {}) if isinstance(state, dict) else {}
         previous_dedupe = state.get("alertDedupe", {}) if isinstance(state, dict) else {}
@@ -3389,9 +3677,8 @@ class WalletTrackerService:
         dedupe_now_ms = current_time_ms()
         # Keep HIP-3 available for explicit commands like /hip3, but exclude it
         # from automatic Telegram alerts and change-trigger decisions.
-        changes = self.summarize_changes(previous_summary, summary, track_hip3=False)
+        changes = self.summarize_changes(previous_summary, alert_summary, track_hip3=False)
         previous_cmm_summary = state.get("cmmSignals", {}) if isinstance(state, dict) else {}
-        cmm_summary = self.build_cmm_signal_summary()
         if cmm_summary.get("enabled"):
             changes.update(self.summarize_cmm_signal_changes(previous_cmm_summary, cmm_summary))
         else:
@@ -3441,7 +3728,7 @@ class WalletTrackerService:
                     self.send_telegram_message(
                         str(config["botToken"]),
                         str(config["chatId"]),
-                        self.build_telegram_message(changes, summary, min_wallets),
+                        self.build_telegram_message(changes, alert_summary, min_wallets),
                     )
                     sent = True
                 except (urllib.error.URLError, TimeoutError, ValueError) as exc:
@@ -3457,7 +3744,7 @@ class WalletTrackerService:
                 "error": error_message,
                 "suppressedAlertCount": len(suppressed_alert_keys),
                 "changes": changes,
-                "summary": summary,
+                "summary": alert_summary,
                 "cmmSignals": cmm_summary,
             }
 
@@ -3469,7 +3756,7 @@ class WalletTrackerService:
             "topConvictionWallets": top_cohort,
         }
         if not should_notify or sent or not config.get("enabled"):
-            new_state["summary"] = summary
+            new_state["summary"] = alert_summary
             new_state["largePositions"] = current_positions
             new_state["cmmSignals"] = cmm_summary
         if sent:
@@ -3489,7 +3776,7 @@ class WalletTrackerService:
             "error": error_message,
             "suppressedAlertCount": len(suppressed_alert_keys),
             "changes": changes,
-            "summary": summary,
+            "summary": alert_summary,
             "cmmSignals": cmm_summary,
         }
 
@@ -3501,6 +3788,11 @@ class WalletTrackerService:
         state = raw.get("state", {}) if isinstance(raw, dict) else {}
         summary, top_cohort = self.build_monthly_sentiment_summary(dashboard, min_wallets, state)
         cmm_summary = self.build_cmm_signal_summary()
+        alert_summary = self.apply_cmm_confirmation_to_summary(
+            summary,
+            cmm_summary,
+            require_confirmation=True,
+        )
         current_positions = self.build_large_position_snapshot(dashboard)
         self.send_telegram_message(
             bot_token,
@@ -3552,7 +3844,7 @@ class WalletTrackerService:
         synced_at = now_iso()
         new_state = {
             **state,
-            "summary": summary,
+            "summary": alert_summary,
             "lastCheckedAt": synced_at,
             "lastHourlySyncedAt": synced_at,
             "topConvictionWallets": top_cohort,
@@ -3573,7 +3865,7 @@ class WalletTrackerService:
             "positionAlertSent": position_alert_sent,
             "positionAlertError": position_alert_error,
             "suppressedAlertCount": len(suppressed_alert_keys),
-            "summary": summary,
+            "summary": alert_summary,
         }
 
 

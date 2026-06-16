@@ -177,6 +177,8 @@ def build_reply(
     if command == "/sentiment":
         return service.build_summary_message(summary_cache, min_wallets)
     if command == "/signals":
+        if cmm_cache is not None and summary_cache is not None:
+            summary_cache = service.apply_cmm_confirmation_to_summary(summary_cache, cmm_cache)
         return service.build_signals_message(summary_cache, cmm_summary=cmm_cache)
     if command == "/cmm":
         return service.build_cmm_signals_message(cmm_cache)
