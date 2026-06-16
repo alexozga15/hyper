@@ -31,6 +31,7 @@ HOST=0.0.0.0
 PORT=8000
 DATA_DIR=/var/data
 ALERT_CHECK_INTERVAL_SECONDS=900
+COINMARKETMAN_API_TOKEN=...
 ```
 
 Notes:
@@ -39,6 +40,21 @@ Notes:
 - The included [`render.yaml`](/Users/alexozga/Documents/New%20project%204/render.yaml) mounts a persistent disk at `/var/data`.
 - The included [`Dockerfile`](/Users/alexozga/Documents/New%20project%204/Dockerfile) is enough for Docker-based platforms like Render or Railway.
 - Set Telegram alert credentials through `POST /api/alerts/config` after deployment.
+
+## CoinMarketMan HyperTracker API
+
+The helper in [`coinmarketman.py`](/Users/alexozga/Documents/New%20project%204/coinmarketman.py) reads the API key from `COINMARKETMAN_API_TOKEN`. Do not commit the token.
+
+Useful commands:
+
+```bash
+COINMARKETMAN_API_TOKEN=... python3 coinmarketman.py segments
+COINMARKETMAN_API_TOKEN=... python3 coinmarketman.py top-wallets --limit 10 --min-age-days 30 --min-total-equity 100000 --min-perp-pnl 1000000
+COINMARKETMAN_API_TOKEN=... python3 coinmarketman.py cohort-summary 8 --position-age 7d
+COINMARKETMAN_API_TOKEN=... python3 coinmarketman.py position-metrics BTC 8 --position-recency-timeframe 7d --limit 100
+```
+
+The official docs used for this helper are [Cohort Intelligence](https://docs.coinmarketman.com/endpoints/cohort-intelligence), [Trader & Wallet Data](https://docs.coinmarketman.com/endpoints/trader-and-wallet-data), and [Leaderboards](https://docs.coinmarketman.com/endpoints/leaderboards).
 
 ## Free Option
 
