@@ -1090,6 +1090,8 @@ class AlertSummaryTests(unittest.TestCase):
                                     "count": 100,
                                     "countLong": 90,
                                     "totalValue": 10_000_000,
+                                    "totalSize": 100_000,
+                                    "price": 100,
                                     "totalLongValue": 9_000_000,
                                     "totalShortValue": 1_000_000,
                                     "bias": 0.9,
@@ -1099,6 +1101,7 @@ class AlertSummaryTests(unittest.TestCase):
                                     "count": 80,
                                     "countLong": 70,
                                     "totalValue": 8_000_000,
+                                    "totalSize": 80_000,
                                     "totalLongValue": 7_000_000,
                                     "totalShortValue": 1_000_000,
                                     "bias": 0.875,
@@ -1118,6 +1121,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(summary["diagnostics"]["heatmapRows"], 1)
         self.assertEqual(summary["signals"][0]["coin"], "AAVE")
         self.assertEqual(summary["signals"][0]["side"], "long")
+        self.assertEqual(summary["signals"][0]["price"], 100)
 
     def test_build_cmm_signal_summary_does_not_call_trends_by_default(self) -> None:
         class FakeCmmClient:
@@ -1264,6 +1268,7 @@ class AlertSummaryTests(unittest.TestCase):
                 "trendScore": 0,
                 "contrarianScore": 0,
                 "totalValue": 2_000_000,
+                "price": 123.45,
                 "components": [{"segment": "Money Printer"}],
             }
             for i in range(12)
@@ -1293,6 +1298,7 @@ class AlertSummaryTests(unittest.TestCase):
 
         self.assertIn("Crypto:", message)
         self.assertIn("tracked 4w qnet 2.5", message)
+        self.assertIn("px $123.45", message)
         self.assertIn("10. WATCH", message)
         self.assertNotIn("11. WATCH", message)
 

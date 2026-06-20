@@ -2869,6 +2869,34 @@ class WalletTrackerService:
         total_value = to_float(first_present(segment, "totalValue", "positionValue", "totalPositionValue"))
         long_value = to_float(first_present(segment, "totalLongValue", "longValue", "totalPositionValueLong"))
         short_value = to_float(first_present(segment, "totalShortValue", "shortValue", "totalPositionValueShort"))
+        total_size = abs(
+            to_float(
+                first_present(
+                    segment,
+                    "totalSize",
+                    "size",
+                    "positionSize",
+                    "totalPositionSize",
+                    "openInterest",
+                )
+            )
+        )
+        price = to_float(
+            first_present(
+                segment,
+                "price",
+                "avgPrice",
+                "averagePrice",
+                "entryPrice",
+                "entryPx",
+                "markPrice",
+                "midPrice",
+            )
+        )
+        price_source = "api" if price > 0 else ""
+        if price <= 0 and total_size > 0 and total_value > 0:
+            price = total_value / total_size
+            price_source = "value/size"
         if not short_value and total_value and long_value:
             short_value = max(0.0, total_value - long_value)
         if position_count <= 0 or total_value <= 0:
@@ -2892,6 +2920,9 @@ class WalletTrackerService:
             "longCount": long_count,
             "shortCount": short_count,
             "totalValue": total_value,
+            "totalSize": total_size,
+            "price": price,
+            "priceSource": price_source,
             "longValue": long_value,
             "shortValue": short_value,
             "valueBias": value_bias,
@@ -2938,6 +2969,12 @@ class WalletTrackerService:
         count_bias = sum(to_float(item.get("countBias")) * to_float(item.get("weight")) for item in components) / total_weight
         aligned_count_bias = abs(count_bias) if (count_bias > 0 and side == "long") or (count_bias < 0 and side == "short") else 0.0
         total_value = sum(to_float(item.get("totalValue")) for item in agreeing)
+        total_size = sum(to_float(item.get("totalSize")) for item in agreeing)
+        weighted_price_value = sum(
+            to_float(item.get("price")) * to_float(item.get("totalSize"))
+            for item in agreeing
+            if to_float(item.get("price")) > 0 and to_float(item.get("totalSize")) > 0
+        )
         total_positions = sum(int(to_float(item.get("positionCount"))) for item in agreeing)
         total_unrealized = sum(to_float(item.get("unrealizedPnl")) for item in agreeing)
         smart_score = abs(aggregate_bias) * 100.0
@@ -2974,6 +3011,9 @@ class WalletTrackerService:
             "sampledCohortCount": len(components),
             "positionCount": total_positions,
             "totalValue": round(total_value, 2),
+            "totalSize": round(total_size, 8),
+            "price": round(weighted_price_value / total_size, 8) if total_size > 0 and weighted_price_value > 0 else 0.0,
+            "priceSource": "size-weighted" if total_size > 0 and weighted_price_value > 0 else "",
             "unrealizedPnl": round(total_unrealized, 2),
             "components": agreeing,
             "strongComponents": components,
@@ -3446,13 +3486,16 @@ class WalletTrackerService:
                     if item.get("dataFreshness"):
                         freshness_note = f', {item.get("dataFreshness")} {to_float(item.get("metricLagMinutes")):.0f}m'
                     tracked_note = self.cmm_tracked_confirmation_note(item, wallet_summary)
+                    price_note = ""
+                    if to_float(item.get("price")) > 0:
+                        price_note = f', px ${format_price(to_float(item.get("price")))}'
                     lines.append(
                         f'{index}. {str(item.get("signalTier", "watch")).upper()} '
                         f'{str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]} '
                         f'(p{to_float(item.get("probabilityScore")):.0f}/100, {item.get("cohortCount", 0)} cohorts, '
                         f'bias {bias_pct:.0f}%, trend {to_float(item.get("trendScore")):.0f}, '
                         f'contra {to_float(item.get("contrarianScore")):.0f}, '
-                        f'{format_money_compact(item.get("totalValue"))}, {cohorts}{tracked_note}{freshness_note})'
+                        f'{format_money_compact(item.get("totalValue"))}{price_note}, {cohorts}{tracked_note}{freshness_note})'
                     )
                     index += 1
         elif summary.get("enabled"):
@@ -3462,12 +3505,15 @@ class WalletTrackerService:
                 lines.append("")
                 lines.append("Strongest below watch:")
                 for item in below_threshold[:5]:
+                    price_note = ""
+                    if to_float(item.get("price")) > 0:
+                        price_note = f', px ${format_price(to_float(item.get("price")))}'
                     lines.append(
                         f'- {str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]} '
                         f'p{to_float(item.get("probabilityScore")):.0f}, '
                         f'bias {abs(to_float(item.get("valueBias"))) * 100:.0f}%, '
                         f'trend {to_float(item.get("trendScore")):.0f}, '
-                        f'{format_money_compact(item.get("totalValue"))}'
+                        f'{format_money_compact(item.get("totalValue"))}{price_note}'
                     )
             diagnostics = summary.get("diagnostics", {})
             if diagnostics:
