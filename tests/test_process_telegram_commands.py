@@ -155,6 +155,32 @@ class DispatchUpdateTests(unittest.TestCase):
         self.assertIsNone(parse_position_wallet_query("/btc sideways"))
         self.assertIsNone(parse_position_wallet_query("/update long"))
 
+    def test_build_cmm_cache_reuses_cached_summary_when_rate_limited(self) -> None:
+        class FakeService:
+            alerts_path = Path("alerts.json")
+
+            def build_cmm_signal_summary(self) -> dict:
+                return {
+                    "enabled": True,
+                    "rateLimited": True,
+                    "error": "heatmap: CMM API returned HTTP 429",
+                    "signals": [],
+                    "generatedAt": "2026-06-20T10:40:00Z",
+                }
+
+        cached = {
+            "enabled": True,
+            "signals": [{"coin": "LINK", "side": "short"}],
+            "generatedAt": "2026-06-20T09:00:00Z",
+        }
+
+        with patch.object(commands, "load_json_file", return_value={"state": {"cmmSignals": cached}}):
+            summary = commands.build_cmm_cache(FakeService())
+
+        self.assertTrue(summary["stale"])
+        self.assertEqual(summary["signals"], cached["signals"])
+        self.assertIn("429", summary["staleReason"])
+
     def test_build_reply_routes_ticker_direction_query(self) -> None:
         class FakeService:
             def build_position_wallets_message(self, dashboard: dict, coin: str, side: str) -> str:

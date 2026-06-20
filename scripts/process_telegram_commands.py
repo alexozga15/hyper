@@ -232,6 +232,28 @@ def build_summary_cache(
     return service.build_sentiment_summary(dashboard["wallets"], min_wallets)
 
 
+def cached_cmm_summary(service: WalletTrackerService) -> dict[str, Any]:
+    raw = load_json_file(service.alerts_path, {}) if hasattr(service, "alerts_path") else {}
+    state = raw.get("state", {}) if isinstance(raw, dict) else {}
+    summary = state.get("cmmSignals", {}) if isinstance(state, dict) else {}
+    return summary if isinstance(summary, dict) else {}
+
+
+def build_cmm_cache(service: WalletTrackerService) -> dict[str, Any]:
+    summary = service.build_cmm_signal_summary()
+    if not summary.get("rateLimited"):
+        return summary
+    cached = cached_cmm_summary(service)
+    if cached.get("enabled") and cached.get("signals"):
+        return {
+            **cached,
+            "stale": True,
+            "staleReason": summary.get("error", "CMM API rate limited"),
+            "checkedAt": summary.get("generatedAt", ""),
+        }
+    return summary
+
+
 def main() -> int:
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     allowed_chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
@@ -278,7 +300,7 @@ def main() -> int:
 
         cmm_cache = None
         if command in CMM_COMMANDS:
-            cmm_cache = service.build_cmm_signal_summary()
+            cmm_cache = build_cmm_cache(service)
 
         reply = build_reply(service, command, position_query, summary_cache, dashboard_cache, cmm_cache, min_wallets)
 

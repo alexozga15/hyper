@@ -3,6 +3,7 @@ from unittest.mock import patch
 from pathlib import Path
 from typing import Any
 
+from coinmarketman import CoinMarketManApiError
 from server import (
     ALERTS_FILE,
     ELITE_WALLET_OVERRIDES,
@@ -1021,7 +1022,8 @@ class AlertSummaryTests(unittest.TestCase):
         fake_client = FakeCmmClient()
         self.service.cmm_client = fake_client
 
-        summary = self.service.build_cmm_signal_summary(coins=["BTC"], segment_ids=[8, 7, 9])
+        with patch.dict("os.environ", {"CMM_TREND_ENRICHMENT": "true"}, clear=False):
+            summary = self.service.build_cmm_signal_summary(coins=["BTC"], segment_ids=[8, 7, 9])
 
         self.assertEqual(fake_client.opened_within, "7d")
         self.assertTrue(summary["enabled"])
@@ -1116,6 +1118,67 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(summary["diagnostics"]["heatmapRows"], 1)
         self.assertEqual(summary["signals"][0]["coin"], "AAVE")
         self.assertEqual(summary["signals"][0]["side"], "long")
+
+    def test_build_cmm_signal_summary_does_not_call_trends_by_default(self) -> None:
+        class FakeCmmClient:
+            token = "token"
+
+            def positions_heatmap(self, *, opened_within: str) -> dict[str, Any]:
+                return {
+                    "data": [
+                        {
+                            "coin": "AAVE",
+                            "segments": [
+                                {
+                                    "segmentId": 8,
+                                    "count": 100,
+                                    "countLong": 90,
+                                    "totalValue": 10_000_000,
+                                    "totalLongValue": 9_000_000,
+                                    "totalShortValue": 1_000_000,
+                                    "bias": 0.9,
+                                },
+                                {
+                                    "segmentId": 7,
+                                    "count": 80,
+                                    "countLong": 70,
+                                    "totalValue": 8_000_000,
+                                    "totalLongValue": 7_000_000,
+                                    "totalShortValue": 1_000_000,
+                                    "bias": 0.875,
+                                },
+                            ],
+                        }
+                    ]
+                }
+
+            def position_metrics(self, coin: str, segment_id: int, **kwargs: Any) -> dict[str, Any]:
+                raise AssertionError("Trend calls should be disabled by default")
+
+        self.service.cmm_client = FakeCmmClient()
+
+        summary = self.service.build_cmm_signal_summary()
+
+        self.assertEqual(summary["signals"][0]["coin"], "AAVE")
+        self.assertEqual(summary["signals"][0]["trendScore"], 0)
+
+    def test_build_cmm_signal_summary_does_not_fallback_after_rate_limit(self) -> None:
+        class FakeCmmClient:
+            token = "token"
+
+            def positions_heatmap(self, *, opened_within: str) -> dict[str, Any]:
+                raise CoinMarketManApiError("CMM API returned HTTP 429: daily limit")
+
+            def position_metrics(self, coin: str, segment_id: int, **kwargs: Any) -> dict[str, Any]:
+                raise AssertionError("Fallback should not run after CMM rate limit")
+
+        self.service.cmm_client = FakeCmmClient()
+
+        summary = self.service.build_cmm_signal_summary()
+
+        self.assertTrue(summary["rateLimited"])
+        self.assertEqual(summary["signals"], [])
+        self.assertIn("429", summary["error"])
 
     def test_build_cmm_signal_summary_filters_low_value_candidates(self) -> None:
         class FakeCmmClient:

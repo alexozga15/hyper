@@ -56,6 +56,7 @@ CMM_SIGNAL_DEFAULT_COINS: tuple[str, ...] = ()
 CMM_SIGNAL_FALLBACK_COINS = ("BTC", "ETH", "SOL", "HYPE")
 CMM_SIGNAL_DEFAULT_SEGMENTS = (8, 7, 9)
 CMM_CONTRARIAN_DEFAULT_SEGMENTS = (12, 13, 14, 15, 16)
+CMM_TREND_ENRICHMENT_ENABLED = False
 CMM_SIGNAL_TREND_LOOKBACK_HOURS = 4
 CMM_SIGNAL_MAX_TREND_COINS = 10
 CMM_SIGNAL_SEGMENT_LABELS = {
@@ -2802,6 +2803,9 @@ class WalletTrackerService:
     def cmm_contrarian_segments(self) -> list[int]:
         return env_int_csv("CMM_CONTRARIAN_SEGMENTS", CMM_CONTRARIAN_DEFAULT_SEGMENTS)
 
+    def cmm_trend_enrichment_enabled(self) -> bool:
+        return env_flag("CMM_TREND_ENRICHMENT", CMM_TREND_ENRICHMENT_ENABLED)
+
     def cmm_signal_tier(self, probability: float, total_value: float) -> str:
         if total_value < CMM_ACTIONABLE_MIN_TOTAL_VALUE:
             return "watch"
@@ -3135,6 +3139,7 @@ class WalletTrackerService:
         below_threshold_signals: list[dict[str, Any]] = []
         errors: list[str] = []
         heatmap_failed = False
+        heatmap_quota_limited = False
         diagnostics: dict[str, Any] = {
             "heatmapRows": 0,
             "smartComponents": 0,
@@ -3153,7 +3158,8 @@ class WalletTrackerService:
                 min_probability=0.0,
                 diagnostics=diagnostics,
             )
-            all_heatmap_signals = self.enrich_cmm_signals_with_trends(all_heatmap_signals, timeframe)
+            if self.cmm_trend_enrichment_enabled():
+                all_heatmap_signals = self.enrich_cmm_signals_with_trends(all_heatmap_signals, timeframe)
             signals = [
                 signal
                 for signal in all_heatmap_signals
@@ -3167,8 +3173,9 @@ class WalletTrackerService:
         except (AttributeError, CoinMarketManApiError) as exc:
             errors.append(f"heatmap: {exc}")
             heatmap_failed = True
+            heatmap_quota_limited = "429" in str(exc) or "daily limit" in str(exc).lower()
 
-        for coin in (target_coins or list(CMM_SIGNAL_FALLBACK_COINS)) if heatmap_failed else []:
+        for coin in (target_coins or list(CMM_SIGNAL_FALLBACK_COINS)) if heatmap_failed and not heatmap_quota_limited else []:
             components: list[dict[str, Any]] = []
             start = iso_hours_ago(CMM_SIGNAL_TREND_LOOKBACK_HOURS)
             end = now_iso()
@@ -3206,6 +3213,7 @@ class WalletTrackerService:
         return {
             "enabled": True,
             "source": "coinmarketman",
+            "rateLimited": heatmap_quota_limited,
             "timeframe": timeframe,
             "coins": target_coins,
             "segments": target_segments,
@@ -3415,7 +3423,10 @@ class WalletTrackerService:
         ]
         if not summary.get("enabled"):
             lines.append(f'- Disabled: {summary.get("error", "missing API token")}')
-        elif summary.get("signals"):
+        else:
+            if summary.get("stale"):
+                lines.append(f'- Showing cached CMM data: {summary.get("staleReason", "live CMM unavailable")}')
+        if summary.get("enabled") and summary.get("signals"):
             shown = summary.get("signals", [])[: max(1, limit)]
             by_group: dict[str, list[dict[str, Any]]] = {"Crypto": [], "Commodities": [], "Stocks / indices": []}
             for item in shown:
@@ -3444,7 +3455,7 @@ class WalletTrackerService:
                         f'{format_money_compact(item.get("totalValue"))}, {cohorts}{tracked_note}{freshness_note})'
                     )
                     index += 1
-        else:
+        elif summary.get("enabled"):
             lines.append("- No CMM watch candidates above threshold")
             below_threshold = summary.get("belowThresholdSignals", [])
             if below_threshold:
