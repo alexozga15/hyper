@@ -181,7 +181,7 @@ def build_reply(
             summary_cache = service.apply_cmm_confirmation_to_summary(summary_cache, cmm_cache)
         return service.build_signals_message(summary_cache, cmm_summary=cmm_cache)
     if command == "/cmm":
-        return service.build_cmm_signals_message(cmm_cache)
+        return service.build_cmm_signals_message(cmm_cache, wallet_summary=summary_cache)
     if command == "/consensus":
         return service.build_summary_message(
             summary_cache,
@@ -270,10 +270,10 @@ def main() -> int:
             continue
 
         position_query = parse_position_wallet_query(message_text)
-        if (command in LIVE_COMMANDS and command not in {"/cmm"}) or position_query:
+        if command in LIVE_COMMANDS or position_query:
             if dashboard_cache is None:
                 dashboard_cache = service.dashboard()
-            if command in SUMMARY_COMMANDS and summary_cache is None:
+            if (command in SUMMARY_COMMANDS or command in CMM_COMMANDS) and summary_cache is None:
                 summary_cache = build_summary_cache(service, dashboard_cache, min_wallets)
 
         cmm_cache = None

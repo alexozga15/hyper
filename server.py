@@ -47,10 +47,11 @@ ACTIONABLE_SIGNAL_MIN_WALLETS = 4
 ACTIONABLE_SIGNAL_MIN_NET_WALLETS = 2
 ACTIONABLE_SIGNAL_MIN_QNET = 1.5
 ACTIONABLE_SIGNAL_MIN_VALUE = 1_000_000
-CMM_SIGNAL_PROBABILITY_THRESHOLD = 70.0
+CMM_SIGNAL_PROBABILITY_THRESHOLD = 75.0
 CMM_WATCH_PROBABILITY_THRESHOLD = 55.0
-CMM_ALERT_PROBABILITY_THRESHOLD = 80.0
+CMM_ALERT_PROBABILITY_THRESHOLD = 85.0
 CMM_SIGNAL_MIN_TOTAL_VALUE = 500_000
+CMM_ACTIONABLE_MIN_TOTAL_VALUE = 1_000_000
 CMM_SIGNAL_DEFAULT_COINS: tuple[str, ...] = ()
 CMM_SIGNAL_FALLBACK_COINS = ("BTC", "ETH", "SOL", "HYPE")
 CMM_SIGNAL_DEFAULT_SEGMENTS = (8, 7, 9)
@@ -2801,7 +2802,9 @@ class WalletTrackerService:
     def cmm_contrarian_segments(self) -> list[int]:
         return env_int_csv("CMM_CONTRARIAN_SEGMENTS", CMM_CONTRARIAN_DEFAULT_SEGMENTS)
 
-    def cmm_signal_tier(self, probability: float) -> str:
+    def cmm_signal_tier(self, probability: float, total_value: float) -> str:
+        if total_value < CMM_ACTIONABLE_MIN_TOTAL_VALUE:
+            return "watch"
         if probability >= CMM_ALERT_PROBABILITY_THRESHOLD:
             return "alert"
         if probability >= CMM_SIGNAL_PROBABILITY_THRESHOLD:
@@ -2946,7 +2949,7 @@ class WalletTrackerService:
             + agreement_score
             + pnl_score
         )
-        tier = self.cmm_signal_tier(probability)
+        tier = self.cmm_signal_tier(probability, total_value)
 
         return {
             "source": "coinmarketman",
@@ -2956,6 +2959,7 @@ class WalletTrackerService:
             "probabilityScore": round(probability, 1),
             "signalTier": tier,
             "alertEligible": tier == "alert",
+            "actionableEligible": tier in {"actionable", "alert"},
             "valueBias": round(aggregate_bias, 4),
             "countBias": round(count_bias, 4),
             "smartCohortScore": round(smart_score, 1),
@@ -3228,6 +3232,14 @@ class WalletTrackerService:
     def cmm_signal_key(self, signal: dict[str, Any]) -> str:
         return f'cmm:{signal.get("coin", "Unknown")}:{signal.get("side", "")}'
 
+    def cmm_signal_alert_eligible(self, signal: dict[str, Any]) -> bool:
+        if signal.get("alertEligible"):
+            return True
+        return (
+            to_float(signal.get("probabilityScore")) >= CMM_ALERT_PROBABILITY_THRESHOLD
+            and to_float(signal.get("totalValue")) >= CMM_ACTIONABLE_MIN_TOTAL_VALUE
+        )
+
     def summarize_cmm_signal_changes(
         self,
         previous: dict[str, Any],
@@ -3236,12 +3248,12 @@ class WalletTrackerService:
         previous_signals = {
             self.cmm_signal_key(item): item
             for item in previous.get("signals", [])
-            if isinstance(item, dict) and to_float(item.get("probabilityScore")) >= CMM_ALERT_PROBABILITY_THRESHOLD
+            if isinstance(item, dict) and self.cmm_signal_alert_eligible(item)
         }
         current_signals = {
             self.cmm_signal_key(item): item
             for item in current.get("signals", [])
-            if isinstance(item, dict) and to_float(item.get("probabilityScore")) >= CMM_ALERT_PROBABILITY_THRESHOLD
+            if isinstance(item, dict) and self.cmm_signal_alert_eligible(item)
         }
         added = [current_signals[key] for key in current_signals.keys() - previous_signals.keys()]
         changed: list[dict[str, Any]] = []
@@ -3351,7 +3363,43 @@ class WalletTrackerService:
         )
         return {**summary, "signals": adjusted_signals, "signalCount": len(adjusted_signals)}
 
-    def build_cmm_signals_message(self, cmm_summary: dict[str, Any] | None = None) -> str:
+    def cmm_asset_group(self, coin: Any) -> str:
+        normalized_coin = normalize_cmm_coin(coin)
+        if is_commodity_like_position(normalized_coin):
+            return "Commodities"
+        if is_stock_like_position(normalized_coin):
+            return "Stocks / indices"
+        return "Crypto"
+
+    def cmm_tracked_confirmation_note(self, item: dict[str, Any], wallet_summary: dict[str, Any] | None) -> str:
+        if not wallet_summary:
+            return ""
+        coin = normalize_cmm_coin(item.get("coin")).upper()
+        side = str(item.get("side") or "").lower()
+        for source_key in ("signals", "consensus"):
+            for wallet_item in wallet_summary.get(source_key, []):
+                if not isinstance(wallet_item, dict):
+                    continue
+                if normalize_cmm_coin(wallet_item.get("coin")).upper() != coin:
+                    continue
+                if str(wallet_item.get("side") or "").lower() != side:
+                    continue
+                wallet_count = int(to_float(wallet_item.get("walletCount")))
+                if wallet_count <= 0:
+                    continue
+                qnet = to_float(wallet_item.get("netWeightedWalletCount"))
+                if qnet > 0:
+                    return f", tracked {wallet_count}w qnet {qnet:.1f}"
+                return f", tracked {wallet_count}w"
+        return ""
+
+    def build_cmm_signals_message(
+        self,
+        cmm_summary: dict[str, Any] | None = None,
+        *,
+        wallet_summary: dict[str, Any] | None = None,
+        limit: int = 10,
+    ) -> str:
         summary = cmm_summary or self.build_cmm_signal_summary()
         lines = [
             "CMM cohort signals",
@@ -3360,25 +3408,42 @@ class WalletTrackerService:
                 f"Watch/action/alert: {CMM_WATCH_PROBABILITY_THRESHOLD:.0f}/"
                 f"{CMM_SIGNAL_PROBABILITY_THRESHOLD:.0f}/{CMM_ALERT_PROBABILITY_THRESHOLD:.0f}"
             ),
-            f"Min value: {format_money_compact(CMM_SIGNAL_MIN_TOTAL_VALUE)}",
+            (
+                f"Min value: watch {format_money_compact(CMM_SIGNAL_MIN_TOTAL_VALUE)}, "
+                f"action {format_money_compact(CMM_ACTIONABLE_MIN_TOTAL_VALUE)}"
+            ),
         ]
         if not summary.get("enabled"):
             lines.append(f'- Disabled: {summary.get("error", "missing API token")}')
         elif summary.get("signals"):
-            for index, item in enumerate(summary.get("signals", [])[:20], start=1):
-                cohorts = "/".join(str(component.get("segment")) for component in item.get("components", [])[:3])
-                bias_pct = abs(to_float(item.get("valueBias"))) * 100
-                freshness_note = ""
-                if item.get("dataFreshness"):
-                    freshness_note = f', {item.get("dataFreshness")} {to_float(item.get("metricLagMinutes")):.0f}m'
-                lines.append(
-                    f'{index}. {str(item.get("signalTier", "watch")).upper()} '
-                    f'{str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]} '
-                    f'(p{to_float(item.get("probabilityScore")):.0f}/100, {item.get("cohortCount", 0)} cohorts, '
-                    f'bias {bias_pct:.0f}%, trend {to_float(item.get("trendScore")):.0f}, '
-                    f'contra {to_float(item.get("contrarianScore")):.0f}, '
-                    f'{format_money_compact(item.get("totalValue"))}, {cohorts}{freshness_note})'
-                )
+            shown = summary.get("signals", [])[: max(1, limit)]
+            by_group: dict[str, list[dict[str, Any]]] = {"Crypto": [], "Commodities": [], "Stocks / indices": []}
+            for item in shown:
+                if isinstance(item, dict):
+                    by_group.setdefault(self.cmm_asset_group(item.get("coin")), []).append(item)
+            index = 1
+            for group in ("Crypto", "Commodities", "Stocks / indices"):
+                group_items = by_group.get(group, [])
+                if not group_items:
+                    continue
+                lines.append("")
+                lines.append(f"{group}:")
+                for item in group_items:
+                    cohorts = "/".join(str(component.get("segment")) for component in item.get("components", [])[:3])
+                    bias_pct = abs(to_float(item.get("valueBias"))) * 100
+                    freshness_note = ""
+                    if item.get("dataFreshness"):
+                        freshness_note = f', {item.get("dataFreshness")} {to_float(item.get("metricLagMinutes")):.0f}m'
+                    tracked_note = self.cmm_tracked_confirmation_note(item, wallet_summary)
+                    lines.append(
+                        f'{index}. {str(item.get("signalTier", "watch")).upper()} '
+                        f'{str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]} '
+                        f'(p{to_float(item.get("probabilityScore")):.0f}/100, {item.get("cohortCount", 0)} cohorts, '
+                        f'bias {bias_pct:.0f}%, trend {to_float(item.get("trendScore")):.0f}, '
+                        f'contra {to_float(item.get("contrarianScore")):.0f}, '
+                        f'{format_money_compact(item.get("totalValue"))}, {cohorts}{tracked_note}{freshness_note})'
+                    )
+                    index += 1
         else:
             lines.append("- No CMM watch candidates above threshold")
             below_threshold = summary.get("belowThresholdSignals", [])
@@ -3446,7 +3511,7 @@ class WalletTrackerService:
             lines.append("- No actionable signals right now")
         if cmm_summary is not None:
             lines.append("")
-            lines.append(self.build_cmm_signals_message(cmm_summary))
+            lines.append(self.build_cmm_signals_message(cmm_summary, wallet_summary=summary))
         lines.append("")
         lines.append(f'Checked at: {summary.get("generatedAt", now_iso())}')
         return "\n".join(lines)

@@ -1183,6 +1183,56 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(summary["diagnostics"]["lowValueCandidates"], 1)
         self.assertEqual([item["coin"] for item in summary["signals"]], ["XMR"])
 
+    def test_cmm_signal_tier_requires_actionable_value(self) -> None:
+        self.assertEqual(self.service.cmm_signal_tier(79, 866_000), "watch")
+        self.assertEqual(self.service.cmm_signal_tier(79, 1_100_000), "actionable")
+        self.assertEqual(self.service.cmm_signal_tier(86, 1_100_000), "alert")
+
+    def test_build_cmm_signals_message_limits_groups_and_marks_tracked(self) -> None:
+        signals = [
+            {
+                "coin": f"COIN{i}",
+                "side": "short",
+                "action": "sell",
+                "signalTier": "watch",
+                "probabilityScore": 80 - i,
+                "cohortCount": 3,
+                "valueBias": 0.8,
+                "trendScore": 0,
+                "contrarianScore": 0,
+                "totalValue": 2_000_000,
+                "components": [{"segment": "Money Printer"}],
+            }
+            for i in range(12)
+        ]
+        signals[0]["coin"] = "LINK"
+        wallet_summary = {
+            "consensus": [
+                {
+                    "coin": "LINK",
+                    "side": "short",
+                    "walletCount": 4,
+                    "netWeightedWalletCount": 2.5,
+                }
+            ],
+            "signals": [],
+        }
+
+        message = self.service.build_cmm_signals_message(
+            {
+                "enabled": True,
+                "timeframe": "7d",
+                "signals": signals,
+                "generatedAt": "2026-06-20T00:00:00Z",
+            },
+            wallet_summary=wallet_summary,
+        )
+
+        self.assertIn("Crypto:", message)
+        self.assertIn("tracked 4w qnet 2.5", message)
+        self.assertIn("10. WATCH", message)
+        self.assertNotIn("11. WATCH", message)
+
     def test_cmm_confirmation_filters_unconfirmed_wallet_alerts(self) -> None:
         summary = {
             "signals": [
