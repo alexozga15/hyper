@@ -2885,6 +2885,17 @@ class WalletTrackerService:
             "createdAt": segment.get("createdAt", ""),
         }
 
+    def cmm_heatmap_rows(self, payload: Any) -> list[dict[str, Any]]:
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        if not isinstance(payload, dict):
+            return []
+        for key in ("items", "data", "results", "coins", "heatmap"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+        return []
+
     def score_cmm_components(
         self,
         coin: str,
@@ -2960,11 +2971,17 @@ class WalletTrackerService:
         segment_ids: list[int],
         contrarian_segment_ids: list[int],
         min_probability: float,
+        diagnostics: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         coin_filter = {coin.upper() for coin in coins}
         segment_filter = set(segment_ids)
         contrarian_filter = set(contrarian_segment_ids)
-        rows = payload if isinstance(payload, list) else payload.get("items", []) if isinstance(payload, dict) else []
+        rows = self.cmm_heatmap_rows(payload)
+        if diagnostics is not None:
+            diagnostics["heatmapRows"] = len(rows)
+            diagnostics["smartComponents"] = 0
+            diagnostics["contrarianComponents"] = 0
+            diagnostics["scoredCandidates"] = 0
         signals: list[dict[str, Any]] = []
         for row in rows:
             if not isinstance(row, dict):
@@ -2983,9 +3000,15 @@ class WalletTrackerService:
                     continue
                 if segment_id in segment_filter:
                     components.append(component)
+                    if diagnostics is not None:
+                        diagnostics["smartComponents"] += 1
                 elif segment_id in contrarian_filter:
                     contrarian_components.append(component)
+                    if diagnostics is not None:
+                        diagnostics["contrarianComponents"] += 1
             signal = self.score_cmm_components(coin, components, contrarian_components=contrarian_components)
+            if signal and diagnostics is not None:
+                diagnostics["scoredCandidates"] += 1
             if signal and to_float(signal.get("probabilityScore")) >= min_probability:
                 signals.append(signal)
         return signals
@@ -3091,20 +3114,37 @@ class WalletTrackerService:
         contrarian_segments = self.cmm_contrarian_segments()
         timeframe = position_recency_timeframe or os.environ.get("CMM_SIGNAL_POSITION_RECENCY", "7d")
         signals: list[dict[str, Any]] = []
+        below_threshold_signals: list[dict[str, Any]] = []
         errors: list[str] = []
         heatmap_failed = False
+        diagnostics: dict[str, Any] = {
+            "heatmapRows": 0,
+            "smartComponents": 0,
+            "contrarianComponents": 0,
+            "scoredCandidates": 0,
+        }
 
         try:
             heatmap = self.cmm_client.positions_heatmap(opened_within=timeframe)
-            signals = self.build_cmm_signal_summary_from_heatmap(
+            all_heatmap_signals = self.build_cmm_signal_summary_from_heatmap(
                 heatmap,
                 coins=target_coins,
                 segment_ids=target_segments,
                 contrarian_segment_ids=contrarian_segments,
-                min_probability=min_probability,
+                min_probability=0.0,
+                diagnostics=diagnostics,
             )
-            signals = self.enrich_cmm_signals_with_trends(signals, timeframe)
-            signals = [signal for signal in signals if to_float(signal.get("probabilityScore")) >= min_probability]
+            all_heatmap_signals = self.enrich_cmm_signals_with_trends(all_heatmap_signals, timeframe)
+            signals = [
+                signal
+                for signal in all_heatmap_signals
+                if to_float(signal.get("probabilityScore")) >= min_probability
+            ]
+            below_threshold_signals = [
+                signal
+                for signal in all_heatmap_signals
+                if to_float(signal.get("probabilityScore")) < min_probability
+            ]
         except (AttributeError, CoinMarketManApiError) as exc:
             errors.append(f"heatmap: {exc}")
             heatmap_failed = True
@@ -3155,7 +3195,17 @@ class WalletTrackerService:
             "signalThreshold": CMM_SIGNAL_PROBABILITY_THRESHOLD,
             "alertThreshold": CMM_ALERT_PROBABILITY_THRESHOLD,
             "signals": signals,
+            "belowThresholdSignals": sorted(
+                below_threshold_signals,
+                key=lambda item: (
+                    to_float(item.get("probabilityScore")),
+                    to_float(item.get("totalValue")),
+                    int(to_float(item.get("positionCount"))),
+                ),
+                reverse=True,
+            )[:5],
             "signalCount": len(signals),
+            "diagnostics": diagnostics,
             "error": "; ".join(errors[:3]),
             "generatedAt": now_iso(),
         }
@@ -3315,6 +3365,28 @@ class WalletTrackerService:
                 )
         else:
             lines.append("- No CMM watch candidates above threshold")
+            below_threshold = summary.get("belowThresholdSignals", [])
+            if below_threshold:
+                lines.append("")
+                lines.append("Strongest below watch:")
+                for item in below_threshold[:5]:
+                    lines.append(
+                        f'- {str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]} '
+                        f'p{to_float(item.get("probabilityScore")):.0f}, '
+                        f'bias {abs(to_float(item.get("valueBias"))) * 100:.0f}%, '
+                        f'trend {to_float(item.get("trendScore")):.0f}, '
+                        f'{format_money_compact(item.get("totalValue"))}'
+                    )
+            diagnostics = summary.get("diagnostics", {})
+            if diagnostics:
+                lines.append("")
+                lines.append(
+                    "Diagnostics: "
+                    f'rows {int(to_float(diagnostics.get("heatmapRows")))}, '
+                    f'smart {int(to_float(diagnostics.get("smartComponents")))}, '
+                    f'contra {int(to_float(diagnostics.get("contrarianComponents")))}, '
+                    f'candidates {int(to_float(diagnostics.get("scoredCandidates")))}'
+                )
         if summary.get("error") and summary.get("enabled"):
             lines.append(f'Partial error: {summary.get("error")}')
         lines.append("")

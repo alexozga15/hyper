@@ -1073,6 +1073,50 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(summary["signals"][0]["coin"], "AAVE")
         self.assertEqual(summary["signals"][0]["side"], "long")
 
+    def test_build_cmm_signal_summary_accepts_data_wrapped_heatmap(self) -> None:
+        class FakeCmmClient:
+            token = "token"
+
+            def positions_heatmap(self, *, opened_within: str) -> dict[str, Any]:
+                return {
+                    "data": [
+                        {
+                            "coin": "AAVE",
+                            "segments": [
+                                {
+                                    "segmentId": 8,
+                                    "count": 100,
+                                    "countLong": 90,
+                                    "totalValue": 10_000_000,
+                                    "totalLongValue": 9_000_000,
+                                    "totalShortValue": 1_000_000,
+                                    "bias": 0.9,
+                                },
+                                {
+                                    "segmentId": 7,
+                                    "count": 80,
+                                    "countLong": 70,
+                                    "totalValue": 8_000_000,
+                                    "totalLongValue": 7_000_000,
+                                    "totalShortValue": 1_000_000,
+                                    "bias": 0.875,
+                                },
+                            ],
+                        }
+                    ]
+                }
+
+            def position_metrics(self, coin: str, segment_id: int, **kwargs: Any) -> dict[str, Any]:
+                return {"metrics": []}
+
+        self.service.cmm_client = FakeCmmClient()
+
+        summary = self.service.build_cmm_signal_summary()
+
+        self.assertEqual(summary["diagnostics"]["heatmapRows"], 1)
+        self.assertEqual(summary["signals"][0]["coin"], "AAVE")
+        self.assertEqual(summary["signals"][0]["side"], "long")
+
     def test_cmm_confirmation_filters_unconfirmed_wallet_alerts(self) -> None:
         summary = {
             "signals": [
