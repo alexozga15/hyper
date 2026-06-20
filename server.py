@@ -3184,6 +3184,16 @@ class WalletTrackerService:
                 enriched.append(signal)
         return enriched
 
+    def enrich_cmm_summary_with_market_prices(self, summary: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(summary, dict):
+            return summary
+        enriched_summary = dict(summary)
+        for key in ("signals", "belowThresholdSignals"):
+            signals = enriched_summary.get(key)
+            if isinstance(signals, list):
+                enriched_summary[key] = self.enrich_cmm_signals_with_market_prices(signals)
+        return enriched_summary
+
     def build_cmm_signal_summary(
         self,
         *,
@@ -3480,7 +3490,7 @@ class WalletTrackerService:
         wallet_summary: dict[str, Any] | None = None,
         limit: int = 10,
     ) -> str:
-        summary = cmm_summary or self.build_cmm_signal_summary()
+        summary = self.enrich_cmm_summary_with_market_prices(cmm_summary or self.build_cmm_signal_summary())
         lines = [
             "CMM cohort signals",
             f'Timeframe: {summary.get("timeframe", os.environ.get("CMM_SIGNAL_POSITION_RECENCY", "7d"))}',

@@ -1351,6 +1351,36 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("10. WATCH", message)
         self.assertNotIn("11. WATCH", message)
 
+    def test_build_cmm_signals_message_enriches_cached_prices(self) -> None:
+        class FakeHyperliquidClient:
+            def all_mids(self) -> dict[str, float]:
+                return {"LTC": 44.25}
+
+        self.service.client = FakeHyperliquidClient()
+        message = self.service.build_cmm_signals_message(
+            {
+                "enabled": True,
+                "signals": [
+                    {
+                        "coin": "LTC",
+                        "side": "short",
+                        "action": "sell",
+                        "signalTier": "actionable",
+                        "probabilityScore": 78,
+                        "cohortCount": 3,
+                        "valueBias": -0.97,
+                        "trendScore": 0,
+                        "contrarianScore": 20,
+                        "totalValue": 1_400_000,
+                        "components": [{"segment": "Leviathan"}, {"segment": "Money Printer"}],
+                    }
+                ],
+                "generatedAt": "2026-06-20T12:46:44Z",
+            }
+        )
+
+        self.assertIn("px ~$44.25", message)
+
     def test_cmm_confirmation_filters_unconfirmed_wallet_alerts(self) -> None:
         summary = {
             "signals": [
