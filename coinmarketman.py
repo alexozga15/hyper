@@ -11,6 +11,7 @@ from typing import Any, Iterable
 
 COINMARKETMAN_API_BASE_URL = "https://ht-api.coinmarketman.com/api/external"
 COINMARKETMAN_TOKEN_ENV = "COINMARKETMAN_API_TOKEN"
+COINMARKETMAN_BACKUP_TOKEN_ENV = "COINMARKETMAN_API_TOKEN_BACKUP"
 
 
 class CoinMarketManApiError(RuntimeError):
@@ -20,6 +21,7 @@ class CoinMarketManApiError(RuntimeError):
 class CoinMarketManClient:
     def __init__(self, token: str | None = None, base_url: str | None = None, timeout: int = 30) -> None:
         self.token = token or os.environ.get(COINMARKETMAN_TOKEN_ENV, "")
+        self.backup_token = os.environ.get(COINMARKETMAN_BACKUP_TOKEN_ENV, "")
         self.base_url = (base_url or os.environ.get("COINMARKETMAN_API_BASE_URL") or COINMARKETMAN_API_BASE_URL).rstrip("/")
         self.timeout = timeout
 
@@ -32,11 +34,27 @@ class CoinMarketManClient:
         if query:
             url = f"{url}?{query}"
 
+        errors: list[str] = []
+        tried_tokens: set[str] = set()
+        for label, token in (("primary", self.token), ("backup", self.backup_token)):
+            if not token or token in tried_tokens:
+                continue
+            tried_tokens.add(token)
+            try:
+                return self._request_with_token(url, token)
+            except CoinMarketManApiError as exc:
+                errors.append(f"{label}: {exc}")
+                if label == "primary" and self.backup_token and self._is_rate_limit_error(exc):
+                    continue
+                raise
+        raise CoinMarketManApiError("; ".join(errors) or "CMM API request failed")
+
+    def _request_with_token(self, url: str, token: str) -> Any:
         req = urllib.request.Request(
             url,
             headers={
                 "Accept": "application/json",
-                "Authorization": f"Bearer {self.token}",
+                "Authorization": f"Bearer {token}",
             },
         )
         try:
@@ -52,6 +70,11 @@ class CoinMarketManClient:
             return json.loads(body)
         except json.JSONDecodeError as exc:
             raise CoinMarketManApiError("CMM API returned non-JSON response") from exc
+
+    @staticmethod
+    def _is_rate_limit_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return "http 429" in message or "daily limit" in message or "rate limit" in message
 
     def segments(self) -> Any:
         return self.request("segments")

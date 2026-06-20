@@ -63,6 +63,37 @@ class CoinMarketManClientTests(unittest.TestCase):
 
         request.assert_called_once_with("positions/heatmap", {"openedWithin": "24h"})
 
+    def test_request_uses_backup_token_after_primary_rate_limit(self) -> None:
+        client = CoinMarketManClient(token="primary", base_url="https://example.test")
+        client.backup_token = "backup"
+        calls: list[str] = []
+
+        def fake_request(url: str, token: str) -> dict:
+            calls.append(token)
+            if token == "primary":
+                raise CoinMarketManApiError("CMM API returned HTTP 429: daily limit")
+            return {"ok": True}
+
+        with patch.object(client, "_request_with_token", side_effect=fake_request):
+            payload = client.request("positions/heatmap", {"openedWithin": "7d"})
+
+        self.assertEqual(payload, {"ok": True})
+        self.assertEqual(calls, ["primary", "backup"])
+
+    def test_request_does_not_use_backup_for_non_rate_limit_errors(self) -> None:
+        client = CoinMarketManClient(token="primary", base_url="https://example.test")
+        client.backup_token = "backup"
+
+        with patch.object(
+            client,
+            "_request_with_token",
+            side_effect=CoinMarketManApiError("CMM API returned HTTP 401: unauthorized"),
+        ) as request:
+            with self.assertRaises(CoinMarketManApiError):
+                client.request("positions/heatmap")
+
+        self.assertEqual(request.call_count, 1)
+
     def test_encode_params_repeats_list_values(self) -> None:
         query = CoinMarketManClient._encode_params({"segmentIds": ["7", "8"], "limit": 50})
         self.assertEqual(query, "segmentIds=7&segmentIds=8&limit=50")
