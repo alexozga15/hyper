@@ -32,7 +32,6 @@ WALLETS_FILE = DATA_DIR / "tracked_wallets.json"
 ALERTS_FILE = DATA_DIR / "alerts.json"
 TELEGRAM_STATE_FILE = DATA_DIR / "telegram_bot_state.json"
 HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
-HYPERLIQUID_INFO_FALLBACK_URLS = ("https://api-ui.hyperliquid.xyz/info",)
 HYPERLIQUID_WS_URLS = (
     "wss://api-ui.hyperliquid.xyz/ws",
     "wss://api.hyperliquid.xyz/ws",
@@ -663,21 +662,6 @@ class HyperliquidClient:
             return self.post(payload)
         except (urllib.error.URLError, TimeoutError, ValueError):
             return fallback
-
-    def all_mids(self) -> dict[str, float]:
-        request_payload = {"type": "allMids"}
-        payload = self.safe_post(request_payload, {})
-        if not isinstance(payload, dict) or not payload:
-            for url in HYPERLIQUID_INFO_FALLBACK_URLS:
-                try:
-                    payload = self.post(request_payload, url=url)
-                except (urllib.error.URLError, TimeoutError, ValueError):
-                    continue
-                if isinstance(payload, dict) and payload:
-                    break
-        if not isinstance(payload, dict):
-            return {}
-        return {normalize_cmm_coin(coin).upper(): to_float(price) for coin, price in payload.items()}
 
     def _websocket_connect(self, url: str, timeout: float = 8.0) -> WebSocketConnection:
         parsed = urllib.parse.urlparse(url)
@@ -2900,19 +2884,15 @@ class WalletTrackerService:
         price = to_float(
             first_present(
                 segment,
-                "price",
-                "avgPrice",
-                "averagePrice",
                 "entryPrice",
                 "entryPx",
-                "markPrice",
-                "midPrice",
+                "avgEntryPrice",
+                "averageEntryPrice",
+                "avgPrice",
+                "averagePrice",
             )
         )
-        price_source = "api" if price > 0 else ""
-        if price <= 0 and total_size > 0 and total_value > 0:
-            price = total_value / total_size
-            price_source = "value/size"
+        price_source = "entry" if price > 0 else ""
         if not short_value and total_value and long_value:
             short_value = max(0.0, total_value - long_value)
         if position_count <= 0 or total_value <= 0:
@@ -2986,6 +2966,11 @@ class WalletTrackerService:
         aligned_count_bias = abs(count_bias) if (count_bias > 0 and side == "long") or (count_bias < 0 and side == "short") else 0.0
         total_value = sum(to_float(item.get("totalValue")) for item in agreeing)
         total_size = sum(to_float(item.get("totalSize")) for item in agreeing)
+        priced_size = sum(
+            to_float(item.get("totalSize"))
+            for item in agreeing
+            if to_float(item.get("price")) > 0 and to_float(item.get("totalSize")) > 0
+        )
         weighted_price_value = sum(
             to_float(item.get("price")) * to_float(item.get("totalSize"))
             for item in agreeing
@@ -3028,8 +3013,8 @@ class WalletTrackerService:
             "positionCount": total_positions,
             "totalValue": round(total_value, 2),
             "totalSize": round(total_size, 8),
-            "price": round(weighted_price_value / total_size, 8) if total_size > 0 and weighted_price_value > 0 else 0.0,
-            "priceSource": "size-weighted" if total_size > 0 and weighted_price_value > 0 else "",
+            "price": round(weighted_price_value / priced_size, 8) if priced_size > 0 and weighted_price_value > 0 else 0.0,
+            "priceSource": "size-weighted-entry" if priced_size > 0 and weighted_price_value > 0 else "",
             "unrealizedPnl": round(total_unrealized, 2),
             "components": agreeing,
             "strongComponents": components,
@@ -3170,78 +3155,6 @@ class WalletTrackerService:
             enriched.append(rescored or signal)
         return enriched
 
-    def market_price_map_from_dashboard(self, dashboard: dict[str, Any] | None) -> dict[str, float]:
-        if not isinstance(dashboard, dict):
-            return {}
-        buckets: dict[str, dict[str, float]] = {}
-        for wallet in dashboard.get("wallets", []):
-            if not isinstance(wallet, dict):
-                continue
-            for position in wallet.get("positions", []):
-                if not isinstance(position, dict):
-                    continue
-                coin = normalize_cmm_coin(position.get("coin")).upper()
-                size = abs(to_float(position.get("size")))
-                value = abs(to_float(position.get("positionValue")))
-                if not coin or size <= 0 or value <= 0:
-                    continue
-                bucket = buckets.setdefault(coin, {"value": 0.0, "size": 0.0})
-                bucket["value"] += value
-                bucket["size"] += size
-        return {
-            coin: round(item["value"] / item["size"], 8)
-            for coin, item in buckets.items()
-            if item["size"] > 0 and item["value"] > 0
-        }
-
-    def enrich_cmm_signals_with_market_prices(
-        self,
-        signals: list[dict[str, Any]],
-        market_prices: dict[str, float] | None = None,
-    ) -> list[dict[str, Any]]:
-        missing_price_coins = {
-            normalize_cmm_coin(signal.get("coin")).upper()
-            for signal in signals
-            if isinstance(signal, dict) and to_float(signal.get("price")) <= 0
-        }
-        if not missing_price_coins:
-            return signals
-        mids = {
-            normalize_cmm_coin(coin).upper(): to_float(price)
-            for coin, price in (market_prices or {}).items()
-            if to_float(price) > 0
-        }
-        if missing_price_coins - set(mids):
-            mids.update(self.client.all_mids())
-        if not mids:
-            return signals
-        enriched: list[dict[str, Any]] = []
-        for signal in signals:
-            if not isinstance(signal, dict):
-                enriched.append(signal)
-                continue
-            coin = normalize_cmm_coin(signal.get("coin")).upper()
-            market_price = to_float(mids.get(coin))
-            if to_float(signal.get("price")) <= 0 and market_price > 0:
-                enriched.append({**signal, "price": round(market_price, 8), "priceSource": "market"})
-            else:
-                enriched.append(signal)
-        return enriched
-
-    def enrich_cmm_summary_with_market_prices(
-        self,
-        summary: dict[str, Any],
-        market_prices: dict[str, float] | None = None,
-    ) -> dict[str, Any]:
-        if not isinstance(summary, dict):
-            return summary
-        enriched_summary = dict(summary)
-        for key in ("signals", "belowThresholdSignals"):
-            signals = enriched_summary.get(key)
-            if isinstance(signals, list):
-                enriched_summary[key] = self.enrich_cmm_signals_with_market_prices(signals, market_prices)
-        return enriched_summary
-
     def build_cmm_signal_summary(
         self,
         *,
@@ -3288,7 +3201,6 @@ class WalletTrackerService:
             )
             if self.cmm_trend_enrichment_enabled():
                 all_heatmap_signals = self.enrich_cmm_signals_with_trends(all_heatmap_signals, timeframe)
-            all_heatmap_signals = self.enrich_cmm_signals_with_market_prices(all_heatmap_signals)
             signals = [
                 signal
                 for signal in all_heatmap_signals
@@ -3331,7 +3243,6 @@ class WalletTrackerService:
             if signal and to_float(signal.get("probabilityScore")) >= min_probability:
                 signals.append(signal)
 
-        signals = self.enrich_cmm_signals_with_market_prices(signals)
         signals.sort(
             key=lambda item: (
                 to_float(item.get("probabilityScore")),
@@ -3538,7 +3449,7 @@ class WalletTrackerService:
         wallet_summary: dict[str, Any] | None = None,
         limit: int = 10,
     ) -> str:
-        summary = self.enrich_cmm_summary_with_market_prices(cmm_summary or self.build_cmm_signal_summary())
+        summary = cmm_summary or self.build_cmm_signal_summary()
         lines = [
             "CMM cohort signals",
             f'Timeframe: {summary.get("timeframe", os.environ.get("CMM_SIGNAL_POSITION_RECENCY", "7d"))}',
@@ -3578,8 +3489,7 @@ class WalletTrackerService:
                     tracked_note = self.cmm_tracked_confirmation_note(item, wallet_summary)
                     price_note = ""
                     if to_float(item.get("price")) > 0:
-                        price_marker = "~" if item.get("priceSource") == "market" else ""
-                        price_note = f', px {price_marker}${format_price(to_float(item.get("price")))}'
+                        price_note = f', entry ${format_price(to_float(item.get("price")))}'
                     lines.append(
                         f'{index}. {str(item.get("signalTier", "watch")).upper()} '
                         f'{str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]} '
@@ -3598,8 +3508,7 @@ class WalletTrackerService:
                 for item in below_threshold[:5]:
                     price_note = ""
                     if to_float(item.get("price")) > 0:
-                        price_marker = "~" if item.get("priceSource") == "market" else ""
-                        price_note = f', px {price_marker}${format_price(to_float(item.get("price")))}'
+                        price_note = f', entry ${format_price(to_float(item.get("price")))}'
                     lines.append(
                         f'- {str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]} '
                         f'p{to_float(item.get("probabilityScore")):.0f}, '

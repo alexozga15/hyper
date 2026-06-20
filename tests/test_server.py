@@ -1091,7 +1091,7 @@ class AlertSummaryTests(unittest.TestCase):
                                     "countLong": 90,
                                     "totalValue": 10_000_000,
                                     "totalSize": 100_000,
-                                    "price": 100,
+                                    "entryPrice": 100,
                                     "totalLongValue": 9_000_000,
                                     "totalShortValue": 1_000_000,
                                     "bias": 0.9,
@@ -1122,54 +1122,6 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(summary["signals"][0]["coin"], "AAVE")
         self.assertEqual(summary["signals"][0]["side"], "long")
         self.assertEqual(summary["signals"][0]["price"], 100)
-
-    def test_build_cmm_signal_summary_uses_market_price_fallback(self) -> None:
-        class FakeCmmClient:
-            token = "token"
-
-            def positions_heatmap(self, *, opened_within: str) -> dict[str, Any]:
-                return {
-                    "data": [
-                        {
-                            "coin": "LINK",
-                            "segments": [
-                                {
-                                    "segmentId": 8,
-                                    "count": 100,
-                                    "countLong": 0,
-                                    "totalValue": 1_000_000,
-                                    "totalLongValue": 0,
-                                    "totalShortValue": 1_000_000,
-                                    "bias": 0,
-                                },
-                                {
-                                    "segmentId": 7,
-                                    "count": 80,
-                                    "countLong": 0,
-                                    "totalValue": 900_000,
-                                    "totalLongValue": 0,
-                                    "totalShortValue": 900_000,
-                                    "bias": 0,
-                                },
-                            ],
-                        }
-                    ]
-                }
-
-            def position_metrics(self, coin: str, segment_id: int, **kwargs: Any) -> dict[str, Any]:
-                return {"metrics": []}
-
-        class FakeHyperliquidClient:
-            def all_mids(self) -> dict[str, float]:
-                return {"LINK": 14.25}
-
-        self.service.cmm_client = FakeCmmClient()
-        self.service.client = FakeHyperliquidClient()
-
-        summary = self.service.build_cmm_signal_summary()
-
-        self.assertEqual(summary["signals"][0]["price"], 14.25)
-        self.assertEqual(summary["signals"][0]["priceSource"], "market")
 
     def test_build_cmm_signal_summary_does_not_call_trends_by_default(self) -> None:
         class FakeCmmClient:
@@ -1317,7 +1269,7 @@ class AlertSummaryTests(unittest.TestCase):
                 "contrarianScore": 0,
                 "totalValue": 2_000_000,
                 "price": 123.45,
-                "priceSource": "market",
+                "priceSource": "api",
                 "components": [{"segment": "Money Printer"}],
             }
             for i in range(12)
@@ -1347,72 +1299,9 @@ class AlertSummaryTests(unittest.TestCase):
 
         self.assertIn("Crypto:", message)
         self.assertIn("tracked 4w qnet 2.5", message)
-        self.assertIn("px ~$123.45", message)
+        self.assertIn("entry $123.45", message)
         self.assertIn("10. WATCH", message)
         self.assertNotIn("11. WATCH", message)
-
-    def test_build_cmm_signals_message_enriches_cached_prices(self) -> None:
-        class FakeHyperliquidClient:
-            def all_mids(self) -> dict[str, float]:
-                return {"LTC": 44.25}
-
-        self.service.client = FakeHyperliquidClient()
-        message = self.service.build_cmm_signals_message(
-            {
-                "enabled": True,
-                "signals": [
-                    {
-                        "coin": "LTC",
-                        "side": "short",
-                        "action": "sell",
-                        "signalTier": "actionable",
-                        "probabilityScore": 78,
-                        "cohortCount": 3,
-                        "valueBias": -0.97,
-                        "trendScore": 0,
-                        "contrarianScore": 20,
-                        "totalValue": 1_400_000,
-                        "components": [{"segment": "Leviathan"}, {"segment": "Money Printer"}],
-                    }
-                ],
-                "generatedAt": "2026-06-20T12:46:44Z",
-            }
-        )
-
-        self.assertIn("px ~$44.25", message)
-
-    def test_enrich_cmm_summary_uses_dashboard_market_prices(self) -> None:
-        class FakeHyperliquidClient:
-            def all_mids(self) -> dict[str, float]:
-                raise AssertionError("dashboard price should avoid allMids")
-
-        self.service.client = FakeHyperliquidClient()
-        market_prices = self.service.market_price_map_from_dashboard(
-            {
-                "wallets": [
-                    {
-                        "positions": [
-                            {
-                                "coin": "LTC",
-                                "size": 10,
-                                "positionValue": 442.5,
-                            }
-                        ]
-                    }
-                ]
-            }
-        )
-
-        summary = self.service.enrich_cmm_summary_with_market_prices(
-            {
-                "enabled": True,
-                "signals": [{"coin": "LTC", "side": "short"}],
-            },
-            market_prices,
-        )
-
-        self.assertEqual(summary["signals"][0]["price"], 44.25)
-        self.assertEqual(summary["signals"][0]["priceSource"], "market")
 
     def test_cmm_confirmation_filters_unconfirmed_wallet_alerts(self) -> None:
         summary = {
