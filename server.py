@@ -32,6 +32,7 @@ WALLETS_FILE = DATA_DIR / "tracked_wallets.json"
 ALERTS_FILE = DATA_DIR / "alerts.json"
 TELEGRAM_STATE_FILE = DATA_DIR / "telegram_bot_state.json"
 HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
+HYPERLIQUID_INFO_FALLBACK_URLS = ("https://api-ui.hyperliquid.xyz/info",)
 HYPERLIQUID_WS_URLS = (
     "wss://api-ui.hyperliquid.xyz/ws",
     "wss://api.hyperliquid.xyz/ws",
@@ -648,9 +649,9 @@ class WalletStore:
 
 
 class HyperliquidClient:
-    def post(self, payload: dict[str, Any]) -> Any:
+    def post(self, payload: dict[str, Any], url: str = HYPERLIQUID_INFO_URL) -> Any:
         request = urllib.request.Request(
-            HYPERLIQUID_INFO_URL,
+            url,
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"},
         )
@@ -664,7 +665,16 @@ class HyperliquidClient:
             return fallback
 
     def all_mids(self) -> dict[str, float]:
-        payload = self.safe_post({"type": "allMids"}, {})
+        request_payload = {"type": "allMids"}
+        payload = self.safe_post(request_payload, {})
+        if not isinstance(payload, dict) or not payload:
+            for url in HYPERLIQUID_INFO_FALLBACK_URLS:
+                try:
+                    payload = self.post(request_payload, url=url)
+                except (urllib.error.URLError, TimeoutError, ValueError):
+                    continue
+                if isinstance(payload, dict) and payload:
+                    break
         if not isinstance(payload, dict):
             return {}
         return {normalize_cmm_coin(coin).upper(): to_float(price) for coin, price in payload.items()}
@@ -3160,7 +3170,35 @@ class WalletTrackerService:
             enriched.append(rescored or signal)
         return enriched
 
-    def enrich_cmm_signals_with_market_prices(self, signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def market_price_map_from_dashboard(self, dashboard: dict[str, Any] | None) -> dict[str, float]:
+        if not isinstance(dashboard, dict):
+            return {}
+        buckets: dict[str, dict[str, float]] = {}
+        for wallet in dashboard.get("wallets", []):
+            if not isinstance(wallet, dict):
+                continue
+            for position in wallet.get("positions", []):
+                if not isinstance(position, dict):
+                    continue
+                coin = normalize_cmm_coin(position.get("coin")).upper()
+                size = abs(to_float(position.get("size")))
+                value = abs(to_float(position.get("positionValue")))
+                if not coin or size <= 0 or value <= 0:
+                    continue
+                bucket = buckets.setdefault(coin, {"value": 0.0, "size": 0.0})
+                bucket["value"] += value
+                bucket["size"] += size
+        return {
+            coin: round(item["value"] / item["size"], 8)
+            for coin, item in buckets.items()
+            if item["size"] > 0 and item["value"] > 0
+        }
+
+    def enrich_cmm_signals_with_market_prices(
+        self,
+        signals: list[dict[str, Any]],
+        market_prices: dict[str, float] | None = None,
+    ) -> list[dict[str, Any]]:
         missing_price_coins = {
             normalize_cmm_coin(signal.get("coin")).upper()
             for signal in signals
@@ -3168,7 +3206,13 @@ class WalletTrackerService:
         }
         if not missing_price_coins:
             return signals
-        mids = self.client.all_mids()
+        mids = {
+            normalize_cmm_coin(coin).upper(): to_float(price)
+            for coin, price in (market_prices or {}).items()
+            if to_float(price) > 0
+        }
+        if missing_price_coins - set(mids):
+            mids.update(self.client.all_mids())
         if not mids:
             return signals
         enriched: list[dict[str, Any]] = []
@@ -3184,14 +3228,18 @@ class WalletTrackerService:
                 enriched.append(signal)
         return enriched
 
-    def enrich_cmm_summary_with_market_prices(self, summary: dict[str, Any]) -> dict[str, Any]:
+    def enrich_cmm_summary_with_market_prices(
+        self,
+        summary: dict[str, Any],
+        market_prices: dict[str, float] | None = None,
+    ) -> dict[str, Any]:
         if not isinstance(summary, dict):
             return summary
         enriched_summary = dict(summary)
         for key in ("signals", "belowThresholdSignals"):
             signals = enriched_summary.get(key)
             if isinstance(signals, list):
-                enriched_summary[key] = self.enrich_cmm_signals_with_market_prices(signals)
+                enriched_summary[key] = self.enrich_cmm_signals_with_market_prices(signals, market_prices)
         return enriched_summary
 
     def build_cmm_signal_summary(

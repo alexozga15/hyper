@@ -301,6 +301,11 @@ def main() -> int:
         cmm_cache = None
         if command in CMM_COMMANDS:
             cmm_cache = build_cmm_cache(service)
+            if dashboard_cache is not None:
+                cmm_cache = service.enrich_cmm_summary_with_market_prices(
+                    cmm_cache,
+                    service.market_price_map_from_dashboard(dashboard_cache),
+                )
 
         reply = build_reply(service, command, position_query, summary_cache, dashboard_cache, cmm_cache, min_wallets)
 

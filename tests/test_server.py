@@ -1381,6 +1381,39 @@ class AlertSummaryTests(unittest.TestCase):
 
         self.assertIn("px ~$44.25", message)
 
+    def test_enrich_cmm_summary_uses_dashboard_market_prices(self) -> None:
+        class FakeHyperliquidClient:
+            def all_mids(self) -> dict[str, float]:
+                raise AssertionError("dashboard price should avoid allMids")
+
+        self.service.client = FakeHyperliquidClient()
+        market_prices = self.service.market_price_map_from_dashboard(
+            {
+                "wallets": [
+                    {
+                        "positions": [
+                            {
+                                "coin": "LTC",
+                                "size": 10,
+                                "positionValue": 442.5,
+                            }
+                        ]
+                    }
+                ]
+            }
+        )
+
+        summary = self.service.enrich_cmm_summary_with_market_prices(
+            {
+                "enabled": True,
+                "signals": [{"coin": "LTC", "side": "short"}],
+            },
+            market_prices,
+        )
+
+        self.assertEqual(summary["signals"][0]["price"], 44.25)
+        self.assertEqual(summary["signals"][0]["priceSource"], "market")
+
     def test_cmm_confirmation_filters_unconfirmed_wallet_alerts(self) -> None:
         summary = {
             "signals": [
