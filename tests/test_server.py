@@ -1123,6 +1123,54 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(summary["signals"][0]["side"], "long")
         self.assertEqual(summary["signals"][0]["price"], 100)
 
+    def test_build_cmm_signal_summary_uses_market_price_fallback(self) -> None:
+        class FakeCmmClient:
+            token = "token"
+
+            def positions_heatmap(self, *, opened_within: str) -> dict[str, Any]:
+                return {
+                    "data": [
+                        {
+                            "coin": "LINK",
+                            "segments": [
+                                {
+                                    "segmentId": 8,
+                                    "count": 100,
+                                    "countLong": 0,
+                                    "totalValue": 1_000_000,
+                                    "totalLongValue": 0,
+                                    "totalShortValue": 1_000_000,
+                                    "bias": 0,
+                                },
+                                {
+                                    "segmentId": 7,
+                                    "count": 80,
+                                    "countLong": 0,
+                                    "totalValue": 900_000,
+                                    "totalLongValue": 0,
+                                    "totalShortValue": 900_000,
+                                    "bias": 0,
+                                },
+                            ],
+                        }
+                    ]
+                }
+
+            def position_metrics(self, coin: str, segment_id: int, **kwargs: Any) -> dict[str, Any]:
+                return {"metrics": []}
+
+        class FakeHyperliquidClient:
+            def all_mids(self) -> dict[str, float]:
+                return {"LINK": 14.25}
+
+        self.service.cmm_client = FakeCmmClient()
+        self.service.client = FakeHyperliquidClient()
+
+        summary = self.service.build_cmm_signal_summary()
+
+        self.assertEqual(summary["signals"][0]["price"], 14.25)
+        self.assertEqual(summary["signals"][0]["priceSource"], "market")
+
     def test_build_cmm_signal_summary_does_not_call_trends_by_default(self) -> None:
         class FakeCmmClient:
             token = "token"
@@ -1269,6 +1317,7 @@ class AlertSummaryTests(unittest.TestCase):
                 "contrarianScore": 0,
                 "totalValue": 2_000_000,
                 "price": 123.45,
+                "priceSource": "market",
                 "components": [{"segment": "Money Printer"}],
             }
             for i in range(12)
@@ -1298,7 +1347,7 @@ class AlertSummaryTests(unittest.TestCase):
 
         self.assertIn("Crypto:", message)
         self.assertIn("tracked 4w qnet 2.5", message)
-        self.assertIn("px $123.45", message)
+        self.assertIn("px ~$123.45", message)
         self.assertIn("10. WATCH", message)
         self.assertNotIn("11. WATCH", message)
 

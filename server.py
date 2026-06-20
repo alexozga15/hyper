@@ -663,6 +663,12 @@ class HyperliquidClient:
         except (urllib.error.URLError, TimeoutError, ValueError):
             return fallback
 
+    def all_mids(self) -> dict[str, float]:
+        payload = self.safe_post({"type": "allMids"}, {})
+        if not isinstance(payload, dict):
+            return {}
+        return {normalize_cmm_coin(coin).upper(): to_float(price) for coin, price in payload.items()}
+
     def _websocket_connect(self, url: str, timeout: float = 8.0) -> WebSocketConnection:
         parsed = urllib.parse.urlparse(url)
         host = parsed.hostname or ""
@@ -3154,6 +3160,30 @@ class WalletTrackerService:
             enriched.append(rescored or signal)
         return enriched
 
+    def enrich_cmm_signals_with_market_prices(self, signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        missing_price_coins = {
+            normalize_cmm_coin(signal.get("coin")).upper()
+            for signal in signals
+            if isinstance(signal, dict) and to_float(signal.get("price")) <= 0
+        }
+        if not missing_price_coins:
+            return signals
+        mids = self.client.all_mids()
+        if not mids:
+            return signals
+        enriched: list[dict[str, Any]] = []
+        for signal in signals:
+            if not isinstance(signal, dict):
+                enriched.append(signal)
+                continue
+            coin = normalize_cmm_coin(signal.get("coin")).upper()
+            market_price = to_float(mids.get(coin))
+            if to_float(signal.get("price")) <= 0 and market_price > 0:
+                enriched.append({**signal, "price": round(market_price, 8), "priceSource": "market"})
+            else:
+                enriched.append(signal)
+        return enriched
+
     def build_cmm_signal_summary(
         self,
         *,
@@ -3200,6 +3230,7 @@ class WalletTrackerService:
             )
             if self.cmm_trend_enrichment_enabled():
                 all_heatmap_signals = self.enrich_cmm_signals_with_trends(all_heatmap_signals, timeframe)
+            all_heatmap_signals = self.enrich_cmm_signals_with_market_prices(all_heatmap_signals)
             signals = [
                 signal
                 for signal in all_heatmap_signals
@@ -3242,6 +3273,7 @@ class WalletTrackerService:
             if signal and to_float(signal.get("probabilityScore")) >= min_probability:
                 signals.append(signal)
 
+        signals = self.enrich_cmm_signals_with_market_prices(signals)
         signals.sort(
             key=lambda item: (
                 to_float(item.get("probabilityScore")),
@@ -3488,7 +3520,8 @@ class WalletTrackerService:
                     tracked_note = self.cmm_tracked_confirmation_note(item, wallet_summary)
                     price_note = ""
                     if to_float(item.get("price")) > 0:
-                        price_note = f', px ${format_price(to_float(item.get("price")))}'
+                        price_marker = "~" if item.get("priceSource") == "market" else ""
+                        price_note = f', px {price_marker}${format_price(to_float(item.get("price")))}'
                     lines.append(
                         f'{index}. {str(item.get("signalTier", "watch")).upper()} '
                         f'{str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]} '
@@ -3507,7 +3540,8 @@ class WalletTrackerService:
                 for item in below_threshold[:5]:
                     price_note = ""
                     if to_float(item.get("price")) > 0:
-                        price_note = f', px ${format_price(to_float(item.get("price")))}'
+                        price_marker = "~" if item.get("priceSource") == "market" else ""
+                        price_note = f', px {price_marker}${format_price(to_float(item.get("price")))}'
                     lines.append(
                         f'- {str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]} '
                         f'p{to_float(item.get("probabilityScore")):.0f}, '
