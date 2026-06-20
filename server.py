@@ -50,6 +50,7 @@ ACTIONABLE_SIGNAL_MIN_VALUE = 1_000_000
 CMM_SIGNAL_PROBABILITY_THRESHOLD = 70.0
 CMM_WATCH_PROBABILITY_THRESHOLD = 55.0
 CMM_ALERT_PROBABILITY_THRESHOLD = 80.0
+CMM_SIGNAL_MIN_TOTAL_VALUE = 500_000
 CMM_SIGNAL_DEFAULT_COINS: tuple[str, ...] = ()
 CMM_SIGNAL_FALLBACK_COINS = ("BTC", "ETH", "SOL", "HYPE")
 CMM_SIGNAL_DEFAULT_SEGMENTS = (8, 7, 9)
@@ -207,6 +208,14 @@ def normalize_position_coin(coin: Any) -> str:
         return "OIL" if suffix in {"BRENTOIL", "CL", "WTI", "OIL"} else suffix
     if separator and prefix in STOCK_POSITION_PREFIXES and suffix and suffix not in NON_STOCK_MARKET_SUFFIXES:
         return suffix
+    return label
+
+
+def normalize_cmm_coin(coin: Any) -> str:
+    label = normalize_position_coin(coin)
+    prefix, separator, suffix = label.partition(":")
+    if separator and suffix:
+        return normalize_position_coin(suffix)
     return label
 
 
@@ -2829,7 +2838,7 @@ class WalletTrackerService:
         weight = CMM_SIGNAL_SEGMENT_WEIGHTS.get(segment_id, 0.5)
         side = "long" if value_bias > 0 else "short" if value_bias < 0 else "mixed"
         return {
-            "coin": coin.upper(),
+            "coin": normalize_cmm_coin(coin).upper(),
             "segmentId": segment_id,
             "segment": CMM_SIGNAL_SEGMENT_LABELS.get(segment_id, f"Segment {segment_id}"),
             "side": side,
@@ -2868,7 +2877,7 @@ class WalletTrackerService:
         weight = CMM_SIGNAL_SEGMENT_WEIGHTS.get(segment_id, 0.5)
         side = "long" if value_bias > 0 else "short" if value_bias < 0 else "mixed"
         return {
-            "coin": coin.upper(),
+            "coin": normalize_cmm_coin(coin).upper(),
             "segmentId": segment_id,
             "segment": CMM_SIGNAL_SEGMENT_LABELS.get(segment_id, f"Segment {segment_id}"),
             "side": side,
@@ -2941,7 +2950,7 @@ class WalletTrackerService:
 
         return {
             "source": "coinmarketman",
-            "coin": coin.upper(),
+            "coin": normalize_cmm_coin(coin).upper(),
             "side": side,
             "action": signal_action_from_side(side),
             "probabilityScore": round(probability, 1),
@@ -2982,6 +2991,7 @@ class WalletTrackerService:
             diagnostics["smartComponents"] = 0
             diagnostics["contrarianComponents"] = 0
             diagnostics["scoredCandidates"] = 0
+            diagnostics["lowValueCandidates"] = 0
         signals: list[dict[str, Any]] = []
         for row in rows:
             if not isinstance(row, dict):
@@ -3009,6 +3019,10 @@ class WalletTrackerService:
             signal = self.score_cmm_components(coin, components, contrarian_components=contrarian_components)
             if signal and diagnostics is not None:
                 diagnostics["scoredCandidates"] += 1
+            if signal and to_float(signal.get("totalValue")) < CMM_SIGNAL_MIN_TOTAL_VALUE:
+                if diagnostics is not None:
+                    diagnostics["lowValueCandidates"] += 1
+                continue
             if signal and to_float(signal.get("probabilityScore")) >= min_probability:
                 signals.append(signal)
         return signals
@@ -3122,6 +3136,7 @@ class WalletTrackerService:
             "smartComponents": 0,
             "contrarianComponents": 0,
             "scoredCandidates": 0,
+            "lowValueCandidates": 0,
         }
 
         try:
@@ -3345,6 +3360,7 @@ class WalletTrackerService:
                 f"Watch/action/alert: {CMM_WATCH_PROBABILITY_THRESHOLD:.0f}/"
                 f"{CMM_SIGNAL_PROBABILITY_THRESHOLD:.0f}/{CMM_ALERT_PROBABILITY_THRESHOLD:.0f}"
             ),
+            f"Min value: {format_money_compact(CMM_SIGNAL_MIN_TOTAL_VALUE)}",
         ]
         if not summary.get("enabled"):
             lines.append(f'- Disabled: {summary.get("error", "missing API token")}')
@@ -3385,7 +3401,8 @@ class WalletTrackerService:
                     f'rows {int(to_float(diagnostics.get("heatmapRows")))}, '
                     f'smart {int(to_float(diagnostics.get("smartComponents")))}, '
                     f'contra {int(to_float(diagnostics.get("contrarianComponents")))}, '
-                    f'candidates {int(to_float(diagnostics.get("scoredCandidates")))}'
+                    f'candidates {int(to_float(diagnostics.get("scoredCandidates")))}, '
+                    f'low value {int(to_float(diagnostics.get("lowValueCandidates")))}'
                 )
         if summary.get("error") and summary.get("enabled"):
             lines.append(f'Partial error: {summary.get("error")}')

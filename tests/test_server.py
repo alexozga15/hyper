@@ -1117,6 +1117,72 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(summary["signals"][0]["coin"], "AAVE")
         self.assertEqual(summary["signals"][0]["side"], "long")
 
+    def test_build_cmm_signal_summary_filters_low_value_candidates(self) -> None:
+        class FakeCmmClient:
+            token = "token"
+
+            def positions_heatmap(self, *, opened_within: str) -> dict[str, Any]:
+                return {
+                    "data": [
+                        {
+                            "coin": "HYNA:ZEC",
+                            "segments": [
+                                {
+                                    "segmentId": 8,
+                                    "count": 10,
+                                    "countLong": 0,
+                                    "totalValue": 40_000,
+                                    "totalLongValue": 0,
+                                    "totalShortValue": 40_000,
+                                    "bias": 0,
+                                },
+                                {
+                                    "segmentId": 7,
+                                    "count": 8,
+                                    "countLong": 0,
+                                    "totalValue": 30_000,
+                                    "totalLongValue": 0,
+                                    "totalShortValue": 30_000,
+                                    "bias": 0,
+                                },
+                            ],
+                        },
+                        {
+                            "coin": "HYNA:XMR",
+                            "segments": [
+                                {
+                                    "segmentId": 8,
+                                    "count": 100,
+                                    "countLong": 90,
+                                    "totalValue": 700_000,
+                                    "totalLongValue": 650_000,
+                                    "totalShortValue": 50_000,
+                                    "bias": 0.9,
+                                },
+                                {
+                                    "segmentId": 7,
+                                    "count": 80,
+                                    "countLong": 70,
+                                    "totalValue": 600_000,
+                                    "totalLongValue": 550_000,
+                                    "totalShortValue": 50_000,
+                                    "bias": 0.875,
+                                },
+                            ],
+                        },
+                    ]
+                }
+
+            def position_metrics(self, coin: str, segment_id: int, **kwargs: Any) -> dict[str, Any]:
+                return {"metrics": []}
+
+        self.service.cmm_client = FakeCmmClient()
+
+        summary = self.service.build_cmm_signal_summary()
+
+        self.assertEqual(summary["diagnostics"]["lowValueCandidates"], 1)
+        self.assertEqual([item["coin"] for item in summary["signals"]], ["XMR"])
+
     def test_cmm_confirmation_filters_unconfirmed_wallet_alerts(self) -> None:
         summary = {
             "signals": [
