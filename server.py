@@ -59,6 +59,7 @@ CMM_CONTRARIAN_DEFAULT_SEGMENTS = (12, 13, 14, 15, 16)
 CMM_TREND_ENRICHMENT_ENABLED = False
 CMM_SIGNAL_TREND_LOOKBACK_HOURS = 4
 CMM_SIGNAL_MAX_TREND_COINS = 10
+CMM_SIGNAL_CACHE_TTL_MINUTES = 120
 CMM_SIGNAL_SEGMENT_LABELS = {
     7: "Leviathan",
     8: "Money Printer",
@@ -163,6 +164,16 @@ def env_flag(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
 
 
 def env_csv(name: str, default: tuple[str, ...]) -> list[str]:
@@ -2806,6 +2817,12 @@ class WalletTrackerService:
     def cmm_trend_enrichment_enabled(self) -> bool:
         return env_flag("CMM_TREND_ENRICHMENT", CMM_TREND_ENRICHMENT_ENABLED)
 
+    def cmm_max_trend_coins(self) -> int:
+        return max(0, env_int("CMM_SIGNAL_MAX_TREND_COINS", CMM_SIGNAL_MAX_TREND_COINS))
+
+    def cmm_cache_ttl_ms(self) -> int:
+        return max(0, env_int("CMM_SIGNAL_CACHE_TTL_MINUTES", CMM_SIGNAL_CACHE_TTL_MINUTES)) * 60_000
+
     def cmm_signal_tier(self, probability: float, total_value: float) -> str:
         if total_value < CMM_ACTIONABLE_MIN_TOTAL_VALUE:
             return "watch"
@@ -3099,7 +3116,7 @@ class WalletTrackerService:
         trend_targets = {
             str(item.get("coin")).upper()
             for item in sorted(signals, key=lambda signal: to_float(signal.get("probabilityScore")), reverse=True)[
-                :CMM_SIGNAL_MAX_TREND_COINS
+                : self.cmm_max_trend_coins()
             ]
         }
         for signal in signals:
@@ -3277,6 +3294,31 @@ class WalletTrackerService:
             "error": "; ".join(errors[:3]),
             "generatedAt": now_iso(),
         }
+
+    def cmm_summary_cache_fresh(self, summary: dict[str, Any]) -> bool:
+        ttl_ms = self.cmm_cache_ttl_ms()
+        if ttl_ms <= 0 or not isinstance(summary, dict) or not summary.get("enabled"):
+            return False
+        generated_ms = iso_to_ms(summary.get("generatedAt"))
+        if generated_ms <= 0:
+            return False
+        return current_time_ms() - generated_ms < ttl_ms
+
+    def build_cached_cmm_signal_summary(self, state: dict[str, Any] | None, *, force: bool = False) -> dict[str, Any]:
+        cached = state.get("cmmSignals", {}) if isinstance(state, dict) else {}
+        cached = cached if isinstance(cached, dict) else {}
+        if not force and self.cmm_summary_cache_fresh(cached):
+            return {**cached, "cacheHit": True, "checkedAt": now_iso()}
+
+        summary = self.build_cmm_signal_summary()
+        if summary.get("rateLimited") and cached.get("enabled") and cached.get("signals"):
+            return {
+                **cached,
+                "stale": True,
+                "staleReason": summary.get("error", "CMM API rate limited"),
+                "checkedAt": summary.get("generatedAt", now_iso()),
+            }
+        return summary
 
     def cmm_signal_key(self, signal: dict[str, Any]) -> str:
         return f'cmm:{signal.get("coin", "Unknown")}:{signal.get("side", "")}'
@@ -3875,7 +3917,7 @@ class WalletTrackerService:
 
         dashboard = self.dashboard()
         summary, top_cohort = self.build_monthly_sentiment_summary(dashboard, min_wallets, state)
-        cmm_summary = self.build_cmm_signal_summary()
+        cmm_summary = self.build_cached_cmm_signal_summary(state)
         alert_summary = self.apply_cmm_confirmation_to_summary(
             summary,
             cmm_summary,
@@ -3999,7 +4041,7 @@ class WalletTrackerService:
         config = self.resolve_alert_config(stored_config)
         state = raw.get("state", {}) if isinstance(raw, dict) else {}
         summary, top_cohort = self.build_monthly_sentiment_summary(dashboard, min_wallets, state)
-        cmm_summary = self.build_cmm_signal_summary()
+        cmm_summary = self.build_cached_cmm_signal_summary(state)
         alert_summary = self.apply_cmm_confirmation_to_summary(
             summary,
             cmm_summary,

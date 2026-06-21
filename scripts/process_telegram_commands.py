@@ -232,26 +232,10 @@ def build_summary_cache(
     return service.build_sentiment_summary(dashboard["wallets"], min_wallets)
 
 
-def cached_cmm_summary(service: WalletTrackerService) -> dict[str, Any]:
+def build_cmm_cache(service: WalletTrackerService) -> dict[str, Any]:
     raw = load_json_file(service.alerts_path, {}) if hasattr(service, "alerts_path") else {}
     state = raw.get("state", {}) if isinstance(raw, dict) else {}
-    summary = state.get("cmmSignals", {}) if isinstance(state, dict) else {}
-    return summary if isinstance(summary, dict) else {}
-
-
-def build_cmm_cache(service: WalletTrackerService) -> dict[str, Any]:
-    summary = service.build_cmm_signal_summary()
-    if not summary.get("rateLimited"):
-        return summary
-    cached = cached_cmm_summary(service)
-    if cached.get("enabled") and cached.get("signals"):
-        return {
-            **cached,
-            "stale": True,
-            "staleReason": summary.get("error", "CMM API rate limited"),
-            "checkedAt": summary.get("generatedAt", ""),
-        }
-    return summary
+    return service.build_cached_cmm_signal_summary(state)
 
 
 def main() -> int:

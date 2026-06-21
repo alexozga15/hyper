@@ -13,6 +13,7 @@ from server import (
     build_wallet_quality_rank,
     classify_profitability,
     classify_wallet_size,
+    now_iso,
     normalize_address,
     parse_import_lines,
     side_from_size,
@@ -1033,6 +1034,76 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertGreaterEqual(summary["signals"][0]["probabilityScore"], 70)
         self.assertGreater(summary["signals"][0]["trendScore"], 0)
 
+    def test_cmm_trend_enrichment_limits_to_top_three(self) -> None:
+        class FakeCmmClient:
+            token = "token"
+
+            def __init__(self) -> None:
+                self.metric_calls: list[tuple[str, int]] = []
+
+            def positions_heatmap(self, *, opened_within: str) -> list[dict[str, Any]]:
+                return [
+                    {
+                        "coin": coin,
+                        "segments": [
+                            {
+                                "segmentId": 8,
+                                "count": 100,
+                                "countLong": 10,
+                                "totalValue": 10_000_000,
+                                "totalLongValue": 1_000_000,
+                                "totalShortValue": 9_000_000,
+                                "bias": 0.1,
+                            },
+                            {
+                                "segmentId": 7,
+                                "count": 80,
+                                "countLong": 8,
+                                "totalValue": 8_000_000,
+                                "totalLongValue": 800_000,
+                                "totalShortValue": 7_200_000,
+                                "bias": 0.1,
+                            },
+                        ],
+                    }
+                    for coin in ("BTC", "ETH", "SOL", "HYPE")
+                ]
+
+            def position_metrics(self, coin: str, segment_id: int, **kwargs: Any) -> dict[str, Any]:
+                self.metric_calls.append((coin, segment_id))
+                return {
+                    "metrics": [
+                        {
+                            "createdAt": "2026-06-16T00:00:00Z",
+                            "positionCount": 100,
+                            "positionCountLong": 20,
+                            "totalPositionValue": 10_000_000,
+                            "totalPositionValueLong": 2_000_000,
+                        },
+                        {
+                            "createdAt": "2026-06-16T01:00:00Z",
+                            "positionCount": 100,
+                            "positionCountLong": 10,
+                            "totalPositionValue": 10_000_000,
+                            "totalPositionValueLong": 1_000_000,
+                        },
+                    ]
+                }
+
+        fake_client = FakeCmmClient()
+        self.service.cmm_client = fake_client
+
+        with patch.dict(
+            "os.environ",
+            {"CMM_TREND_ENRICHMENT": "true", "CMM_SIGNAL_MAX_TREND_COINS": "3"},
+            clear=False,
+        ):
+            summary = self.service.build_cmm_signal_summary()
+
+        self.assertEqual(summary["signalCount"], 4)
+        self.assertEqual(len(fake_client.metric_calls), 6)
+        self.assertEqual(len({coin for coin, _segment in fake_client.metric_calls}), 3)
+
     def test_build_cmm_signal_summary_scans_all_heatmap_assets_by_default(self) -> None:
         class FakeCmmClient:
             token = "token"
@@ -1249,6 +1320,38 @@ class AlertSummaryTests(unittest.TestCase):
 
         self.assertEqual(summary["diagnostics"]["lowValueCandidates"], 1)
         self.assertEqual([item["coin"] for item in summary["signals"]], ["XMR"])
+
+    def test_build_cached_cmm_signal_summary_reuses_fresh_cache(self) -> None:
+        cached = {
+            "enabled": True,
+            "signals": [{"coin": "LINK", "side": "short"}],
+            "generatedAt": now_iso(),
+        }
+
+        with patch.object(self.service, "build_cmm_signal_summary") as live_summary:
+            summary = self.service.build_cached_cmm_signal_summary({"cmmSignals": cached})
+
+        live_summary.assert_not_called()
+        self.assertTrue(summary["cacheHit"])
+        self.assertEqual(summary["signals"], cached["signals"])
+
+    def test_build_cached_cmm_signal_summary_refreshes_expired_cache(self) -> None:
+        cached = {
+            "enabled": True,
+            "signals": [{"coin": "LINK", "side": "short"}],
+            "generatedAt": "2026-06-20T00:00:00Z",
+        }
+        live = {
+            "enabled": True,
+            "signals": [{"coin": "LTC", "side": "short"}],
+            "generatedAt": now_iso(),
+        }
+
+        with patch.object(self.service, "build_cmm_signal_summary", return_value=live) as live_summary:
+            summary = self.service.build_cached_cmm_signal_summary({"cmmSignals": cached})
+
+        live_summary.assert_called_once()
+        self.assertEqual(summary["signals"], live["signals"])
 
     def test_cmm_signal_tier_requires_actionable_value(self) -> None:
         self.assertEqual(self.service.cmm_signal_tier(79, 866_000), "watch")
