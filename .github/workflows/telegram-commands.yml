@@ -34,7 +34,7 @@ jobs:
           COINMARKETMAN_API_TOKEN_BACKUP: ${{ secrets.COINMARKETMAN_API_TOKEN_BACKUP }}
           CMM_TREND_ENRICHMENT: "true"
           CMM_SIGNAL_MAX_TREND_COINS: "3"
-          CMM_SIGNAL_CACHE_TTL_MINUTES: "120"
+          CMM_SIGNAL_CACHE_TTL_MINUTES: "60"
           MIN_CONSENSUS_WALLETS: "4"
           TELEGRAM_POLLING_BACKUP: "true"
         run: python3 scripts/process_telegram_commands.py
