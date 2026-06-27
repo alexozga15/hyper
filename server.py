@@ -87,11 +87,13 @@ CLUSTERED_OPEN_ALERT_MIN_WALLETS = 3
 OPEN_POSITION_ALERT_WINDOW_MS = 5 * 60 * 1000
 CLUSTERED_OPEN_ALERT_WINDOW_MS = OPEN_POSITION_ALERT_WINDOW_MS
 COUNTED_POSITION_MAX_UNREALIZED_LOSS = -1_000_000
-COUNTED_POSITION_MIN_TREND_PROFIT = 1_000_000
 RECENT_ADD_POSITION_MIN_PCT = 0.20
 RECENT_FILL_ALERT_LIMIT = 100
 CONSENSUS_SIZE_ALERT_MIN_DELTA = 2
 CONSENSUS_SIZE_ALERT_MIN_PCT = 0.5
+POSITION_NEAR_ENTRY_MAJOR_PCT = 0.12
+POSITION_NEAR_ENTRY_ALT_PCT = 0.20
+POSITION_NEAR_ENTRY_STOCK_COMMODITY_PCT = 0.10
 LORACLE_WALLET_ADDRESS = "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae"
 EXCLUDED_COUNTED_POSITIONS = {
     (LORACLE_WALLET_ADDRESS, "HYPE"),
@@ -1596,6 +1598,46 @@ class WalletTrackerService:
             return True
         return False
 
+    def position_near_entry_threshold(self, coin: Any) -> float:
+        normalized = normalize_position_coin(coin).upper()
+        if is_stock_like_position(normalized) or is_commodity_like_position(normalized):
+            return POSITION_NEAR_ENTRY_STOCK_COMMODITY_PCT
+        if normalized in {"BTC", "ETH", "SOL", "BNB", "HYPE"}:
+            return POSITION_NEAR_ENTRY_MAJOR_PCT
+        return POSITION_NEAR_ENTRY_ALT_PCT
+
+    def position_entry_distance_pct(self, side: Any, current_price: float, entry_price: float) -> float:
+        if current_price <= 0 or entry_price <= 0:
+            return 0.0
+        raw_distance = (current_price - entry_price) / entry_price
+        return -raw_distance if str(side or "").lower() == "short" else raw_distance
+
+    def position_status_label(
+        self,
+        *,
+        coin: Any,
+        side: Any,
+        current_price: float,
+        entry_price: float,
+        recent_add_count: int = 0,
+        fresh_activity_count: int = 0,
+        stale_count: int = 0,
+        wallet_count: int = 0,
+    ) -> str:
+        if fresh_activity_count > 0:
+            return "fresh add"
+        if recent_add_count > 0:
+            return "recent add"
+        if current_price > 0 and entry_price > 0:
+            distance = self.position_entry_distance_pct(side, current_price, entry_price)
+            threshold = self.position_near_entry_threshold(coin)
+            if abs(distance) <= threshold:
+                return "near entry"
+            return "extended" if distance > 0 else "underwater"
+        if wallet_count > 0 and stale_count >= wallet_count:
+            return "stale"
+        return "active"
+
     def signal_probability_score(self, item: dict[str, Any]) -> float:
         conviction = max(0.0, min(to_float(item.get("convictionScore")), 100.0))
         qnet = max(0.0, to_float(item.get("netWeightedWalletCount")))
@@ -1636,6 +1678,8 @@ class WalletTrackerService:
             reasons.append("weak_qnet")
         if to_float(item.get("totalValue")) < ACTIONABLE_SIGNAL_MIN_VALUE:
             reasons.append("small_value")
+        if int(to_float(item.get("recentAddWalletCount"))) + int(to_float(item.get("freshActivityWalletCount"))) <= 0:
+            reasons.append("no_recent_activity")
         if probability < ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD:
             reasons.append("low_probability")
         return reasons
@@ -1698,8 +1742,6 @@ class WalletTrackerService:
 
     def is_active_for_conviction(self, wallet: dict[str, Any], position: dict[str, Any], *, now_ms: int) -> bool:
         if not wallet.get("holdingOnly30d"):
-            return True
-        if to_float(position.get("unrealizedPnl")) >= COUNTED_POSITION_MIN_TREND_PROFIT:
             return True
         return self.has_recent_position_fill(
             wallet,
@@ -2723,6 +2765,7 @@ class WalletTrackerService:
         commodity_like_only: bool | None = None,
     ) -> list[dict[str, Any]]:
         groups: dict[tuple[str, str], dict[str, Any]] = {}
+        now_ms = current_time_ms()
 
         for wallet in dashboard.get("wallets", []):
             address = str(wallet.get("address") or "")
@@ -2764,6 +2807,9 @@ class WalletTrackerService:
                         "entrySum": 0.0,
                         "entryCount": 0,
                         "walletAddresses": set(),
+                        "recentAddWalletAddresses": set(),
+                        "freshActivityWalletAddresses": set(),
+                        "staleWalletAddresses": set(),
                     },
                 )
                 size = abs(to_float(position.get("size")))
@@ -2778,30 +2824,77 @@ class WalletTrackerService:
                     if entry_px > 0:
                         bucket["entrySum"] += entry_px
                         bucket["entryCount"] += 1
+                    if self.has_recent_position_fill(
+                        wallet,
+                        position,
+                        now_ms=now_ms,
+                        event="add",
+                        window_ms=RANKING_WINDOW_MS,
+                    ):
+                        bucket["recentAddWalletAddresses"].add(address)
+                    if self.has_recent_position_fill(
+                        wallet,
+                        position,
+                        now_ms=now_ms,
+                        event="add",
+                        window_ms=CLUSTERED_OPEN_ALERT_WINDOW_MS,
+                    ):
+                        bucket["freshActivityWalletAddresses"].add(address)
+                    if not self.is_active_for_conviction(wallet, position, now_ms=now_ms):
+                        bucket["staleWalletAddresses"].add(address)
 
-        return sorted(
-            [
+        rows = []
+        for item in groups.values():
+            if item["walletCount"] < min_wallets or item["totalValue"] < min_value:
+                continue
+            total_size = to_float(item["totalSize"])
+            entry_count = int(to_float(item["entryCount"]))
+            entry_px = (
+                round(to_float(item["entryValue"]) / total_size, 8)
+                if total_size > 0
+                else round(to_float(item["entrySum"]) / entry_count, 8)
+                if entry_count > 0
+                else 0.0
+            )
+            current_px = round(to_float(item["totalValue"]) / total_size, 8) if total_size > 0 else 0.0
+            entry_distance = self.position_entry_distance_pct(item["side"], current_px, entry_px)
+            recent_add_count = len(item["recentAddWalletAddresses"])
+            fresh_activity_count = len(item["freshActivityWalletAddresses"])
+            stale_count = len(item["staleWalletAddresses"])
+            rows.append(
                 {
                     "coin": item["coin"],
                     "side": item["side"],
                     "walletCount": item["walletCount"],
                     "positionCount": item["positionCount"],
                     "totalValue": round(item["totalValue"], 2),
-                    "totalSize": round(item["totalSize"], 8),
-                    "entryPx": round(item["entryValue"] / item["totalSize"], 8)
-                    if item["totalSize"] > 0
-                    else round(item["entrySum"] / item["entryCount"], 8)
-                    if item["entryCount"] > 0
-                    else 0.0,
+                    "totalSize": round(total_size, 8),
+                    "entryPx": entry_px,
+                    "currentPx": current_px,
+                    "entryDistancePct": round(entry_distance * 100, 1) if entry_px > 0 and current_px > 0 else 0.0,
+                    "status": self.position_status_label(
+                        coin=item["coin"],
+                        side=item["side"],
+                        current_price=current_px,
+                        entry_price=entry_px,
+                        recent_add_count=recent_add_count,
+                        fresh_activity_count=fresh_activity_count,
+                        stale_count=stale_count,
+                        wallet_count=int(to_float(item["walletCount"])),
+                    ),
+                    "recentAddWalletCount": recent_add_count,
+                    "freshActivityWalletCount": fresh_activity_count,
+                    "staleWalletCount": stale_count,
                     "entryType": "size_weighted"
-                    if item["totalSize"] > 0
+                    if total_size > 0
                     else "simple_average"
-                    if item["entryCount"] > 0
+                    if entry_count > 0
                     else "",
                 }
-                for item in groups.values()
-                if item["walletCount"] >= min_wallets and item["totalValue"] >= min_value
-            ],
+            )
+
+        return sorted(
+            rows,
             key=lambda item: (-item["walletCount"], item["coin"], item["side"]),
         )
 
@@ -3656,9 +3749,17 @@ class WalletTrackerService:
                             entry_label = "size-w entry" if item.get("entryType") == "size_weighted" else "avg entry"
                             entry_note = f', {entry_label} ${format_price(to_float(item.get("entryPx")))}'
                         value_note = f', {format_money_thousands(to_float(item.get("totalValue")))}'
+                        status_bits = []
+                        entry_distance = to_float(item.get("entryDistancePct"))
+                        if entry_distance:
+                            status_bits.append(f"dist {entry_distance:+.1f}%")
+                        status = str(item.get("status") or "")
+                        if status and status != "active":
+                            status_bits.append(status)
+                        status_note = f', {", ".join(status_bits)}' if status_bits else ""
                         lines.append(
                             f'- {item["coin"]} {item["side"]} '
-                            f'({item["walletCount"]} wallets, {item["positionCount"]} positions{value_note}{entry_note})'
+                            f'({item["walletCount"]} wallets, {item["positionCount"]} positions{value_note}{entry_note}{status_note})'
                         )
                 else:
                     lines.append("- None")

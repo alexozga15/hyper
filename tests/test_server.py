@@ -409,12 +409,22 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertGreater(summary["consensus"][0]["convictionScore"], summary["consensus"][1]["convictionScore"])
 
     def test_build_sentiment_summary_uses_net_wallet_conviction(self) -> None:
+        now_ms = 1_700_000_000_000
         snapshots = [
             {
                 "address": "0x1111111111111111111111111111111111111111",
                 "positions": [
                     {"coin": "BTC", "side": "Long", "positionValue": 1_000_000.0},
                     {"coin": "BNB", "side": "Short", "positionValue": 1_000_000.0},
+                ],
+                "recentFills": [
+                    {
+                        "coin": "BNB",
+                        "direction": "Increase Short",
+                        "price": 700.0,
+                        "size": 715.0,
+                        "time": now_ms - 60_000,
+                    }
                 ],
             },
             {
@@ -452,7 +462,8 @@ class AlertSummaryTests(unittest.TestCase):
             },
         ]
 
-        summary = self.service.build_sentiment_summary(snapshots, min_wallets=3)
+        with patch("server.current_time_ms", return_value=now_ms):
+            summary = self.service.build_sentiment_summary(snapshots, min_wallets=3)
         consensus_by_key = {f'{item["coin"]}:{item["side"]}': item for item in summary["consensus"]}
 
         self.assertEqual(consensus_by_key["BTC:long"]["netWalletCount"], 0)
@@ -789,7 +800,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertNotIn("SOL:long", consensus_keys)
         self.assertIn("BNB:long", consensus_keys)
         self.assertIn("HYPE:long", consensus_keys)
-        self.assertIn("PAXG:long", consensus_keys)
+        self.assertNotIn("PAXG:long", consensus_keys)
         self.assertIn("TON:long", consensus_keys)
 
     def test_stale_positions_remain_visible_in_position_groups(self) -> None:
@@ -819,11 +830,21 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("BTC long (3 wallets, 3 positions, $2,400K", message)
 
     def test_build_sentiment_summary_emits_high_conviction_signals(self) -> None:
+        now_ms = 1_700_000_000_000
         snapshots = [
             {
                 "address": "0x1111111111111111111111111111111111111111",
                 "alias": "One",
                 "positions": [{"coin": "BTC", "side": "Long", "positionValue": 500000}],
+                "recentFills": [
+                    {
+                        "coin": "BTC",
+                        "direction": "Increase Long",
+                        "price": 50_000.0,
+                        "size": 10.0,
+                        "time": now_ms - 60_000,
+                    }
+                ],
             },
             {
                 "address": "0x2222222222222222222222222222222222222222",
@@ -852,14 +873,42 @@ class AlertSummaryTests(unittest.TestCase):
             },
         ]
 
-        summary = self.service.build_sentiment_summary(snapshots, min_wallets=2)
+        with patch("server.current_time_ms", return_value=now_ms):
+            summary = self.service.build_sentiment_summary(snapshots, min_wallets=2)
 
         self.assertEqual(summary["signalCount"], 1)
         self.assertEqual(summary["signals"][0]["coin"], "BTC")
         self.assertEqual(summary["signals"][0]["action"], "buy")
-        self.assertEqual(summary["signals"][0]["strength"], "high")
+        self.assertEqual(summary["signals"][0]["strength"], "extreme")
         self.assertEqual(summary["signals"][0]["convictionScore"], 100.0)
         self.assertGreaterEqual(summary["signals"][0]["probabilityScore"], 70.0)
+
+    def test_build_sentiment_summary_requires_recent_activity_for_signals(self) -> None:
+        snapshots = [
+            {
+                "address": "0x1111111111111111111111111111111111111111",
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000.0}],
+            },
+            {
+                "address": "0x2222222222222222222222222222222222222222",
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000.0}],
+            },
+            {
+                "address": "0x3333333333333333333333333333333333333333",
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000.0}],
+            },
+            {
+                "address": "0x4444444444444444444444444444444444444444",
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000.0}],
+            },
+        ]
+
+        summary = self.service.build_sentiment_summary(snapshots, min_wallets=4)
+
+        self.assertEqual(summary["consensus"][0]["coin"], "BTC")
+        self.assertEqual(summary["signals"], [])
+        probability = self.service.signal_probability_score(summary["consensus"][0])
+        self.assertIn("no_recent_activity", self.service.signal_rejection_reasons(summary["consensus"][0], probability))
 
     def test_summarize_changes_detects_signal_changes(self) -> None:
         previous = {
@@ -1781,7 +1830,10 @@ class AlertSummaryTests(unittest.TestCase):
         message = self.service.build_positions_message(dashboard)
         self.assertIn("Open positions now", message)
         self.assertIn("By wallet count (3+ wallets, $1.0M+):", message)
-        self.assertIn("BTC long (3 wallets, 3 positions, $1,350K, size-w entry $78,000)", message)
+        self.assertIn(
+            "BTC long (3 wallets, 3 positions, $1,350K, size-w entry $78,000, dist +92.3%, extended)",
+            message,
+        )
         self.assertNotIn("ETH short", message)
         self.assertIn("Position groups: 1", message)
 
