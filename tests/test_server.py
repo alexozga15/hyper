@@ -1830,10 +1830,7 @@ class AlertSummaryTests(unittest.TestCase):
         message = self.service.build_positions_message(dashboard)
         self.assertIn("Open positions now", message)
         self.assertIn("By wallet count (3+ wallets, $1.0M+):", message)
-        self.assertIn(
-            "BTC long (3 wallets, 3 positions, $1,350K, size-w entry $78,000, dist +92.3%, extended)",
-            message,
-        )
+        self.assertIn("BTC long (3 wallets, 3 positions, $1,350K, size-w entry $78,000)", message)
         self.assertNotIn("ETH short", message)
         self.assertIn("Position groups: 1", message)
 
