@@ -56,9 +56,9 @@ CMM_SIGNAL_DEFAULT_COINS: tuple[str, ...] = ()
 CMM_SIGNAL_FALLBACK_COINS = ("BTC", "ETH", "SOL", "HYPE")
 CMM_SIGNAL_DEFAULT_SEGMENTS = (8, 7, 9)
 CMM_CONTRARIAN_DEFAULT_SEGMENTS = (12, 13, 14, 15, 16)
-CMM_TREND_ENRICHMENT_ENABLED = False
-CMM_SIGNAL_TREND_LOOKBACK_HOURS = 4
-CMM_SIGNAL_MAX_TREND_COINS = 10
+CMM_TREND_ENRICHMENT_ENABLED = True
+CMM_SIGNAL_TREND_LOOKBACK_HOURS = 1
+CMM_SIGNAL_MAX_TREND_COINS = 3
 CMM_SIGNAL_CACHE_TTL_MINUTES = 60
 CMM_SIGNAL_SEGMENT_LABELS = {
     7: "Leviathan",
@@ -91,6 +91,10 @@ RECENT_ADD_POSITION_MIN_PCT = 0.20
 RECENT_FILL_ALERT_LIMIT = 100
 CONSENSUS_SIZE_ALERT_MIN_DELTA = 2
 CONSENSUS_SIZE_ALERT_MIN_PCT = 0.5
+HYPERLIQUID_DASHBOARD_WORKERS = 3
+HYPERLIQUID_SNAPSHOT_WORKERS = 3
+HYPERLIQUID_API_RETRY_ATTEMPTS = 3
+HYPERLIQUID_API_RETRY_DELAY_SECONDS = 0.25
 LORACLE_WALLET_ADDRESS = "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae"
 EXCLUDED_COUNTED_POSITIONS = {
     (LORACLE_WALLET_ADDRESS, "HYPE"),
@@ -673,6 +677,26 @@ class HyperliquidClient:
         except (urllib.error.URLError, TimeoutError, ValueError):
             return fallback
 
+    def safe_post_result(
+        self,
+        payload: dict[str, Any],
+        fallback: Any,
+        *,
+        attempts: int = HYPERLIQUID_API_RETRY_ATTEMPTS,
+        retry_delay: float = HYPERLIQUID_API_RETRY_DELAY_SECONDS,
+    ) -> dict[str, Any]:
+        last_error = ""
+        for attempt in range(max(1, attempts)):
+            try:
+                return {"ok": True, "data": self.post(payload), "error": ""}
+            except urllib.error.HTTPError as exc:
+                last_error = f"HTTP {exc.code}: {exc.reason}"
+            except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+                last_error = str(exc)
+            if attempt < max(1, attempts) - 1 and retry_delay > 0:
+                time.sleep(retry_delay * (attempt + 1))
+        return {"ok": False, "data": fallback, "error": last_error or "request failed"}
+
     def _websocket_connect(self, url: str, timeout: float = 8.0) -> WebSocketConnection:
         parsed = urllib.parse.urlparse(url)
         host = parsed.hostname or ""
@@ -964,6 +988,37 @@ class WalletTrackerService:
                 normalized[item[0]] = item[1]
         return normalized
 
+    def fetch_portfolio_result(self, address: str) -> dict[str, Any]:
+        result = self.client.safe_post_result({"type": "portfolio", "user": address}, [])
+        portfolio = result.get("data") if result.get("ok") else []
+        normalized: dict[str, Any] = {}
+        ok = bool(result.get("ok")) and isinstance(portfolio, list)
+        if isinstance(portfolio, list):
+            for item in portfolio:
+                if isinstance(item, list) and len(item) == 2 and isinstance(item[0], str) and isinstance(item[1], dict):
+                    normalized[item[0]] = item[1]
+        return {"ok": ok, "data": normalized, "error": result.get("error", "")}
+
+    def fetch_open_orders_result(self, address: str) -> dict[str, Any]:
+        result = self.client.safe_post_result({"type": "openOrders", "user": address}, [])
+        orders = result.get("data") if result.get("ok") else []
+        ok = bool(result.get("ok")) and isinstance(orders, list)
+        return {"ok": ok, "data": orders if isinstance(orders, list) else [], "error": result.get("error", "")}
+
+    def fetch_fills_result(self, address: str, start_time: int) -> dict[str, Any]:
+        result = self.client.safe_post_result(
+            {
+                "type": "userFillsByTime",
+                "user": address,
+                "startTime": start_time,
+                "aggregateByTime": True,
+            },
+            [],
+        )
+        fills = result.get("data") if result.get("ok") else []
+        ok = bool(result.get("ok")) and isinstance(fills, list)
+        return {"ok": ok, "data": fills if isinstance(fills, list) else [], "error": result.get("error", "")}
+
     def build_performance(self, portfolio: dict[str, Any]) -> dict[str, Any]:
         periods = {}
         for period_name in ("day", "week", "month", "allTime"):
@@ -982,7 +1037,7 @@ class WalletTrackerService:
         now_ms = current_time_ms()
         cutoff_7d_ms = now_ms - RANKING_WINDOW_MS
         cutoff_30d_ms = now_ms - HOLDING_ONLY_WINDOW_MS
-        with ThreadPoolExecutor(max_workers=5) as executor:
+        with ThreadPoolExecutor(max_workers=HYPERLIQUID_SNAPSHOT_WORKERS) as executor:
             futures = {
                 "state": executor.submit(
                     self.client.safe_subscribe_all_dexs_clearinghouse_state,
@@ -996,26 +1051,23 @@ class WalletTrackerService:
                         "time": None,
                     },
                 ),
-                "orders": executor.submit(self.client.safe_post, {"type": "openOrders", "user": wallet.address}, []),
-                "fills": executor.submit(
-                    self.client.safe_post,
-                    {
-                        "type": "userFillsByTime",
-                        "user": wallet.address,
-                        "startTime": cutoff_30d_ms,
-                        "aggregateByTime": True,
-                    },
-                    [],
-                ),
+                "orders": executor.submit(self.fetch_open_orders_result, wallet.address),
+                "fills": executor.submit(self.fetch_fills_result, wallet.address, cutoff_30d_ms),
                 "role": executor.submit(self.fetch_wallet_role, wallet.address),
-                "portfolio": executor.submit(self.fetch_portfolio, wallet.address),
+                "portfolio": executor.submit(self.fetch_portfolio_result, wallet.address),
             }
 
         state = futures["state"].result()
-        open_orders = futures["orders"].result()
-        fills = futures["fills"].result()
+        orders_result = futures["orders"].result()
+        fills_result = futures["fills"].result()
         role = futures["role"].result()
-        portfolio = futures["portfolio"].result()
+        portfolio_result = futures["portfolio"].result()
+        open_orders = orders_result.get("data", []) if isinstance(orders_result, dict) else []
+        fills = fills_result.get("data", []) if isinstance(fills_result, dict) else []
+        portfolio = portfolio_result.get("data", {}) if isinstance(portfolio_result, dict) else {}
+        fills_ok = bool(isinstance(fills_result, dict) and fills_result.get("ok"))
+        portfolio_ok = bool(isinstance(portfolio_result, dict) and portfolio_result.get("ok"))
+        orders_ok = bool(isinstance(orders_result, dict) and orders_result.get("ok"))
 
         margin_summary = state.get("marginSummary", {})
         positions = []
@@ -1123,7 +1175,7 @@ class WalletTrackerService:
         margin_used = to_float(margin_summary.get("totalMarginUsed"))
         withdrawable = to_float(state.get("withdrawable"))
         margin_usage_pct = (margin_used / account_value) * 100 if account_value > 0 else 0.0
-        holding_only_30d = bool(positions) and fills_30d_count == 0 and len(open_orders) == 0
+        holding_only_30d = bool(positions) and fills_ok and fills_30d_count == 0 and len(open_orders) == 0
         days_since_last_fill = None
         if last_fill_time:
             days_since_last_fill = round(max(0, now_ms - last_fill_time) / (24 * 60 * 60 * 1000), 1)
@@ -1175,6 +1227,15 @@ class WalletTrackerService:
             "daysSinceLastFill": days_since_last_fill,
             "holdingOnly30d": holding_only_30d,
             "recentWinRateRank": recent_win_rate_rank,
+            "dataQuality": {
+                "fillsOk": fills_ok,
+                "portfolioOk": portfolio_ok,
+                "ordersOk": orders_ok,
+                "fillsError": fills_result.get("error", "") if isinstance(fills_result, dict) else "",
+                "portfolioError": portfolio_result.get("error", "") if isinstance(portfolio_result, dict) else "",
+                "ordersError": orders_result.get("error", "") if isinstance(orders_result, dict) else "",
+                "fillsDegraded": False,
+            },
             "openOrderCount": len(open_orders),
             "positions": positions,
             "positionCount": len(positions),
@@ -1222,8 +1283,21 @@ class WalletTrackerService:
 
     def dashboard(self) -> dict[str, Any]:
         wallets = self.store.list_wallets()
-        with ThreadPoolExecutor(max_workers=min(max(len(wallets), 1), 8)) as executor:
+        with ThreadPoolExecutor(max_workers=min(max(len(wallets), 1), HYPERLIQUID_DASHBOARD_WORKERS)) as executor:
             snapshots = list(executor.map(self.fetch_wallet_snapshot, wallets)) if wallets else []
+        fill_ok_count = sum(1 for item in snapshots if item.get("dataQuality", {}).get("fillsOk"))
+        wallets_with_recent_fills = sum(1 for item in snapshots if item.get("recentFills"))
+        total_recent_fills = sum(len(item.get("recentFills", [])) for item in snapshots)
+        total_positions = sum(len(item.get("positions", [])) for item in snapshots)
+        fills_globally_degraded = (
+            len(snapshots) >= 5
+            and total_positions > 0
+            and total_recent_fills == 0
+        )
+        if fills_globally_degraded:
+            for item in snapshots:
+                item["holdingOnly30d"] = False
+                item.setdefault("dataQuality", {})["fillsDegraded"] = True
         snapshots.sort(key=lambda item: item["accountValue"], reverse=True)
 
         totals = {
@@ -1236,6 +1310,12 @@ class WalletTrackerService:
             "bearishWallets": sum(1 for item in snapshots if item["exposure"]["net"] < 0),
             "moneyPrinterWallets": sum(1 for item in snapshots if item["cohorts"]["profitability"] == "Money Printer"),
             "holdingOnly30dWallets": sum(1 for item in snapshots if item.get("holdingOnly30d")),
+            "dataQuality": {
+                "fillsOkWallets": fill_ok_count,
+                "walletsWithRecentFills": wallets_with_recent_fills,
+                "totalRecentFills": total_recent_fills,
+                "fillsGloballyDegraded": fills_globally_degraded,
+            },
         }
 
         segment_map: dict[str, dict[str, Any]] = {}
@@ -1553,6 +1633,23 @@ class WalletTrackerService:
         multiplier = TOP_CONVICTION_WALLET_MULTIPLIER if address in top_wallet_addresses else NON_TOP_CONVICTION_WALLET_MULTIPLIER
         return round(base_weight * multiplier, 3)
 
+    def wallet_fill_data_reliable(self, wallet: dict[str, Any]) -> bool:
+        quality = wallet.get("dataQuality")
+        if not isinstance(quality, dict):
+            return True
+        return bool(quality.get("fillsOk", True)) and not bool(quality.get("fillsDegraded"))
+
+    def should_count_wallet_for_conviction(self, wallet: dict[str, Any]) -> bool:
+        if not self.wallet_fill_data_reliable(wallet):
+            return True
+        if wallet.get("recentFills"):
+            return True
+        has_positions = bool(wallet.get("positions"))
+        no_activity = int(to_float(wallet.get("fills30d"))) == 0 and int(to_float(wallet.get("closedTrades30d"))) == 0
+        if has_positions and wallet.get("holdingOnly30d") and no_activity:
+            return False
+        return True
+
     def has_recent_position_fill(
         self,
         wallet: dict[str, Any],
@@ -1635,7 +1732,10 @@ class WalletTrackerService:
             reasons.append("weak_qnet")
         if to_float(item.get("totalValue")) < ACTIONABLE_SIGNAL_MIN_VALUE:
             reasons.append("small_value")
-        if int(to_float(item.get("recentAddWalletCount"))) + int(to_float(item.get("freshActivityWalletCount"))) <= 0:
+        if (
+            int(to_float(item.get("recentAddWalletCount"))) + int(to_float(item.get("freshActivityWalletCount"))) <= 0
+            and int(to_float(item.get("fillQualityUnknownWalletCount"))) <= 0
+        ):
             reasons.append("no_recent_activity")
         if probability < ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD:
             reasons.append("low_probability")
@@ -1671,6 +1771,7 @@ class WalletTrackerService:
                     "netWeightedWalletCount": round(to_float(item.get("netWeightedWalletCount")), 3),
                     "recentAddWalletCount": int(to_float(item.get("recentAddWalletCount"))),
                     "freshActivityWalletCount": int(to_float(item.get("freshActivityWalletCount"))),
+                    "fillQualityUnknownWalletCount": int(to_float(item.get("fillQualityUnknownWalletCount"))),
                     "topWalletCount": int(to_float(item.get("topWalletCount"))),
                     "totalValue": round(to_float(item.get("totalValue")), 2),
                     "convictionScore": round(conviction_score, 1),
@@ -1698,6 +1799,8 @@ class WalletTrackerService:
         )
 
     def is_active_for_conviction(self, wallet: dict[str, Any], position: dict[str, Any], *, now_ms: int) -> bool:
+        if not self.wallet_fill_data_reliable(wallet):
+            return True
         if not wallet.get("holdingOnly30d"):
             return True
         return self.has_recent_position_fill(
@@ -1726,6 +1829,8 @@ class WalletTrackerService:
         )
 
         for snapshot in snapshots:
+            if not self.should_count_wallet_for_conviction(snapshot):
+                continue
             address = str(snapshot.get("address") or "")
             wallet_weight = self.wallet_conviction_weight(snapshot, active_top_wallet_addresses)
             for position in snapshot.get("positions", []):
@@ -1753,6 +1858,7 @@ class WalletTrackerService:
                         "recentAddWalletAddresses": set(),
                         "freshActivityWalletAddresses": set(),
                         "topWalletAddresses": set(),
+                        "fillQualityUnknownWalletAddresses": set(),
                     },
                 )
                 bucket["totalValue"] += position_value
@@ -1762,6 +1868,8 @@ class WalletTrackerService:
                     bucket["weightedWalletCount"] += wallet_weight
                     if address.lower() in active_top_wallet_addresses:
                         bucket["topWalletAddresses"].add(address)
+                    if not self.wallet_fill_data_reliable(snapshot):
+                        bucket["fillQualityUnknownWalletAddresses"].add(address)
                     if self.has_recent_position_fill(
                         snapshot,
                         position,
@@ -1805,6 +1913,7 @@ class WalletTrackerService:
                 "recentAddWalletCount": len(bucket["recentAddWalletAddresses"]),
                 "freshActivityWalletCount": len(bucket["freshActivityWalletAddresses"]),
                 "topWalletCount": len(bucket["topWalletAddresses"]),
+                "fillQualityUnknownWalletCount": len(bucket["fillQualityUnknownWalletAddresses"]),
                 "totalValue": round(bucket["totalValue"], 2),
                 "wallets": sorted(bucket["wallets"], key=lambda item: item["value"], reverse=True),
             }

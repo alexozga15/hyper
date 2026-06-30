@@ -8,6 +8,7 @@ from server import (
     ALERTS_FILE,
     ELITE_WALLET_OVERRIDES,
     HyperliquidClient,
+    TrackedWallet,
     WalletStore,
     WalletTrackerService,
     build_wallet_quality_rank,
@@ -910,6 +911,86 @@ class AlertSummaryTests(unittest.TestCase):
         probability = self.service.signal_probability_score(summary["consensus"][0])
         self.assertIn("no_recent_activity", self.service.signal_rejection_reasons(summary["consensus"][0], probability))
 
+    def test_unreliable_fill_data_does_not_trigger_no_recent_activity_rejection(self) -> None:
+        item = {
+            "walletCount": 4,
+            "netWalletCount": 4,
+            "netWeightedWalletCount": 4.0,
+            "totalValue": 4_000_000,
+            "recentAddWalletCount": 0,
+            "freshActivityWalletCount": 0,
+            "fillQualityUnknownWalletCount": 4,
+        }
+
+        self.assertNotIn("no_recent_activity", self.service.signal_rejection_reasons(item, 80.0))
+
+    def test_reliable_inactive_holders_are_excluded_from_conviction(self) -> None:
+        snapshots = [
+            {
+                "address": f"0x{index:040x}",
+                "holdingOnly30d": True,
+                "fills30d": 0,
+                "closedTrades30d": 0,
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000.0}],
+                "recentFills": [],
+                "dataQuality": {"fillsOk": True, "fillsDegraded": False},
+            }
+            for index in range(1, 5)
+        ]
+
+        summary = self.service.build_sentiment_summary(snapshots, min_wallets=1)
+
+        self.assertEqual(summary["consensus"], [])
+
+    def test_unreliable_fill_data_keeps_positions_in_conviction(self) -> None:
+        snapshots = [
+            {
+                "address": f"0x{index:040x}",
+                "holdingOnly30d": True,
+                "fills30d": 0,
+                "closedTrades30d": 0,
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000.0}],
+                "recentFills": [],
+                "dataQuality": {"fillsOk": False, "fillsDegraded": False},
+            }
+            for index in range(1, 5)
+        ]
+
+        summary = self.service.build_sentiment_summary(snapshots, min_wallets=4)
+
+        self.assertEqual(summary["consensus"][0]["coin"], "BTC")
+        self.assertEqual(summary["consensus"][0]["fillQualityUnknownWalletCount"], 4)
+
+    def test_dashboard_marks_globally_empty_fills_as_degraded(self) -> None:
+        snapshots = [
+            {
+                "address": f"0x{index:040x}",
+                "accountValue": 1_000_000.0,
+                "totalNotional": 1_000_000.0,
+                "unrealizedPnl": 0.0,
+                "realizedPnl": 0.0,
+                "holdingOnly30d": True,
+                "recentFills": [],
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000.0}],
+                "exposure": {"long": 1_000_000.0, "short": 0.0, "net": 1_000_000.0},
+                "cohorts": {"walletSize": "Whale", "profitability": "Profitable"},
+                "dataQuality": {"fillsOk": True, "fillsDegraded": False},
+            }
+            for index in range(1, 6)
+        ]
+
+        wallets = [
+            TrackedWallet(address=f"0x{index:040x}", alias="", notes="", created_at="")
+            for index in range(1, len(snapshots) + 1)
+        ]
+        with patch.object(self.service.store, "list_wallets", return_value=wallets):
+            with patch.object(self.service, "fetch_wallet_snapshot", side_effect=snapshots):
+                dashboard = self.service.dashboard()
+
+        self.assertTrue(dashboard["totals"]["dataQuality"]["fillsGloballyDegraded"])
+        self.assertEqual(dashboard["totals"]["holdingOnly30dWallets"], 0)
+        self.assertTrue(all(wallet["dataQuality"]["fillsDegraded"] for wallet in dashboard["wallets"]))
+
     def test_summarize_changes_detects_signal_changes(self) -> None:
         previous = {
             "overallBias": "mixed",
@@ -1243,7 +1324,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(summary["signals"][0]["side"], "long")
         self.assertEqual(summary["signals"][0]["price"], 100)
 
-    def test_build_cmm_signal_summary_does_not_call_trends_by_default(self) -> None:
+    def test_build_cmm_signal_summary_can_disable_trends_with_env(self) -> None:
         class FakeCmmClient:
             token = "token"
 
@@ -1281,7 +1362,8 @@ class AlertSummaryTests(unittest.TestCase):
 
         self.service.cmm_client = FakeCmmClient()
 
-        summary = self.service.build_cmm_signal_summary()
+        with patch.dict("os.environ", {"CMM_TREND_ENRICHMENT": "false"}, clear=False):
+            summary = self.service.build_cmm_signal_summary()
 
         self.assertEqual(summary["signals"][0]["coin"], "AAVE")
         self.assertEqual(summary["signals"][0]["trendScore"], 0)
