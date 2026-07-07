@@ -2320,6 +2320,20 @@ class WalletTrackerService:
             if isinstance(item, dict) and should_count_position(item.get("address"), item.get("coin"))
         }
 
+    def filter_positions_to_tracked_wallets(
+        self,
+        positions: dict[str, Any],
+        tracked_addresses: set[str],
+    ) -> dict[str, Any]:
+        position_map = positions if isinstance(positions, dict) else {}
+        if not tracked_addresses:
+            return {}
+        return {
+            key: item
+            for key, item in position_map.items()
+            if isinstance(item, dict) and str(item.get("address") or "").lower() in tracked_addresses
+        }
+
     def alert_bucket(self, value: Any) -> str:
         numeric = abs(to_float(value))
         if numeric == 0:
@@ -4043,6 +4057,12 @@ class WalletTrackerService:
         previous_positions = state.get("largePositions", {}) if isinstance(state, dict) else {}
         previous_dedupe = state.get("alertDedupe", {}) if isinstance(state, dict) else {}
         current_positions = self.build_large_position_snapshot(dashboard)
+        tracked_addresses = {
+            str(wallet.get("address") or "").lower()
+            for wallet in dashboard.get("wallets", [])
+            if str(wallet.get("address") or "").strip()
+        }
+        previous_positions = self.filter_positions_to_tracked_wallets(previous_positions, tracked_addresses)
         fill_prices = self.build_recent_fill_price_map(dashboard, since_ms=iso_to_ms(state.get("lastCheckedAt")))
         dedupe_now_ms = current_time_ms()
         # Keep HIP-3 available for explicit commands like /hip3, but exclude it
@@ -4171,6 +4191,12 @@ class WalletTrackerService:
         )
         previous_positions = state.get("largePositions", {}) if isinstance(state, dict) else {}
         previous_dedupe = state.get("alertDedupe", {}) if isinstance(state, dict) else {}
+        tracked_addresses = {
+            str(wallet.get("address") or "").lower()
+            for wallet in dashboard.get("wallets", [])
+            if str(wallet.get("address") or "").strip()
+        }
+        previous_positions = self.filter_positions_to_tracked_wallets(previous_positions, tracked_addresses)
         fill_prices = self.build_recent_fill_price_map(dashboard, since_ms=iso_to_ms(state.get("lastCheckedAt")))
         dedupe_now_ms = current_time_ms()
         position_changes = self.build_large_position_alert_changes(

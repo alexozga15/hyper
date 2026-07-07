@@ -2543,6 +2543,40 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("Closed >$500K", sent_message)
         self.assertIn("Trader One: ETH short $1.2M sz 400 last ~$3,000", sent_message)
 
+    def test_check_alerts_ignores_closed_positions_for_untracked_wallets(self) -> None:
+        previous_summary = {
+            "overallBias": "mixed",
+            "consensus": [],
+            "hip3Consensus": [],
+        }
+        previous_positions = {
+            "0x09bc1cf4d9f0b59e1425a8fde4d4b1f7d3c9410d:BTC:short": {
+                "address": "0x09bc1cf4d9f0b59e1425a8fde4d4b1f7d3c9410d",
+                "alias": "Removed Trader",
+                "coin": "BTC",
+                "side": "short",
+                "totalValue": 16_400_000.0,
+                "totalSize": 256.0,
+            }
+        }
+        dashboard = {"wallets": [{"address": "0x1111111111111111111111111111111111111111", "alias": "Trader One", "positions": []}]}
+
+        with patch(
+            "server.load_json_file",
+            return_value={
+                "config": {"enabled": True, "botToken": "token", "chatId": "chat"},
+                "state": {"summary": previous_summary, "largePositions": previous_positions},
+            },
+        ), patch("server.save_json_file"), patch.object(self.service, "dashboard", return_value=dashboard), patch.object(
+            self.service, "build_sentiment_summary", return_value=previous_summary
+        ), patch.object(self.service, "send_telegram_message") as send_telegram_message:
+            result = self.service.check_alerts(send_notification=True)
+
+        self.assertFalse(result["shouldNotify"])
+        self.assertFalse(result["sent"])
+        self.assertEqual(result["changes"]["closedLargePositions"], [])
+        self.assertFalse(send_telegram_message.called)
+
     def test_check_alerts_preview_does_not_sync_alert_baseline(self) -> None:
         now_ms = 1_700_000_000_000
         previous_summary = {
@@ -2824,8 +2858,8 @@ class AlertSummaryTests(unittest.TestCase):
             "hip3Consensus": [],
         }
         previous_positions = {
-            "0x2222222222222222222222222222222222222222:BTC:long": {
-                "address": "0x2222222222222222222222222222222222222222",
+            "0x69906b0ed626ca01a4b7c001e5711e5714ccf207:BTC:long": {
+                "address": "0x69906b0ed626ca01a4b7c001e5711e5714ccf207",
                 "alias": "Old Trader",
                 "coin": "BTC",
                 "side": "long",
@@ -2836,7 +2870,7 @@ class AlertSummaryTests(unittest.TestCase):
         dashboard = {
             "wallets": [
                 {
-                    "address": "0x1111111111111111111111111111111111111111",
+                    "address": "0x69906b0ed626ca01a4b7c001e5711e5714ccf207",
                     "alias": "Trader One",
                     "positions": [{"coin": "ETH", "side": "Short", "positionValue": 1_300_000.0}],
                 }
@@ -2933,7 +2967,7 @@ class AlertSummaryTests(unittest.TestCase):
         dashboard = {
             "wallets": [
                 {
-                    "address": "0x1111111111111111111111111111111111111111",
+                    "address": "0x69906b0ed626ca01a4b7c001e5711e5714ccf207",
                     "alias": "Trader One",
                     "positions": [
                         {"coin": "ETH", "side": "Short", "positionValue": 1_300_000.0, "size": 300.0},
@@ -2942,8 +2976,8 @@ class AlertSummaryTests(unittest.TestCase):
             ]
         }
         previous_positions = {
-            "0x2222222222222222222222222222222222222222:BTC:long": {
-                "address": "0x2222222222222222222222222222222222222222",
+            "0x69906b0ed626ca01a4b7c001e5711e5714ccf207:BTC:long": {
+                "address": "0x69906b0ed626ca01a4b7c001e5711e5714ccf207",
                 "alias": "Old Trader",
                 "coin": "BTC",
                 "side": "long",
