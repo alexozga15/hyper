@@ -59,7 +59,10 @@ CMM_CONTRARIAN_DEFAULT_SEGMENTS = (12, 13, 14, 15, 16)
 CMM_TREND_ENRICHMENT_ENABLED = True
 CMM_SIGNAL_TREND_LOOKBACK_HOURS = 1
 CMM_SIGNAL_MAX_TREND_COINS = 3
+CMM_SIGNAL_MAX_TREND_SEGMENTS_PER_COIN = 2
+CMM_SIGNAL_MAX_TREND_REQUESTS = 6
 CMM_SIGNAL_CACHE_TTL_MINUTES = 60
+CMM_RATE_LIMIT_BACKOFF_MINUTES = 360
 CMM_SIGNAL_SEGMENT_LABELS = {
     7: "Leviathan",
     8: "Money Printer",
@@ -109,7 +112,6 @@ CONVICTION_WEIGHT_7D_MAX_EFFECT_PCT = 20.0
 ELITE_MIN_QUALITY_SCORE = 65.0
 ELITE_MIN_PROFIT_FACTOR = 1.5
 ELITE_MAX_DRAWDOWN_PCT = 35.0
-ELITE_MAX_MARGIN_USAGE_PCT = 70.0
 ELITE_WALLET_OVERRIDES = {"0xc9e839a529d1a3a46e2b48d20c461d4afecb72e4"}
 TOP_CONVICTION_WALLET_COUNT = 10
 TOP_CONVICTION_WALLET_MULTIPLIER = 1.5
@@ -412,10 +414,9 @@ def build_wallet_quality_rank(
     recent_quality_confidence = min(sample_size_7d / RANKING_MIN_7D_CLOSED_TRADES, 1.0)
     recent_quality_win_rate_score = normalized_hit_rate * recent_quality_confidence
     drawdown_control_score = clamp(100.0 - (to_float(max_drawdown_pct) * 5.0))
-    margin_score = clamp(100.0 - max(0.0, to_float(margin_usage_pct) - 30.0) * 2.0)
     unrealized_return_pct = (to_float(unrealized_pnl) / account) * 100 if account > 0 else 0.0
     unrealized_score = return_score(unrealized_return_pct)
-    open_health_score = (margin_score * 0.6) + (unrealized_score * 0.4)
+    open_health_score = unrealized_score
     score = (
         return_score(pnl_7d_return_pct) * 0.25
         + return_score(pnl_30d_return_pct) * 0.20
@@ -443,7 +444,6 @@ def build_wallet_quality_rank(
         sample_size_30d >= RANKING_MIN_30D_CLOSED_TRADES
         and profit_factor >= ELITE_MIN_PROFIT_FACTOR
         and to_float(max_drawdown_pct) <= ELITE_MAX_DRAWDOWN_PCT
-        and to_float(margin_usage_pct) <= ELITE_MAX_MARGIN_USAGE_PCT
     )
 
     if sample_size_7d < RANKING_MIN_7D_CLOSED_TRADES and sample_size_30d < RANKING_MIN_30D_CLOSED_TRADES:
@@ -2950,8 +2950,22 @@ class WalletTrackerService:
     def cmm_max_trend_coins(self) -> int:
         return max(0, env_int("CMM_SIGNAL_MAX_TREND_COINS", CMM_SIGNAL_MAX_TREND_COINS))
 
+    def cmm_max_trend_requests(self) -> int:
+        return max(0, env_int("CMM_SIGNAL_MAX_TREND_REQUESTS", CMM_SIGNAL_MAX_TREND_REQUESTS))
+
+    def cmm_max_trend_segments_per_coin(self) -> int:
+        return max(0, env_int("CMM_SIGNAL_MAX_TREND_SEGMENTS_PER_COIN", CMM_SIGNAL_MAX_TREND_SEGMENTS_PER_COIN))
+
     def cmm_cache_ttl_ms(self) -> int:
         return max(0, env_int("CMM_SIGNAL_CACHE_TTL_MINUTES", CMM_SIGNAL_CACHE_TTL_MINUTES)) * 60_000
+
+    def cmm_rate_limit_backoff_ms(self) -> int:
+        return max(1, env_int("CMM_RATE_LIMIT_BACKOFF_MINUTES", CMM_RATE_LIMIT_BACKOFF_MINUTES)) * 60_000
+
+    @staticmethod
+    def is_cmm_rate_limit_error(error: Exception) -> bool:
+        message = str(error).lower()
+        return "429" in message or "daily limit" in message or "rate limit" in message
 
     def cmm_signal_tier(self, probability: float, total_value: float) -> str:
         if total_value < CMM_ACTIONABLE_MIN_TOTAL_VALUE:
@@ -3092,7 +3106,7 @@ class WalletTrackerService:
         components: list[dict[str, Any]],
         *,
         contrarian_components: list[dict[str, Any]] | None = None,
-        trend_score: float = 0.0,
+        trend_score: float | None = None,
     ) -> dict[str, Any] | None:
         if not components:
             return None
@@ -3130,14 +3144,15 @@ class WalletTrackerService:
         agreement_score = min(10.0, (len(agreeing) / 2.0) * 10.0)
         contrarian_score, weak_bias = self.cmm_contrarian_score(side, contrarian_components or [])
         pnl_score = 4.0 if total_unrealized > 0 else -10.0 if total_unrealized < -1_000_000 else 0.0
-        probability = clamp(
-            (smart_score * 0.58)
-            + (count_score * 0.14)
-            + (max(0.0, min(trend_score, 100.0)) * 0.14)
-            + (contrarian_score * 0.10)
-            + agreement_score
-            + pnl_score
-        )
+        trend_available = trend_score is not None
+        normalized_trend_score = max(0.0, min(to_float(trend_score), 100.0)) if trend_available else 0.0
+        base_probability = (smart_score * 0.58) + (count_score * 0.14) + (contrarian_score * 0.10)
+        # Missing trend history is not evidence against a position. Normalize the
+        # available components instead of treating an unavailable trend as zero.
+        if trend_available:
+            probability = clamp(base_probability + (normalized_trend_score * 0.14) + agreement_score + pnl_score)
+        else:
+            probability = clamp((base_probability / 0.82) + agreement_score + pnl_score)
         tier = self.cmm_signal_tier(probability, total_value)
 
         return {
@@ -3152,7 +3167,8 @@ class WalletTrackerService:
             "valueBias": round(aggregate_bias, 4),
             "countBias": round(count_bias, 4),
             "smartCohortScore": round(smart_score, 1),
-            "trendScore": round(max(0.0, min(trend_score, 100.0)), 1),
+            "trendScore": round(normalized_trend_score, 1) if trend_available else None,
+            "trendAvailable": trend_available,
             "contrarianScore": round(contrarian_score, 1),
             "weakCohortBias": round(weak_bias, 4),
             "cohortCount": len(agreeing),
@@ -3223,7 +3239,13 @@ class WalletTrackerService:
                 signals.append(signal)
         return signals
 
-    def cmm_metric_trend_score(self, side: str, metrics: list[dict[str, Any]], segment_id: int, coin: str) -> float:
+    def cmm_metric_trend_score(
+        self,
+        side: str,
+        metrics: list[dict[str, Any]],
+        segment_id: int,
+        coin: str,
+    ) -> float | None:
         components = [
             self.cmm_metric_signal_component(coin, segment_id, metric)
             for metric in sorted(metrics, key=lambda item: str(item.get("createdAt") or ""))
@@ -3231,7 +3253,7 @@ class WalletTrackerService:
         ]
         components = [component for component in components if component]
         if len(components) < 2:
-            return 0.0
+            return None
         first_bias = to_float(components[0].get("valueBias"))
         last_bias = to_float(components[-1].get("valueBias"))
         aligned_delta = last_bias - first_bias if side == "long" else first_bias - last_bias
@@ -3243,6 +3265,8 @@ class WalletTrackerService:
         start = iso_hours_ago(CMM_SIGNAL_TREND_LOOKBACK_HOURS)
         end = now_iso()
         enriched: list[dict[str, Any]] = []
+        metric_request_count = 0
+        request_limit = self.cmm_max_trend_requests()
         trend_targets = {
             str(item.get("coin")).upper()
             for item in sorted(signals, key=lambda signal: to_float(signal.get("probabilityScore")), reverse=True)[
@@ -3257,11 +3281,17 @@ class WalletTrackerService:
             side = str(signal.get("side") or "")
             segment_scores: list[float] = []
             latest_metric_ms = 0
-            for component in signal.get("components", []):
-                if not isinstance(component, dict):
-                    continue
+            components = sorted(
+                (component for component in signal.get("components", []) if isinstance(component, dict)),
+                key=lambda component: to_float(component.get("weight")),
+                reverse=True,
+            )[: self.cmm_max_trend_segments_per_coin()]
+            for component in components:
+                if metric_request_count >= request_limit or getattr(self, "_cmm_trend_rate_limited", False):
+                    break
                 segment_id = int(to_float(component.get("segmentId")))
                 try:
+                    metric_request_count += 1
                     payload = self.cmm_client.position_metrics(
                         coin,
                         segment_id,
@@ -3270,11 +3300,15 @@ class WalletTrackerService:
                         limit=4,
                         position_recency_timeframe=timeframe,
                     )
-                except CoinMarketManApiError:
+                except CoinMarketManApiError as exc:
+                    if self.is_cmm_rate_limit_error(exc):
+                        self._cmm_trend_rate_limited = True
                     continue
                 metrics = payload.get("metrics", []) if isinstance(payload, dict) else []
                 if metrics:
-                    segment_scores.append(self.cmm_metric_trend_score(side, metrics, segment_id, coin))
+                    score = self.cmm_metric_trend_score(side, metrics, segment_id, coin)
+                    if score is not None:
+                        segment_scores.append(score)
                     metric_times = [iso_to_ms(metric.get("createdAt")) for metric in metrics if isinstance(metric, dict)]
                     if metric_times:
                         latest_metric_ms = max(latest_metric_ms, max(metric_times))
@@ -3328,6 +3362,7 @@ class WalletTrackerService:
         errors: list[str] = []
         heatmap_failed = False
         heatmap_quota_limited = False
+        self._cmm_trend_rate_limited = False
         diagnostics: dict[str, Any] = {
             "heatmapRows": 0,
             "smartComponents": 0,
@@ -3348,6 +3383,8 @@ class WalletTrackerService:
             )
             if self.cmm_trend_enrichment_enabled():
                 all_heatmap_signals = self.enrich_cmm_signals_with_trends(all_heatmap_signals, timeframe)
+                if self._cmm_trend_rate_limited:
+                    errors.append("trend metrics: CMM API rate limited")
             signals = [
                 signal
                 for signal in all_heatmap_signals
@@ -3401,7 +3438,7 @@ class WalletTrackerService:
         return {
             "enabled": True,
             "source": "coinmarketman",
-            "rateLimited": heatmap_quota_limited,
+            "rateLimited": heatmap_quota_limited or self._cmm_trend_rate_limited,
             "timeframe": timeframe,
             "coins": target_coins,
             "segments": target_segments,
@@ -3434,18 +3471,38 @@ class WalletTrackerService:
             return False
         return current_time_ms() - generated_ms < ttl_ms
 
+    def cmm_summary_rate_limited(self, summary: dict[str, Any]) -> bool:
+        if not isinstance(summary, dict):
+            return False
+        return iso_to_ms(summary.get("rateLimitedUntil")) > current_time_ms()
+
     def build_cached_cmm_signal_summary(self, state: dict[str, Any] | None, *, force: bool = False) -> dict[str, Any]:
         cached = state.get("cmmSignals", {}) if isinstance(state, dict) else {}
         cached = cached if isinstance(cached, dict) else {}
+        if not force and self.cmm_summary_rate_limited(cached):
+            return {
+                **cached,
+                "cacheHit": True,
+                "stale": True,
+                "checkedAt": now_iso(),
+            }
         if not force and self.cmm_summary_cache_fresh(cached):
             return {**cached, "cacheHit": True, "checkedAt": now_iso()}
 
         summary = self.build_cmm_signal_summary()
-        if summary.get("rateLimited") and cached.get("enabled") and cached.get("signals"):
+        if summary.get("rateLimited"):
+            retry_at = datetime.fromtimestamp(
+                (current_time_ms() + self.cmm_rate_limit_backoff_ms()) / 1000,
+                timezone.utc,
+            ).isoformat().replace("+00:00", "Z")
+            if not cached.get("enabled") or not cached.get("signals"):
+                return {**summary, "rateLimitedUntil": retry_at}
             return {
                 **cached,
                 "stale": True,
                 "staleReason": summary.get("error", "CMM API rate limited"),
+                "rateLimited": True,
+                "rateLimitedUntil": retry_at,
                 "checkedAt": summary.get("generatedAt", now_iso()),
             }
         return summary
@@ -3493,6 +3550,16 @@ class WalletTrackerService:
         cmm_score = to_float(cmm_signal.get("probabilityScore"))
         trend_score = to_float(cmm_signal.get("trendScore"))
         contrarian_score = max(0.0, to_float(cmm_signal.get("contrarianScore")))
+        trend_available = bool(cmm_signal.get("trendAvailable", cmm_signal.get("trendScore") is not None))
+        if not trend_available:
+            return round(
+                clamp(
+                    (wallet_score * (0.45 / 0.85))
+                    + (cmm_score * (0.30 / 0.85))
+                    + (contrarian_score * (0.10 / 0.85))
+                ),
+                1,
+            )
         return round(
             clamp(
                 (wallet_score * 0.45)
@@ -3630,7 +3697,7 @@ class WalletTrackerService:
                 f"{CMM_SIGNAL_PROBABILITY_THRESHOLD:.0f}/{CMM_ALERT_PROBABILITY_THRESHOLD:.0f}"
             ),
             (
-                f"Min value: watch {format_money_compact(CMM_SIGNAL_MIN_TOTAL_VALUE)}, "
+                f"Min gross cohort exposure: watch {format_money_compact(CMM_SIGNAL_MIN_TOTAL_VALUE)}, "
                 f"action {format_money_compact(CMM_ACTIONABLE_MIN_TOTAL_VALUE)}"
             ),
         ]
@@ -3661,14 +3728,19 @@ class WalletTrackerService:
                     tracked_note = self.cmm_tracked_confirmation_note(item, wallet_summary)
                     price_note = ""
                     if to_float(item.get("price")) > 0:
-                        price_note = f', entry ${format_price(to_float(item.get("price")))}'
+                        price_note = f', cohort VWAP entry ${format_price(to_float(item.get("price")))}'
+                    trend_note = (
+                        f'trend {to_float(item.get("trendScore")):.0f}'
+                        if item.get("trendAvailable", item.get("trendScore") is not None)
+                        else "trend n/a"
+                    )
                     lines.append(
                         f'{index}. {str(item.get("signalTier", "watch")).upper()} '
                         f'{str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]} '
                         f'(p{to_float(item.get("probabilityScore")):.0f}/100, {item.get("cohortCount", 0)} cohorts, '
-                        f'bias {bias_pct:.0f}%, trend {to_float(item.get("trendScore")):.0f}, '
+                        f'bias {bias_pct:.0f}%, {trend_note}, '
                         f'contra {to_float(item.get("contrarianScore")):.0f}, '
-                        f'{format_money_compact(item.get("totalValue"))}{price_note}, {cohorts}{tracked_note}{freshness_note})'
+                        f'gross {format_money_compact(item.get("totalValue"))}{price_note}, {cohorts}{tracked_note}{freshness_note})'
                     )
                     index += 1
         elif summary.get("enabled"):
@@ -3680,13 +3752,17 @@ class WalletTrackerService:
                 for item in below_threshold[:5]:
                     price_note = ""
                     if to_float(item.get("price")) > 0:
-                        price_note = f', entry ${format_price(to_float(item.get("price")))}'
+                        price_note = f', cohort VWAP entry ${format_price(to_float(item.get("price")))}'
+                    trend_note = (
+                        f'trend {to_float(item.get("trendScore")):.0f}'
+                        if item.get("trendAvailable", item.get("trendScore") is not None)
+                        else "trend n/a"
+                    )
                     lines.append(
                         f'- {str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]} '
                         f'p{to_float(item.get("probabilityScore")):.0f}, '
                         f'bias {abs(to_float(item.get("valueBias"))) * 100:.0f}%, '
-                        f'trend {to_float(item.get("trendScore")):.0f}, '
-                        f'{format_money_compact(item.get("totalValue"))}{price_note}'
+                        f'{trend_note}, gross {format_money_compact(item.get("totalValue"))}{price_note}'
                     )
             diagnostics = summary.get("diagnostics", {})
             if diagnostics:

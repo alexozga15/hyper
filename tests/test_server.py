@@ -37,7 +37,7 @@ class SegmentTests(unittest.TestCase):
         strong = build_wallet_quality_rank(70, 20, 20_000, 100_000)
         self.assertEqual(strong["label"], "Strong")
         self.assertEqual(strong["metric"], "multi_period_quality")
-        self.assertEqual(strong["score"], 71.5)
+        self.assertEqual(strong["score"], 70.0)
         losing = build_wallet_quality_rank(80, 20, -50_000, 100_000)
         self.assertEqual(losing["label"], "Cold")
         self.assertEqual(losing["pnlReturnPct"], -50.0)
@@ -128,6 +128,22 @@ class SegmentTests(unittest.TestCase):
         )
         self.assertNotEqual(high_drawdown["label"], "Elite")
         self.assertFalse(high_drawdown["eliteEligible"])
+
+    def test_wallet_quality_rank_does_not_penalize_margin_usage(self) -> None:
+        kwargs = {
+            "hit_rate_30d": 90,
+            "closed_trade_count_30d": 30,
+            "pnl_30d": 40_000,
+            "gross_profit_30d": 60_000,
+            "gross_loss_30d": 10_000,
+            "max_drawdown_pct": 5,
+            "unrealized_pnl": 5_000,
+        }
+        low_margin = build_wallet_quality_rank(90, 20, 30_000, 100_000, margin_usage_pct=10, **kwargs)
+        high_margin = build_wallet_quality_rank(90, 20, 30_000, 100_000, margin_usage_pct=95, **kwargs)
+
+        self.assertEqual(low_margin["score"], high_margin["score"])
+        self.assertEqual(low_margin["eliteEligible"], high_margin["eliteEligible"])
 
     def test_side_from_size(self) -> None:
         self.assertEqual(side_from_size(10), "Long")
@@ -1194,6 +1210,15 @@ class AlertSummaryTests(unittest.TestCase):
                                 "totalShortValue": 7_200_000,
                                 "bias": 0.1,
                             },
+                            {
+                                "segmentId": 9,
+                                "count": 70,
+                                "countLong": 7,
+                                "totalValue": 7_000_000,
+                                "totalLongValue": 700_000,
+                                "totalShortValue": 6_300_000,
+                                "bias": 0.1,
+                            },
                         ],
                     }
                     for coin in ("BTC", "ETH", "SOL", "HYPE")
@@ -1233,6 +1258,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(summary["signalCount"], 4)
         self.assertEqual(len(fake_client.metric_calls), 6)
         self.assertEqual(len({coin for coin, _segment in fake_client.metric_calls}), 3)
+        self.assertTrue(all(segment in {7, 8} for _, segment in fake_client.metric_calls))
 
     def test_build_cmm_signal_summary_scans_all_heatmap_assets_by_default(self) -> None:
         class FakeCmmClient:
@@ -1366,7 +1392,8 @@ class AlertSummaryTests(unittest.TestCase):
             summary = self.service.build_cmm_signal_summary()
 
         self.assertEqual(summary["signals"][0]["coin"], "AAVE")
-        self.assertEqual(summary["signals"][0]["trendScore"], 0)
+        self.assertIsNone(summary["signals"][0]["trendScore"])
+        self.assertFalse(summary["signals"][0]["trendAvailable"])
 
     def test_build_cmm_signal_summary_does_not_fallback_after_rate_limit(self) -> None:
         class FakeCmmClient:
@@ -1484,6 +1511,36 @@ class AlertSummaryTests(unittest.TestCase):
         live_summary.assert_called_once()
         self.assertEqual(summary["signals"], live["signals"])
 
+    def test_build_cached_cmm_signal_summary_honors_rate_limit_backoff(self) -> None:
+        cached = {
+            "enabled": True,
+            "signals": [{"coin": "LINK", "side": "short"}],
+            "generatedAt": "2026-06-20T00:00:00Z",
+            "rateLimitedUntil": "2099-01-01T00:00:00Z",
+        }
+
+        with patch.object(self.service, "build_cmm_signal_summary") as live_summary:
+            summary = self.service.build_cached_cmm_signal_summary({"cmmSignals": cached})
+
+        live_summary.assert_not_called()
+        self.assertTrue(summary["cacheHit"])
+        self.assertTrue(summary["stale"])
+
+    def test_build_cached_cmm_signal_summary_sets_rate_limit_backoff(self) -> None:
+        cached = {
+            "enabled": True,
+            "signals": [{"coin": "LINK", "side": "short"}],
+            "generatedAt": "2026-06-20T00:00:00Z",
+        }
+        limited = {"enabled": True, "signals": [], "rateLimited": True, "error": "HTTP 429", "generatedAt": now_iso()}
+
+        with patch.object(self.service, "build_cmm_signal_summary", return_value=limited):
+            summary = self.service.build_cached_cmm_signal_summary({"cmmSignals": cached})
+
+        self.assertTrue(summary["stale"])
+        self.assertTrue(summary["rateLimited"])
+        self.assertGreater(summary["rateLimitedUntil"], now_iso())
+
     def test_cmm_signal_tier_requires_actionable_value(self) -> None:
         self.assertEqual(self.service.cmm_signal_tier(79, 866_000), "watch")
         self.assertEqual(self.service.cmm_signal_tier(79, 1_100_000), "actionable")
@@ -1500,6 +1557,7 @@ class AlertSummaryTests(unittest.TestCase):
                 "cohortCount": 3,
                 "valueBias": 0.8,
                 "trendScore": 0,
+                "trendAvailable": False,
                 "contrarianScore": 0,
                 "totalValue": 2_000_000,
                 "price": 123.45,
@@ -1533,7 +1591,9 @@ class AlertSummaryTests(unittest.TestCase):
 
         self.assertIn("Crypto:", message)
         self.assertIn("tracked 4w qnet 2.5", message)
-        self.assertIn("entry $123.45", message)
+        self.assertIn("gross $2.0M", message)
+        self.assertIn("cohort VWAP entry $123.45", message)
+        self.assertIn("trend n/a", message)
         self.assertIn("10. WATCH", message)
         self.assertNotIn("11. WATCH", message)
 
@@ -1878,7 +1938,7 @@ class AlertSummaryTests(unittest.TestCase):
         message = self.service.build_elite_wallet_positions_message(dashboard)
 
         self.assertIn("Elite wallet positions", message)
-        self.assertIn("Elite Trader (88.8/100", message)
+        self.assertIn("Elite Trader (87.6/100", message)
         self.assertIn("30D closes, PF 6.0, DD 5.0%", message)
         self.assertIn("- BTC long $1,000K, size 10, entry $100,000, uPnL $12,345", message)
         self.assertIn("- ETH short $250K", message)

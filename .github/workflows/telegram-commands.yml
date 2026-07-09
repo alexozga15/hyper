@@ -11,7 +11,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: telegram-commands
+  group: bot-state
   cancel-in-progress: false
 
 jobs:
@@ -34,6 +34,8 @@ jobs:
           COINMARKETMAN_API_TOKEN_BACKUP: ${{ secrets.COINMARKETMAN_API_TOKEN_BACKUP }}
           CMM_TREND_ENRICHMENT: "true"
           CMM_SIGNAL_MAX_TREND_COINS: "3"
+          CMM_SIGNAL_MAX_TREND_SEGMENTS_PER_COIN: "2"
+          CMM_SIGNAL_MAX_TREND_REQUESTS: "6"
           CMM_SIGNAL_CACHE_TTL_MINUTES: "60"
           MIN_CONSENSUS_WALLETS: "4"
           TELEGRAM_POLLING_BACKUP: "true"

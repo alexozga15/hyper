@@ -58,12 +58,12 @@ The official docs used for this helper are [Cohort Intelligence](https://docs.co
 
 ## Free Option
 
-If you want a free setup, use the included GitHub Actions workflow at [`.github/workflows/sentiment-alerts.yml`](/Users/alexozga/Documents/New%20project%204/.github/workflows/sentiment-alerts.yml).
+If you want a free setup, use the included GitHub Actions workflow at [`.github/workflows/sentiment-alerts.yml`](.github/workflows/sentiment-alerts.yml).
 
 How it works:
 
-- GitHub Actions runs every 15 minutes and can also be started manually.
-- The scheduled sentiment update runs every hour.
+- GitHub Actions checks alerts every 5 minutes and can also be started manually.
+- The periodic Telegram update runs every 4 hours.
 - Telegram secrets stay in GitHub Secrets, not in the repo.
 - Previous alert state is stored in [`data/alerts.json`](/Users/alexozga/Documents/New%20project%204/data/alerts.json) and committed back to the repo so consensus changes are remembered between runs.
 
@@ -80,7 +80,7 @@ If you want to verify Telegram delivery without waiting for a real sentiment cha
 
 If you want on-demand bot replies, enable [`.github/workflows/telegram-commands.yml`](.github/workflows/telegram-commands.yml).
 
-- It supports both `repository_dispatch` (instant trigger) and a scheduled fallback every 15 minutes.
+- It supports both `repository_dispatch` (instant trigger) and a scheduled fallback every 5 minutes.
 - In webhook mode, the workflow replies from the dispatch payload directly. In polling mode, it falls back to Telegram `getUpdates`.
 - Commands supported:
   - `/update`
