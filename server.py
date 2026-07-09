@@ -3054,6 +3054,7 @@ class WalletTrackerService:
             )
         )
         price_source = "entry" if price > 0 else ""
+        raw_unrealized_pnl = first_present(segment, "unrealizedPnl", "unrealizedPnL", "totalUnrealizedPnl")
         if not short_value and total_value and long_value:
             short_value = max(0.0, total_value - long_value)
         if position_count <= 0 or total_value <= 0:
@@ -3085,7 +3086,8 @@ class WalletTrackerService:
             "valueBias": value_bias,
             "countBias": count_bias,
             "weight": weight,
-            "unrealizedPnl": to_float(segment.get("unrealizedPnl") or segment.get("totalUnrealizedPnl")),
+            "unrealizedPnl": to_float(raw_unrealized_pnl),
+            "hasUnrealizedPnl": raw_unrealized_pnl is not None,
             "createdAt": segment.get("createdAt", ""),
         }
 
@@ -3099,6 +3101,23 @@ class WalletTrackerService:
             if isinstance(value, list):
                 return [item for item in value if isinstance(item, dict)]
         return []
+
+    @staticmethod
+    def cmm_component_entry_price(component: dict[str, Any], side: str) -> tuple[float, str]:
+        reported_entry = to_float(component.get("price"))
+        if reported_entry > 0:
+            return reported_entry, "reported"
+
+        if not component.get("hasUnrealizedPnl"):
+            return 0.0, ""
+        size = abs(to_float(component.get("totalSize")))
+        value = abs(to_float(component.get("totalValue")))
+        if size <= 0 or value <= 0:
+            return 0.0, ""
+        mark_price = value / size
+        unrealized_pnl = to_float(component.get("unrealizedPnl"))
+        implied_entry = mark_price - (unrealized_pnl / size) if side == "long" else mark_price + (unrealized_pnl / size)
+        return (implied_entry, "implied") if implied_entry > 0 else (0.0, "")
 
     def score_cmm_components(
         self,
@@ -3127,16 +3146,20 @@ class WalletTrackerService:
         aligned_count_bias = abs(count_bias) if (count_bias > 0 and side == "long") or (count_bias < 0 and side == "short") else 0.0
         total_value = sum(to_float(item.get("totalValue")) for item in agreeing)
         total_size = sum(to_float(item.get("totalSize")) for item in agreeing)
-        priced_size = sum(
-            to_float(item.get("totalSize"))
+        entry_components = [
+            (*self.cmm_component_entry_price(item, side), abs(to_float(item.get("totalSize"))))
             for item in agreeing
-            if to_float(item.get("price")) > 0 and to_float(item.get("totalSize")) > 0
-        )
-        weighted_price_value = sum(
-            to_float(item.get("price")) * to_float(item.get("totalSize"))
-            for item in agreeing
-            if to_float(item.get("price")) > 0 and to_float(item.get("totalSize")) > 0
-        )
+        ]
+        entry_components = [item for item in entry_components if item[0] > 0 and item[2] > 0]
+        priced_size = sum(item[2] for item in entry_components)
+        weighted_price_value = sum(item[0] * item[2] for item in entry_components)
+        entry_sources = {item[1] for item in entry_components}
+        if entry_sources == {"reported"}:
+            price_source = "cohort-aggregate-entry"
+        elif entry_sources:
+            price_source = "cohort-implied-entry"
+        else:
+            price_source = ""
         total_positions = sum(int(to_float(item.get("positionCount"))) for item in agreeing)
         total_unrealized = sum(to_float(item.get("unrealizedPnl")) for item in agreeing)
         smart_score = abs(aggregate_bias) * 100.0
@@ -3177,7 +3200,8 @@ class WalletTrackerService:
             "totalValue": round(total_value, 2),
             "totalSize": round(total_size, 8),
             "price": round(weighted_price_value / priced_size, 8) if priced_size > 0 and weighted_price_value > 0 else 0.0,
-            "priceSource": "size-weighted-entry" if priced_size > 0 and weighted_price_value > 0 else "",
+            "priceSource": price_source,
+            "entryCoveragePct": round((priced_size / total_size) * 100, 1) if total_size > 0 else 0.0,
             "unrealizedPnl": round(total_unrealized, 2),
             "components": agreeing,
             "strongComponents": components,
@@ -3728,7 +3752,10 @@ class WalletTrackerService:
                     tracked_note = self.cmm_tracked_confirmation_note(item, wallet_summary)
                     price_note = ""
                     if to_float(item.get("price")) > 0:
-                        price_note = f', cohort VWAP entry ${format_price(to_float(item.get("price")))}'
+                        source = "aggregate implied entry" if item.get("priceSource") == "cohort-implied-entry" else "aggregate entry"
+                        coverage = to_float(item.get("entryCoveragePct"))
+                        coverage_note = f' ({coverage:.0f}% size)' if 0 < coverage < 99.5 else ""
+                        price_note = f', {source} ${format_price(to_float(item.get("price")))}{coverage_note}'
                     trend_note = (
                         f'trend {to_float(item.get("trendScore")):.0f}'
                         if item.get("trendAvailable", item.get("trendScore") is not None)
@@ -3752,7 +3779,10 @@ class WalletTrackerService:
                 for item in below_threshold[:5]:
                     price_note = ""
                     if to_float(item.get("price")) > 0:
-                        price_note = f', cohort VWAP entry ${format_price(to_float(item.get("price")))}'
+                        source = "aggregate implied entry" if item.get("priceSource") == "cohort-implied-entry" else "aggregate entry"
+                        coverage = to_float(item.get("entryCoveragePct"))
+                        coverage_note = f' ({coverage:.0f}% size)' if 0 < coverage < 99.5 else ""
+                        price_note = f', {source} ${format_price(to_float(item.get("price")))}{coverage_note}'
                     trend_note = (
                         f'trend {to_float(item.get("trendScore")):.0f}'
                         if item.get("trendAvailable", item.get("trendScore") is not None)

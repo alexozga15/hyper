@@ -1350,6 +1350,39 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(summary["signals"][0]["side"], "long")
         self.assertEqual(summary["signals"][0]["price"], 100)
 
+    def test_cmm_signal_derives_aggregate_entry_from_unrealized_pnl(self) -> None:
+        components = [
+            {
+                "side": "long",
+                "valueBias": 0.8,
+                "countBias": 0.8,
+                "weight": 1.0,
+                "positionCount": 10,
+                "totalValue": 1_200,
+                "totalSize": 10,
+                "unrealizedPnl": 200,
+                "hasUnrealizedPnl": True,
+            },
+            {
+                "side": "long",
+                "valueBias": 0.7,
+                "countBias": 0.7,
+                "weight": 1.0,
+                "positionCount": 8,
+                "totalValue": 2_400,
+                "totalSize": 20,
+                "unrealizedPnl": 400,
+                "hasUnrealizedPnl": True,
+            },
+        ]
+
+        signal = self.service.score_cmm_components("BTC", components)
+
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal["price"], 100.0)
+        self.assertEqual(signal["priceSource"], "cohort-implied-entry")
+        self.assertEqual(signal["entryCoveragePct"], 100.0)
+
     def test_build_cmm_signal_summary_can_disable_trends_with_env(self) -> None:
         class FakeCmmClient:
             token = "token"
@@ -1592,7 +1625,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("Crypto:", message)
         self.assertIn("tracked 4w qnet 2.5", message)
         self.assertIn("gross $2.0M", message)
-        self.assertIn("cohort VWAP entry $123.45", message)
+        self.assertIn("aggregate entry $123.45", message)
         self.assertIn("trend n/a", message)
         self.assertIn("10. WATCH", message)
         self.assertNotIn("11. WATCH", message)
