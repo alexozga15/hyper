@@ -232,10 +232,13 @@ def build_summary_cache(
     return service.build_sentiment_summary(dashboard["wallets"], min_wallets)
 
 
-def build_cmm_cache(service: WalletTrackerService) -> dict[str, Any]:
+def build_cmm_cache(service: WalletTrackerService, *, include_position_entries: bool = False) -> dict[str, Any]:
     raw = load_json_file(service.alerts_path, {}) if hasattr(service, "alerts_path") else {}
     state = raw.get("state", {}) if isinstance(raw, dict) else {}
-    return service.build_cached_cmm_signal_summary(state)
+    summary = service.build_cached_cmm_signal_summary(state)
+    if include_position_entries and hasattr(service, "enrich_cmm_signals_with_position_entries"):
+        return service.enrich_cmm_signals_with_position_entries(summary)
+    return summary
 
 
 def main() -> int:
@@ -284,7 +287,7 @@ def main() -> int:
 
         cmm_cache = None
         if command in CMM_COMMANDS:
-            cmm_cache = build_cmm_cache(service)
+            cmm_cache = build_cmm_cache(service, include_position_entries=command == "/cmm")
 
         reply = build_reply(service, command, position_query, summary_cache, dashboard_cache, cmm_cache, min_wallets)
 

@@ -176,6 +176,24 @@ class DispatchUpdateTests(unittest.TestCase):
         self.assertEqual(summary["signals"], cached["signals"])
         self.assertEqual(fake_service.state["cmmSignals"], cached)
 
+    def test_build_cmm_cache_can_enrich_cmm_command_entries(self) -> None:
+        class FakeService:
+            alerts_path = Path("alerts.json")
+
+            def build_cached_cmm_signal_summary(self, state: dict) -> dict:
+                return {"enabled": True, "signals": [{"coin": "LINK", "side": "short"}]}
+
+            def enrich_cmm_signals_with_position_entries(self, summary: dict) -> dict:
+                self.summary = summary
+                return {**summary, "enriched": True}
+
+        fake_service = FakeService()
+        with patch.object(commands, "load_json_file", return_value={"state": {}}):
+            summary = commands.build_cmm_cache(fake_service, include_position_entries=True)
+
+        self.assertTrue(summary["enriched"])
+        self.assertEqual(fake_service.summary["signals"][0]["coin"], "LINK")
+
     def test_build_reply_routes_ticker_direction_query(self) -> None:
         class FakeService:
             def build_position_wallets_message(self, dashboard: dict, coin: str, side: str) -> str:

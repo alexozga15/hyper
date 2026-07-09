@@ -131,6 +131,18 @@ class CoinMarketManClient:
     def positions_heatmap(self, *, opened_within: str = "7d") -> Any:
         return self.request("positions/heatmap", {"openedWithin": opened_within})
 
+    def positions(
+        self,
+        *,
+        coin: str,
+        segment_ids: Iterable[int] | None = None,
+        limit: int = 100,
+    ) -> Any:
+        params: dict[str, Any] = {"coin": coin.upper(), "limit": limit}
+        if segment_ids:
+            params["segmentIds"] = [str(item) for item in segment_ids]
+        return self.request("positions", params)
+
     def position_metrics(
         self,
         coin: str,

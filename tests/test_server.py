@@ -1383,6 +1383,44 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(signal["priceSource"], "cohort-implied-entry")
         self.assertEqual(signal["entryCoveragePct"], 100.0)
 
+    def test_cmm_position_entry_enrichment_uses_unique_open_positions(self) -> None:
+        class FakeCmmClient:
+            token = "token"
+
+            def positions(self, **kwargs: Any) -> dict[str, Any]:
+                self.kwargs = kwargs
+                return {
+                    "positions": [
+                        {"id": "one", "coin": "BTC", "side": "long", "size": 2, "entryPrice": 90, "closeTime": None},
+                        {"id": "two", "coin": "BTC", "side": "long", "size": 1, "entryPrice": 120, "closeTime": None},
+                        {"id": "two", "coin": "BTC", "side": "long", "size": 1, "entryPrice": 120, "closeTime": None},
+                        {"id": "closed", "coin": "BTC", "side": "long", "size": 10, "entryPrice": 1, "closeTime": "2026-06-20T10:00:00Z"},
+                    ]
+                }
+
+        client = FakeCmmClient()
+        self.service.cmm_client = client
+        summary = {"enabled": True, "signals": [{"coin": "BTC", "side": "long", "price": 0.0}]}
+
+        enriched = self.service.enrich_cmm_signals_with_position_entries(summary)
+        signal = enriched["signals"][0]
+
+        self.assertEqual(client.kwargs["coin"], "BTC")
+        self.assertEqual(signal["price"], 100.0)
+        self.assertEqual(signal["priceSource"], "position-vwap-entry")
+        self.assertEqual(signal["entryPositionCount"], 2)
+
+    def test_cmm_message_surfaces_position_entry_enrichment_errors(self) -> None:
+        message = self.service.build_cmm_signals_message(
+            {
+                "enabled": True,
+                "signals": [],
+                "entryEnrichmentError": "BTC entries: CMM API returned HTTP 404",
+            }
+        )
+
+        self.assertIn("Entry enrichment unavailable: BTC entries", message)
+
     def test_build_cmm_signal_summary_can_disable_trends_with_env(self) -> None:
         class FakeCmmClient:
             token = "token"

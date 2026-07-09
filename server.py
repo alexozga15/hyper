@@ -3103,6 +3103,18 @@ class WalletTrackerService:
         return []
 
     @staticmethod
+    def cmm_position_rows(payload: Any) -> list[dict[str, Any]]:
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        if not isinstance(payload, dict):
+            return []
+        for key in ("positions", "items", "data", "results"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+        return []
+
+    @staticmethod
     def cmm_component_entry_price(component: dict[str, Any], side: str) -> tuple[float, str]:
         reported_entry = to_float(component.get("price"))
         if reported_entry > 0:
@@ -3486,6 +3498,83 @@ class WalletTrackerService:
             "generatedAt": now_iso(),
         }
 
+    def enrich_cmm_signals_with_position_entries(
+        self,
+        summary: dict[str, Any],
+        *,
+        limit: int = 3,
+    ) -> dict[str, Any]:
+        signals = summary.get("signals", []) if isinstance(summary, dict) else []
+        if not self.cmm_client.token or not isinstance(signals, list):
+            return summary
+
+        enriched: list[dict[str, Any]] = []
+        errors: list[str] = []
+        missing_entries = 0
+        for signal in signals:
+            if not isinstance(signal, dict):
+                continue
+            if to_float(signal.get("price")) > 0 or missing_entries >= max(0, limit):
+                enriched.append(signal)
+                continue
+
+            missing_entries += 1
+            coin = normalize_cmm_coin(signal.get("coin")).upper()
+            side = str(signal.get("side") or "").lower()
+            try:
+                payload = self.cmm_client.positions(
+                    coin=coin,
+                    segment_ids=self.cmm_signal_segments(),
+                    limit=100,
+                )
+            except CoinMarketManApiError as exc:
+                errors.append(f"{coin} entries: {exc}")
+                enriched.append(signal)
+                continue
+
+            entry_size = 0.0
+            weighted_entry_value = 0.0
+            position_count = 0
+            seen_positions: set[str] = set()
+            for position in self.cmm_position_rows(payload):
+                if normalize_cmm_coin(position.get("coin")).upper() != coin:
+                    continue
+                if position.get("closeTime") not in (None, ""):
+                    continue
+                position_side = str(position.get("side") or "").lower()
+                if position_side not in {"long", "short"}:
+                    position_side = "long" if to_float(position.get("size")) > 0 else "short"
+                if position_side != side:
+                    continue
+                entry_price = to_float(first_present(position, "entryPrice", "entryPx", "avgEntryPrice"))
+                size = abs(to_float(position.get("size")))
+                if entry_price <= 0 or size <= 0:
+                    continue
+                position_key = str(position.get("id") or position.get("positionId") or "")
+                if not position_key:
+                    position_key = f'{str(position.get("address") or "").lower()}:{coin}:{side}'
+                if position_key in seen_positions:
+                    continue
+                seen_positions.add(position_key)
+                entry_size += size
+                weighted_entry_value += entry_price * size
+                position_count += 1
+
+            if entry_size > 0 and weighted_entry_value > 0:
+                enriched.append(
+                    {
+                        **signal,
+                        "price": round(weighted_entry_value / entry_size, 8),
+                        "priceSource": "position-vwap-entry",
+                        "entryCoveragePct": 100.0,
+                        "entryPositionCount": position_count,
+                    }
+                )
+            else:
+                enriched.append(signal)
+
+        return {**summary, "signals": enriched, "entryEnrichmentError": "; ".join(errors[:3])}
+
     def cmm_summary_cache_fresh(self, summary: dict[str, Any]) -> bool:
         ttl_ms = self.cmm_cache_ttl_ms()
         if ttl_ms <= 0 or not isinstance(summary, dict) or not summary.get("enabled"):
@@ -3752,7 +3841,9 @@ class WalletTrackerService:
                     tracked_note = self.cmm_tracked_confirmation_note(item, wallet_summary)
                     price_note = ""
                     if to_float(item.get("price")) > 0:
-                        source = "aggregate implied entry" if item.get("priceSource") == "cohort-implied-entry" else "aggregate entry"
+                        source = "position VWAP entry" if item.get("priceSource") == "position-vwap-entry" else (
+                            "aggregate implied entry" if item.get("priceSource") == "cohort-implied-entry" else "aggregate entry"
+                        )
                         coverage = to_float(item.get("entryCoveragePct"))
                         coverage_note = f' ({coverage:.0f}% size)' if 0 < coverage < 99.5 else ""
                         price_note = f', {source} ${format_price(to_float(item.get("price")))}{coverage_note}'
@@ -3779,7 +3870,9 @@ class WalletTrackerService:
                 for item in below_threshold[:5]:
                     price_note = ""
                     if to_float(item.get("price")) > 0:
-                        source = "aggregate implied entry" if item.get("priceSource") == "cohort-implied-entry" else "aggregate entry"
+                        source = "position VWAP entry" if item.get("priceSource") == "position-vwap-entry" else (
+                            "aggregate implied entry" if item.get("priceSource") == "cohort-implied-entry" else "aggregate entry"
+                        )
                         coverage = to_float(item.get("entryCoveragePct"))
                         coverage_note = f' ({coverage:.0f}% size)' if 0 < coverage < 99.5 else ""
                         price_note = f', {source} ${format_price(to_float(item.get("price")))}{coverage_note}'
@@ -3807,6 +3900,8 @@ class WalletTrackerService:
                 )
         if summary.get("error") and summary.get("enabled"):
             lines.append(f'Partial error: {summary.get("error")}')
+        if summary.get("entryEnrichmentError"):
+            lines.append(f'Entry enrichment unavailable: {summary.get("entryEnrichmentError")}')
         lines.append("")
         lines.append(f'Checked at: {summary.get("generatedAt", now_iso())}')
         return "\n".join(lines)
