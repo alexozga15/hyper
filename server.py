@@ -46,7 +46,16 @@ EXTREME_SIGNAL_PROBABILITY_THRESHOLD = 85.0
 ACTIONABLE_SIGNAL_MIN_WALLETS = 4
 ACTIONABLE_SIGNAL_MIN_NET_WALLETS = 2
 ACTIONABLE_SIGNAL_MIN_QNET = 1.5
-ACTIONABLE_SIGNAL_MIN_VALUE = 1_000_000
+ACTIONABLE_SIGNAL_MIN_INDEPENDENT_WALLETS = 4
+ACTIONABLE_SIGNAL_MIN_INDEPENDENT_NET_WALLETS = 3
+ACTIONABLE_SIGNAL_MIN_VERIFIED_FRESH_WALLETS = 2
+ACTIONABLE_SIGNAL_MIN_TOP_WALLETS = 2
+WALLET_SIGNAL_ACTIVITY_WINDOW_MS = 30 * 60 * 1000
+WALLET_CORRELATION_MIN_SHARED_EVENTS = 3
+WALLET_CORRELATION_MIN_JACCARD = 0.8
+ASSET_QUALITY_MIN_CLOSED_TRADES = 5
+WALLET_QUARANTINE_MIN_7D_RETURN_PCT = -10.0
+WALLET_QUARANTINE_MAX_7D_WIN_RATE = 35.0
 CMM_SIGNAL_PROBABILITY_THRESHOLD = 70.0
 CMM_WATCH_PROBABILITY_THRESHOLD = 60.0
 CMM_ALERT_PROBABILITY_THRESHOLD = 80.0
@@ -1114,6 +1123,7 @@ class WalletTrackerService:
         loss_count_30d = 0
         fills_30d_count = 0
         last_fill_time = 0
+        asset_trade_stats: dict[str, dict[str, float]] = {}
         for fill in fills:
             closed_pnl = to_float(fill.get("closedPnl"))
             fill_time = int(to_float(fill.get("time")))
@@ -1128,6 +1138,17 @@ class WalletTrackerService:
                     elif closed_pnl < 0:
                         gross_loss_30d += abs(closed_pnl)
                         loss_count_30d += 1
+                    asset_coin = normalize_position_coin(fill.get("coin"))
+                    asset_bucket = asset_trade_stats.setdefault(
+                        asset_coin,
+                        {"closedTrades": 0.0, "wins": 0.0, "losses": 0.0, "pnl": 0.0},
+                    )
+                    asset_bucket["closedTrades"] += 1
+                    asset_bucket["pnl"] += closed_pnl
+                    if closed_pnl > 0:
+                        asset_bucket["wins"] += 1
+                    else:
+                        asset_bucket["losses"] += 1
             is_7d_closed_fill = fill_time >= cutoff_7d_ms and closed_pnl != 0
             if is_7d_closed_fill:
                 recent_realized_pnl += closed_pnl
@@ -1202,6 +1223,15 @@ class WalletTrackerService:
                 "eliteEligible": True,
             }
 
+        asset_quality = {
+            coin: {
+                "closedTrades": int(item["closedTrades"]),
+                "winRate": round((item["wins"] / max(item["closedTrades"], 1.0)) * 100, 1),
+                "pnl": round(item["pnl"], 2),
+            }
+            for coin, item in asset_trade_stats.items()
+        }
+
         return {
             "address": wallet.address,
             "alias": wallet.alias,
@@ -1227,6 +1257,7 @@ class WalletTrackerService:
             "daysSinceLastFill": days_since_last_fill,
             "holdingOnly30d": holding_only_30d,
             "recentWinRateRank": recent_win_rate_rank,
+            "assetQuality": asset_quality,
             "dataQuality": {
                 "fillsOk": fills_ok,
                 "portfolioOk": portfolio_ok,
@@ -1597,6 +1628,7 @@ class WalletTrackerService:
         persist: bool = False,
         stored_config: dict[str, Any] | None = None,
         month_key: str | None = None,
+        position_lifecycle: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         top_wallet_addresses, cohort = self.resolve_monthly_top_conviction_cohort(
             dashboard.get("wallets", []),
@@ -1607,6 +1639,7 @@ class WalletTrackerService:
             dashboard.get("wallets", []),
             min_wallets,
             top_wallet_addresses=top_wallet_addresses,
+            position_lifecycle=position_lifecycle or state.get("walletPositionLifecycle", {}),
         )
         summary["topConvictionWallets"] = cohort
         if persist and isinstance(state, dict) and state.get("topConvictionWallets") != cohort:
@@ -1616,7 +1649,13 @@ class WalletTrackerService:
             )
         return summary, cohort
 
-    def wallet_conviction_weight(self, wallet: dict[str, Any], top_wallet_addresses: set[str] | None = None) -> float:
+    def wallet_conviction_weight(
+        self,
+        wallet: dict[str, Any],
+        top_wallet_addresses: set[str] | None = None,
+        *,
+        coin: str | None = None,
+    ) -> float:
         rank = wallet.get("recentWinRateRank")
         if not isinstance(rank, dict):
             base_weight = 1.0
@@ -1629,9 +1668,33 @@ class WalletTrackerService:
                 base_weight = round(max(0.5, min(score / ELITE_MIN_QUALITY_SCORE, 1.5)), 3)
         address = str(wallet.get("address") or "").lower()
         if not top_wallet_addresses:
-            return base_weight
-        multiplier = TOP_CONVICTION_WALLET_MULTIPLIER if address in top_wallet_addresses else NON_TOP_CONVICTION_WALLET_MULTIPLIER
+            multiplier = 1.0
+        else:
+            multiplier = (
+                TOP_CONVICTION_WALLET_MULTIPLIER
+                if address in top_wallet_addresses
+                else NON_TOP_CONVICTION_WALLET_MULTIPLIER
+            )
+        if coin:
+            asset_quality = wallet.get("assetQuality", {})
+            asset_stats = asset_quality.get(normalize_position_coin(coin), {}) if isinstance(asset_quality, dict) else {}
+            closed_trades = int(to_float(asset_stats.get("closedTrades"))) if isinstance(asset_stats, dict) else 0
+            if closed_trades >= ASSET_QUALITY_MIN_CLOSED_TRADES:
+                asset_win_rate = to_float(asset_stats.get("winRate"))
+                multiplier *= max(0.75, min(1.25, asset_win_rate / 60.0))
+        if self.is_wallet_quarantined(wallet):
+            multiplier *= 0.5
         return round(base_weight * multiplier, 3)
+
+    def is_wallet_quarantined(self, wallet: dict[str, Any]) -> bool:
+        rank = wallet.get("recentWinRateRank", {})
+        if not isinstance(rank, dict):
+            return False
+        return (
+            int(to_float(rank.get("sampleSize"))) >= RANKING_MIN_7D_CLOSED_TRADES
+            and to_float(rank.get("pnlReturnPct")) <= WALLET_QUARANTINE_MIN_7D_RETURN_PCT
+            and to_float(rank.get("winRate")) <= WALLET_QUARANTINE_MAX_7D_WIN_RATE
+        )
 
     def wallet_fill_data_reliable(self, wallet: dict[str, Any]) -> bool:
         quality = wallet.get("dataQuality")
@@ -1692,31 +1755,127 @@ class WalletTrackerService:
             return True
         return False
 
+    def position_lifecycle_key(self, address: str, coin: str, side: str) -> str:
+        return f"{address.lower()}:{normalize_position_coin(coin)}:{side.lower()}"
+
+    def build_position_lifecycle(
+        self,
+        dashboard: dict[str, Any],
+        previous: dict[str, Any] | None,
+    ) -> dict[str, dict[str, Any]]:
+        prior = previous if isinstance(previous, dict) else {}
+        lifecycle: dict[str, dict[str, Any]] = {}
+        for wallet in dashboard.get("wallets", []):
+            address = str(wallet.get("address") or "")
+            for position in wallet.get("positions", []):
+                side = str(position.get("side") or "").lower()
+                if side not in {"long", "short"}:
+                    continue
+                coin = normalize_position_coin(position.get("coin"))
+                key = self.position_lifecycle_key(address, coin, side)
+                previous_item = prior.get(key, {}) if isinstance(prior.get(key), dict) else {}
+                opened_at = int(to_float(previous_item.get("openedAt"))) or current_time_ms()
+                last_add_at = int(to_float(previous_item.get("lastAddAt")))
+                last_add_price = to_float(previous_item.get("lastAddPrice"))
+                for fill in wallet.get("recentFills", []):
+                    classified = self.classify_fill_direction(fill.get("direction"))
+                    if not classified:
+                        continue
+                    fill_side, event = classified
+                    if event != "add" or fill_side != side or normalize_position_coin(fill.get("coin")) != coin:
+                        continue
+                    fill_time = int(to_float(fill.get("time")))
+                    if fill_time >= last_add_at:
+                        last_add_at = fill_time
+                        last_add_price = to_float(fill.get("price"))
+                        opened_at = min(opened_at, fill_time) if previous_item else fill_time
+                lifecycle[key] = {
+                    "openedAt": opened_at,
+                    "lastAddAt": last_add_at,
+                    "lastAddPrice": round(last_add_price, 8),
+                    "updatedAt": current_time_ms(),
+                }
+        return lifecycle
+
+    def has_verified_recent_activity(
+        self,
+        wallet: dict[str, Any],
+        position: dict[str, Any],
+        lifecycle: dict[str, Any] | None,
+        *,
+        now_ms: int,
+        window_ms: int = WALLET_SIGNAL_ACTIVITY_WINDOW_MS,
+    ) -> bool:
+        if not self.wallet_fill_data_reliable(wallet):
+            return False
+        if self.has_recent_position_fill(wallet, position, now_ms=now_ms, event="add", window_ms=window_ms):
+            return True
+        address = str(wallet.get("address") or "")
+        key = self.position_lifecycle_key(address, str(position.get("coin") or ""), str(position.get("side") or ""))
+        item = lifecycle.get(key, {}) if isinstance(lifecycle, dict) else {}
+        return int(to_float(item.get("lastAddAt"))) >= now_ms - window_ms
+
+    def build_wallet_correlation_groups(self, snapshots: list[dict[str, Any]]) -> dict[str, str]:
+        fingerprints: dict[str, set[str]] = {}
+        for wallet in snapshots:
+            if not self.wallet_fill_data_reliable(wallet):
+                continue
+            address = str(wallet.get("address") or "").lower()
+            events: set[str] = set()
+            for fill in wallet.get("recentFills", []):
+                classified = self.classify_fill_direction(fill.get("direction"))
+                if not classified:
+                    continue
+                side, event = classified
+                fill_time = int(to_float(fill.get("time")))
+                if fill_time <= 0:
+                    continue
+                events.add(
+                    f'{normalize_position_coin(fill.get("coin"))}:{side}:{event}:{fill_time // (5 * 60 * 1000)}'
+                )
+            if events:
+                fingerprints[address] = events
+
+        parents = {address: address for address in fingerprints}
+
+        def find(address: str) -> str:
+            while parents[address] != address:
+                parents[address] = parents[parents[address]]
+                address = parents[address]
+            return address
+
+        for left, left_events in fingerprints.items():
+            for right, right_events in fingerprints.items():
+                if left >= right:
+                    continue
+                shared = len(left_events & right_events)
+                union = len(left_events | right_events)
+                if shared >= WALLET_CORRELATION_MIN_SHARED_EVENTS and union and shared / union >= WALLET_CORRELATION_MIN_JACCARD:
+                    parents[find(right)] = find(left)
+
+        return {address: find(address) for address in fingerprints}
+
     def signal_probability_score(self, item: dict[str, Any]) -> float:
         conviction = max(0.0, min(to_float(item.get("convictionScore")), 100.0))
-        qnet = max(0.0, to_float(item.get("netWeightedWalletCount")))
-        net_wallets = max(0, int(to_float(item.get("netWalletCount"))))
-        wallet_count = max(0, int(to_float(item.get("walletCount"))))
-        total_value = max(0.0, to_float(item.get("totalValue")))
-        recent_adds = max(0, int(to_float(item.get("recentAddWalletCount"))))
-        fresh_activity = max(0, int(to_float(item.get("freshActivityWalletCount"))))
-        top_wallets = max(0, int(to_float(item.get("topWalletCount"))))
-        opposite_weight = max(0.0, to_float(item.get("oppositeWeightedWalletCount")))
-        side_weight = max(0.0, to_float(item.get("weightedWalletCount")))
+        qnet = max(0.0, to_float(item.get("netIndependentWeightedWalletCount")))
+        net_wallets = max(0, int(to_float(item.get("netIndependentWalletCount"))))
+        wallet_count = max(0, int(to_float(item.get("independentWalletCount"))))
+        fresh_activity = max(0, int(to_float(item.get("verifiedFreshIndependentWalletCount"))))
+        top_wallets = max(0, int(to_float(item.get("independentTopWalletCount"))))
+        opposite_weight = max(0.0, to_float(item.get("oppositeIndependentWeightedWalletCount")))
+        side_weight = max(0.0, to_float(item.get("independentWeightedWalletCount")))
 
-        value_score = min(1.0, total_value / 10_000_000)
         qnet_score = min(1.0, qnet / 4.0)
         net_score = min(1.0, net_wallets / 4.0)
-        activity_score = min(1.0, (recent_adds + fresh_activity) / 3.0)
+        activity_score = min(1.0, fresh_activity / 3.0)
         quality_score = min(1.0, top_wallets / max(wallet_count, 1))
         opposition_ratio = opposite_weight / max(side_weight + opposite_weight, 1.0)
 
         probability = (
-            conviction * 0.35
+            conviction * 0.40
             + qnet_score * 20
             + net_score * 15
-            + value_score * 10
-            + activity_score * 10
+            + activity_score * 15
             + quality_score * 10
             - opposition_ratio * 15
         )
@@ -1724,19 +1883,16 @@ class WalletTrackerService:
 
     def signal_rejection_reasons(self, item: dict[str, Any], probability: float) -> list[str]:
         reasons: list[str] = []
-        if int(to_float(item.get("walletCount"))) < ACTIONABLE_SIGNAL_MIN_WALLETS:
-            reasons.append("wallet_count")
-        if int(to_float(item.get("netWalletCount"))) < ACTIONABLE_SIGNAL_MIN_NET_WALLETS:
+        if int(to_float(item.get("independentWalletCount"))) < ACTIONABLE_SIGNAL_MIN_INDEPENDENT_WALLETS:
+            reasons.append("independent_wallet_count")
+        if int(to_float(item.get("netIndependentWalletCount"))) < ACTIONABLE_SIGNAL_MIN_INDEPENDENT_NET_WALLETS:
             reasons.append("weak_net")
-        if to_float(item.get("netWeightedWalletCount")) < ACTIONABLE_SIGNAL_MIN_QNET:
+        if to_float(item.get("netIndependentWeightedWalletCount")) < ACTIONABLE_SIGNAL_MIN_QNET:
             reasons.append("weak_qnet")
-        if to_float(item.get("totalValue")) < ACTIONABLE_SIGNAL_MIN_VALUE:
-            reasons.append("small_value")
-        if (
-            int(to_float(item.get("recentAddWalletCount"))) + int(to_float(item.get("freshActivityWalletCount"))) <= 0
-            and int(to_float(item.get("fillQualityUnknownWalletCount"))) <= 0
-        ):
-            reasons.append("no_recent_activity")
+        if int(to_float(item.get("verifiedFreshIndependentWalletCount"))) < ACTIONABLE_SIGNAL_MIN_VERIFIED_FRESH_WALLETS:
+            reasons.append("insufficient_verified_activity")
+        if int(to_float(item.get("independentTopWalletCount"))) < ACTIONABLE_SIGNAL_MIN_TOP_WALLETS:
+            reasons.append("insufficient_top_wallets")
         if probability < ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD:
             reasons.append("low_probability")
         return reasons
@@ -1765,23 +1921,32 @@ class WalletTrackerService:
                     "strength": strength,
                     "probabilityScore": probability_score,
                     "walletCount": int(to_float(item.get("walletCount"))),
+                    "independentWalletCount": int(to_float(item.get("independentWalletCount"))),
                     "oppositeWalletCount": int(to_float(item.get("oppositeWalletCount"))),
                     "netWalletCount": int(to_float(item.get("netWalletCount"))),
+                    "netIndependentWalletCount": int(to_float(item.get("netIndependentWalletCount"))),
                     "weightedWalletCount": round(to_float(item.get("weightedWalletCount")), 3),
                     "netWeightedWalletCount": round(to_float(item.get("netWeightedWalletCount")), 3),
+                    "netIndependentWeightedWalletCount": round(
+                        to_float(item.get("netIndependentWeightedWalletCount")), 3
+                    ),
                     "recentAddWalletCount": int(to_float(item.get("recentAddWalletCount"))),
                     "freshActivityWalletCount": int(to_float(item.get("freshActivityWalletCount"))),
+                    "verifiedFreshIndependentWalletCount": int(
+                        to_float(item.get("verifiedFreshIndependentWalletCount"))
+                    ),
                     "fillQualityUnknownWalletCount": int(to_float(item.get("fillQualityUnknownWalletCount"))),
                     "topWalletCount": int(to_float(item.get("topWalletCount"))),
+                    "independentTopWalletCount": int(to_float(item.get("independentTopWalletCount"))),
                     "totalValue": round(to_float(item.get("totalValue")), 2),
                     "convictionScore": round(conviction_score, 1),
                     "threshold": round(to_float(threshold), 1),
                     "wallets": item.get("wallets", [])[:5],
                     "rationale": (
-                        f'{int(to_float(item.get("walletCount")))} wallets are {side} '
-                        f'against {int(to_float(item.get("oppositeWalletCount")))} opposite wallets, '
-                        f'net +{int(to_float(item.get("netWalletCount")))}, '
-                        f'qnet +{to_float(item.get("netWeightedWalletCount")):.1f}.'
+                        f'{int(to_float(item.get("independentWalletCount")))} independent wallets are {side} '
+                        f'against {int(to_float(item.get("oppositeIndependentWalletCount")))} opposite wallets, '
+                        f'net +{int(to_float(item.get("netIndependentWalletCount")))}, '
+                        f'qnet +{to_float(item.get("netIndependentWeightedWalletCount")):.1f}.'
                     ),
                 }
             )
@@ -1798,18 +1963,19 @@ class WalletTrackerService:
             ),
         )
 
-    def is_active_for_conviction(self, wallet: dict[str, Any], position: dict[str, Any], *, now_ms: int) -> bool:
+    def is_active_for_conviction(
+        self,
+        wallet: dict[str, Any],
+        position: dict[str, Any],
+        lifecycle: dict[str, Any] | None,
+        *,
+        now_ms: int,
+    ) -> bool:
         if not self.wallet_fill_data_reliable(wallet):
             return True
         if not wallet.get("holdingOnly30d"):
             return True
-        return self.has_recent_position_fill(
-            wallet,
-            position,
-            now_ms=now_ms,
-            event="add",
-            window_ms=RANKING_WINDOW_MS,
-        )
+        return self.has_verified_recent_activity(wallet, position, lifecycle, now_ms=now_ms, window_ms=RANKING_WINDOW_MS)
 
     def build_sentiment_summary(
         self,
@@ -1817,6 +1983,7 @@ class WalletTrackerService:
         min_wallets: int,
         *,
         top_wallet_addresses: set[str] | None = None,
+        position_lifecycle: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         aggregate: dict[tuple[str, str], dict[str, Any]] = {}
         total_long = 0.0
@@ -1827,22 +1994,24 @@ class WalletTrackerService:
         active_top_wallet_addresses = (
             top_wallet_addresses if top_wallet_addresses is not None else self.top_conviction_wallet_addresses(snapshots)
         )
+        correlation_groups = self.build_wallet_correlation_groups(snapshots)
 
         for snapshot in snapshots:
             if not self.should_count_wallet_for_conviction(snapshot):
                 continue
             address = str(snapshot.get("address") or "")
-            wallet_weight = self.wallet_conviction_weight(snapshot, active_top_wallet_addresses)
             for position in snapshot.get("positions", []):
                 coin = normalize_position_coin(position.get("coin"))
                 if not should_count_open_position(address, coin, position):
                     continue
-                if not self.is_active_for_conviction(snapshot, position, now_ms=now_ms):
+                if not self.is_active_for_conviction(snapshot, position, position_lifecycle, now_ms=now_ms):
                     continue
                 side = str(position.get("side") or "Flat").lower()
                 position_value = to_float(position.get("positionValue"))
                 if side not in {"long", "short"}:
                     continue
+                wallet_weight = self.wallet_conviction_weight(snapshot, active_top_wallet_addresses, coin=coin)
+                correlation_group = correlation_groups.get(address.lower(), address.lower())
 
                 key = (coin, side)
                 bucket = aggregate.setdefault(
@@ -1855,10 +2024,16 @@ class WalletTrackerService:
                         "weightedWalletCount": 0.0,
                         "wallets": [],
                         "walletAddresses": set(),
+                        "walletGroups": set(),
+                        "walletGroupWeights": {},
                         "recentAddWalletAddresses": set(),
                         "freshActivityWalletAddresses": set(),
+                        "verifiedFreshWalletAddresses": set(),
+                        "verifiedFreshWalletGroups": set(),
                         "topWalletAddresses": set(),
+                        "topWalletGroups": set(),
                         "fillQualityUnknownWalletAddresses": set(),
+                        "quarantinedWalletAddresses": set(),
                     },
                 )
                 bucket["totalValue"] += position_value
@@ -1866,10 +2041,17 @@ class WalletTrackerService:
                     bucket["walletAddresses"].add(address)
                     bucket["walletCount"] += 1
                     bucket["weightedWalletCount"] += wallet_weight
+                    bucket["walletGroups"].add(correlation_group)
+                    bucket["walletGroupWeights"][correlation_group] = max(
+                        to_float(bucket["walletGroupWeights"].get(correlation_group)), wallet_weight
+                    )
                     if address.lower() in active_top_wallet_addresses:
                         bucket["topWalletAddresses"].add(address)
+                        bucket["topWalletGroups"].add(correlation_group)
                     if not self.wallet_fill_data_reliable(snapshot):
                         bucket["fillQualityUnknownWalletAddresses"].add(address)
+                    if self.is_wallet_quarantined(snapshot):
+                        bucket["quarantinedWalletAddresses"].add(address)
                     if self.has_recent_position_fill(
                         snapshot,
                         position,
@@ -1886,6 +2068,9 @@ class WalletTrackerService:
                         window_ms=CLUSTERED_OPEN_ALERT_WINDOW_MS,
                     ):
                         bucket["freshActivityWalletAddresses"].add(address)
+                    if self.has_verified_recent_activity(snapshot, position, position_lifecycle, now_ms=now_ms):
+                        bucket["verifiedFreshWalletAddresses"].add(address)
+                        bucket["verifiedFreshWalletGroups"].add(correlation_group)
                     bucket["wallets"].append(
                         {
                             "address": address,
@@ -1909,11 +2094,17 @@ class WalletTrackerService:
                 "coin": bucket["coin"],
                 "side": bucket["side"],
                 "walletCount": bucket["walletCount"],
+                "independentWalletCount": len(bucket["walletGroups"]),
                 "weightedWalletCount": round(bucket["weightedWalletCount"], 3),
+                "independentWeightedWalletCount": round(sum(bucket["walletGroupWeights"].values()), 3),
                 "recentAddWalletCount": len(bucket["recentAddWalletAddresses"]),
                 "freshActivityWalletCount": len(bucket["freshActivityWalletAddresses"]),
+                "verifiedFreshWalletCount": len(bucket["verifiedFreshWalletAddresses"]),
+                "verifiedFreshIndependentWalletCount": len(bucket["verifiedFreshWalletGroups"]),
                 "topWalletCount": len(bucket["topWalletAddresses"]),
+                "independentTopWalletCount": len(bucket["topWalletGroups"]),
                 "fillQualityUnknownWalletCount": len(bucket["fillQualityUnknownWalletAddresses"]),
+                "quarantinedWalletCount": len(bucket["quarantinedWalletAddresses"]),
                 "totalValue": round(bucket["totalValue"], 2),
                 "wallets": sorted(bucket["wallets"], key=lambda item: item["value"], reverse=True),
             }
@@ -1922,16 +2113,24 @@ class WalletTrackerService:
         ]
         coin_side_counts: dict[str, dict[str, float]] = {}
         coin_side_raw_counts: dict[str, dict[str, int]] = {}
+        coin_side_independent_counts: dict[str, dict[str, int]] = {}
+        coin_side_independent_weights: dict[str, dict[str, float]] = {}
         for bucket in aggregate.values():
             side_counts = coin_side_counts.setdefault(str(bucket["coin"]), {"long": 0.0, "short": 0.0})
             side_counts[str(bucket["side"])] = to_float(bucket["weightedWalletCount"])
             raw_counts = coin_side_raw_counts.setdefault(str(bucket["coin"]), {"long": 0, "short": 0})
             raw_counts[str(bucket["side"])] = int(to_float(bucket["walletCount"]))
+            independent_counts = coin_side_independent_counts.setdefault(str(bucket["coin"]), {"long": 0, "short": 0})
+            independent_counts[str(bucket["side"])] = len(bucket["walletGroups"])
+            independent_weights = coin_side_independent_weights.setdefault(str(bucket["coin"]), {"long": 0.0, "short": 0.0})
+            independent_weights[str(bucket["side"])] = sum(bucket["walletGroupWeights"].values())
         max_net_weighted_wallet_count = 0.0
         for item in consensus:
             side = str(item["side"])
             side_counts = coin_side_counts.get(str(item["coin"]), {})
             raw_counts = coin_side_raw_counts.get(str(item["coin"]), {})
+            independent_counts = coin_side_independent_counts.get(str(item["coin"]), {})
+            independent_weights = coin_side_independent_weights.get(str(item["coin"]), {})
             opposite_side = "short" if side == "long" else "long"
             side_wallet_count = int(to_float(item["walletCount"]))
             opposite_wallet_count = int(to_float(raw_counts.get(opposite_side)))
@@ -1939,17 +2138,31 @@ class WalletTrackerService:
             side_weighted_wallet_count = to_float(item["weightedWalletCount"])
             opposite_weighted_wallet_count = to_float(side_counts.get(opposite_side))
             net_weighted_wallet_count = max(0.0, side_weighted_wallet_count - opposite_weighted_wallet_count)
+            side_independent_wallet_count = int(to_float(item["independentWalletCount"]))
+            opposite_independent_wallet_count = int(to_float(independent_counts.get(opposite_side)))
+            net_independent_wallet_count = max(0, side_independent_wallet_count - opposite_independent_wallet_count)
+            side_independent_weight = to_float(item["independentWeightedWalletCount"])
+            opposite_independent_weight = to_float(independent_weights.get(opposite_side))
+            net_independent_weight = max(0.0, side_independent_weight - opposite_independent_weight)
             item["oppositeWalletCount"] = opposite_wallet_count
             item["netWalletCount"] = net_wallet_count
             item["oppositeWeightedWalletCount"] = round(opposite_weighted_wallet_count, 3)
             item["netWeightedWalletCount"] = round(net_weighted_wallet_count, 3)
+            item["oppositeIndependentWalletCount"] = opposite_independent_wallet_count
+            item["netIndependentWalletCount"] = net_independent_wallet_count
+            item["oppositeIndependentWeightedWalletCount"] = round(opposite_independent_weight, 3)
+            item["netIndependentWeightedWalletCount"] = round(net_independent_weight, 3)
             item["longWalletCount"] = int(to_float(raw_counts.get("long")))
             item["shortWalletCount"] = int(to_float(raw_counts.get("short")))
             item["longWeightedWalletCount"] = round(to_float(side_counts.get("long")), 3)
             item["shortWeightedWalletCount"] = round(to_float(side_counts.get("short")), 3)
-            max_net_weighted_wallet_count = max(max_net_weighted_wallet_count, net_weighted_wallet_count)
+            max_net_weighted_wallet_count = max(max_net_weighted_wallet_count, net_independent_weight)
         for item in consensus:
-            net_score = (to_float(item["netWeightedWalletCount"]) / max_net_weighted_wallet_count) if max_net_weighted_wallet_count else 0.0
+            net_score = (
+                to_float(item["netIndependentWeightedWalletCount"]) / max_net_weighted_wallet_count
+                if max_net_weighted_wallet_count
+                else 0.0
+            )
             item["convictionScore"] = round(net_score * 100, 1)
         consensus = sorted(
             consensus,
@@ -2621,6 +2834,10 @@ class WalletTrackerService:
                     activity_bits.append(f'{int(to_float(item.get("freshActivityWalletCount")))} 5m activity')
                 if int(to_float(item.get("recentAddWalletCount"))):
                     activity_bits.append(f'{int(to_float(item.get("recentAddWalletCount")))} adds')
+                if int(to_float(item.get("verifiedFreshIndependentWalletCount"))):
+                    activity_bits.append(
+                        f'{int(to_float(item.get("verifiedFreshIndependentWalletCount")))} verified 30m'
+                    )
                 activity_note = f', {"/".join(activity_bits)}' if activity_bits else ""
                 cmm_note = ""
                 if item.get("cmmConfirmation") == "confirmed":
@@ -2631,8 +2848,9 @@ class WalletTrackerService:
                 lines.append(
                     f'- {str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]}: '
                     f'p{to_float(item.get("probabilityScore")):.0f}{move_note}, '
-                    f'{item["walletCount"]}w net +{int(to_float(item.get("netWalletCount")))}, '
-                    f'qnet +{to_float(item.get("netWeightedWalletCount")):.1f}, '
+                    f'{item["walletCount"]}w/{int(to_float(item.get("independentWalletCount", item["walletCount"])))}i '
+                    f'net +{int(to_float(item.get("netIndependentWalletCount", item.get("netWalletCount"))))}, '
+                    f'qnet +{to_float(item.get("netIndependentWeightedWalletCount", item.get("netWeightedWalletCount"))):.1f}, '
                     f'{format_money_compact(item.get("totalValue"))}{activity_note}{cmm_note}'
                 )
 
@@ -2752,18 +2970,22 @@ class WalletTrackerService:
             if signals:
                 for item in signals[:10]:
                     probability = to_float(item.get("probabilityScore", item.get("convictionScore")))
-                    net_note = f', net +{int(to_float(item.get("netWalletCount")))}' if "netWalletCount" in item else ""
+                    net_note = f', net +{int(to_float(item.get("netIndependentWalletCount", item.get("netWalletCount"))))}' if "netWalletCount" in item else ""
                     if "netWeightedWalletCount" in item:
-                        net_note += f', qnet +{to_float(item.get("netWeightedWalletCount")):.1f}'
+                        net_note += f', qnet +{to_float(item.get("netIndependentWeightedWalletCount", item.get("netWeightedWalletCount"))):.1f}'
                     activity_bits = []
                     if int(to_float(item.get("freshActivityWalletCount"))):
                         activity_bits.append(f'{int(to_float(item.get("freshActivityWalletCount")))} 5m activity')
                     if int(to_float(item.get("recentAddWalletCount"))):
                         activity_bits.append(f'{int(to_float(item.get("recentAddWalletCount")))} adds')
+                    if int(to_float(item.get("verifiedFreshIndependentWalletCount"))):
+                        activity_bits.append(
+                            f'{int(to_float(item.get("verifiedFreshIndependentWalletCount")))} verified 30m'
+                        )
                     activity_note = f', {"/".join(activity_bits)}' if activity_bits else ""
                     lines.append(
                         f'- {str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]} '
-                        f'({item["walletCount"]} wallets{net_note}, p{probability:.0f}/100{activity_note})'
+                        f'({item["walletCount"]} wallets/{int(to_float(item.get("independentWalletCount", item["walletCount"])))} independent{net_note}, p{probability:.0f}/100{activity_note})'
                     )
             else:
                 lines.append(f'- None at {ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD:.0f}+ probability')
@@ -2784,11 +3006,11 @@ class WalletTrackerService:
 
             def append_consensus_items(items: list[dict[str, Any]]) -> None:
                 for item in items[:10]:
-                    net_note = f', net +{int(to_float(item.get("netWalletCount")))}' if "netWalletCount" in item else ""
+                    net_note = f', net +{int(to_float(item.get("netIndependentWalletCount", item.get("netWalletCount"))))}' if "netWalletCount" in item else ""
                     if "netWeightedWalletCount" in item:
-                        net_note += f', qnet +{to_float(item.get("netWeightedWalletCount")):.1f}'
+                        net_note += f', qnet +{to_float(item.get("netIndependentWeightedWalletCount", item.get("netWeightedWalletCount"))):.1f}'
                     lines.append(
-                        f'- {item["coin"]} {item["side"]} ({item["walletCount"]} wallets{net_note}, conviction {item.get("convictionScore", 0):.0f}/100)'
+                        f'- {item["coin"]} {item["side"]} ({item["walletCount"]} wallets/{int(to_float(item.get("independentWalletCount", item["walletCount"])))} independent{net_note}, conviction {item.get("convictionScore", 0):.0f}/100)'
                     )
 
             if main_consensus:
@@ -3683,6 +3905,15 @@ class WalletTrackerService:
             1,
         )
 
+    @staticmethod
+    def is_wallet_native_signal(signal: dict[str, Any]) -> bool:
+        return (
+            int(to_float(signal.get("independentWalletCount"))) >= ACTIONABLE_SIGNAL_MIN_INDEPENDENT_WALLETS
+            and int(to_float(signal.get("netIndependentWalletCount"))) >= ACTIONABLE_SIGNAL_MIN_INDEPENDENT_NET_WALLETS
+            and int(to_float(signal.get("verifiedFreshIndependentWalletCount"))) >= ACTIONABLE_SIGNAL_MIN_VERIFIED_FRESH_WALLETS
+            and int(to_float(signal.get("independentTopWalletCount"))) >= ACTIONABLE_SIGNAL_MIN_TOP_WALLETS
+        )
+
     def apply_cmm_confirmation_to_summary(
         self,
         summary: dict[str, Any],
@@ -3707,6 +3938,7 @@ class WalletTrackerService:
             same_cmm = cmm_by_key.get(f"cmm:{coin}:{side}")
             opposite_cmm = cmm_by_key.get(f"cmm:{coin}:{opposite_side}")
             original_probability = to_float(signal.get("probabilityScore", signal.get("convictionScore")))
+            wallet_native = self.is_wallet_native_signal(signal)
 
             if same_cmm and to_float(same_cmm.get("probabilityScore")) >= CMM_WATCH_PROBABILITY_THRESHOLD:
                 combined_probability = self.combined_wallet_cmm_probability(signal, same_cmm)
@@ -3728,7 +3960,7 @@ class WalletTrackerService:
 
             if opposite_cmm and to_float(opposite_cmm.get("probabilityScore")) >= CMM_WATCH_PROBABILITY_THRESHOLD:
                 downgraded_probability = max(0.0, original_probability - 25.0)
-                if require_confirmation or downgraded_probability < ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD:
+                if (require_confirmation and not wallet_native) or downgraded_probability < ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD:
                     continue
                 adjusted_signals.append(
                     {
@@ -3742,7 +3974,7 @@ class WalletTrackerService:
                 continue
 
             downgraded_probability = max(0.0, original_probability - 10.0)
-            if require_confirmation or downgraded_probability < ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD:
+            if (require_confirmation and not wallet_native) or downgraded_probability < ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD:
                 continue
             adjusted_signals.append(
                 {
@@ -3926,6 +4158,10 @@ class WalletTrackerService:
                     activity_bits.append(f'{int(to_float(item.get("freshActivityWalletCount")))} 5m activity')
                 if int(to_float(item.get("recentAddWalletCount"))):
                     activity_bits.append(f'{int(to_float(item.get("recentAddWalletCount")))} adds')
+                if int(to_float(item.get("verifiedFreshIndependentWalletCount"))):
+                    activity_bits.append(
+                        f'{int(to_float(item.get("verifiedFreshIndependentWalletCount")))} verified 30m'
+                    )
                 activity_note = f', {"/".join(activity_bits)}' if activity_bits else ""
                 cmm_note = ""
                 if item.get("cmmConfirmation") == "confirmed":
@@ -4247,7 +4483,13 @@ class WalletTrackerService:
         min_wallets = max(1, int(config.get("minConsensusWallets", DEFAULT_CONSENSUS_THRESHOLD)))
 
         dashboard = self.dashboard()
-        summary, top_cohort = self.build_monthly_sentiment_summary(dashboard, min_wallets, state)
+        position_lifecycle = self.build_position_lifecycle(dashboard, state.get("walletPositionLifecycle", {}))
+        summary, top_cohort = self.build_monthly_sentiment_summary(
+            dashboard,
+            min_wallets,
+            state,
+            position_lifecycle=position_lifecycle,
+        )
         cmm_summary = self.build_cached_cmm_signal_summary(state)
         alert_summary = self.apply_cmm_confirmation_to_summary(
             summary,
@@ -4345,6 +4587,7 @@ class WalletTrackerService:
             "lastCheckedAt": checked_at,
             "lastSentAt": checked_at if sent else state.get("lastSentAt"),
             "topConvictionWallets": top_cohort,
+            "walletPositionLifecycle": position_lifecycle,
         }
         if not should_notify or sent or not config.get("enabled"):
             new_state["summary"] = alert_summary
@@ -4377,7 +4620,13 @@ class WalletTrackerService:
         stored_config = raw.get("config", {}) if isinstance(raw, dict) else {}
         config = self.resolve_alert_config(stored_config)
         state = raw.get("state", {}) if isinstance(raw, dict) else {}
-        summary, top_cohort = self.build_monthly_sentiment_summary(dashboard, min_wallets, state)
+        position_lifecycle = self.build_position_lifecycle(dashboard, state.get("walletPositionLifecycle", {}))
+        summary, top_cohort = self.build_monthly_sentiment_summary(
+            dashboard,
+            min_wallets,
+            state,
+            position_lifecycle=position_lifecycle,
+        )
         cmm_summary = self.build_cached_cmm_signal_summary(state)
         alert_summary = self.apply_cmm_confirmation_to_summary(
             summary,
@@ -4445,6 +4694,7 @@ class WalletTrackerService:
             "lastCheckedAt": synced_at,
             "lastHourlySyncedAt": synced_at,
             "topConvictionWallets": top_cohort,
+            "walletPositionLifecycle": position_lifecycle,
             "cmmSignals": cmm_summary,
         }
         if not should_send_position_alert or position_alert_sent or not config.get("enabled"):

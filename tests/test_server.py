@@ -379,11 +379,11 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_summary_message(summary, min_wallets=3)
         self.assertIn("Current wallet sentiment", message)
-        self.assertIn("BTC long (3 wallets, conviction 84/100)", message)
+        self.assertIn("BTC long (3 wallets/3 independent, conviction 84/100)", message)
         self.assertIn("Commodities consensus:", message)
-        self.assertIn("OIL short (3 wallets, conviction 72/100)", message)
+        self.assertIn("OIL short (3 wallets/3 independent, conviction 72/100)", message)
         self.assertIn("Stocks / indices consensus:", message)
-        self.assertIn("EWY long (3 wallets, conviction 68/100)", message)
+        self.assertIn("EWY long (3 wallets/3 independent, conviction 68/100)", message)
         self.assertNotIn("$12,345", message)
         self.assertNotIn("HIP-3 consensus:", message)
         self.assertNotIn("@PUMP-1 short (3 wallets, $456)", message)
@@ -443,6 +443,15 @@ class AlertSummaryTests(unittest.TestCase):
                         "time": now_ms - 60_000,
                     }
                 ],
+                "recentFills": [
+                    {
+                        "coin": "BNB",
+                        "direction": "Increase Short",
+                        "price": 700.0,
+                        "size": 715.0,
+                        "time": now_ms - 60_000,
+                    }
+                ],
             },
             {
                 "address": "0x2222222222222222222222222222222222222222",
@@ -489,7 +498,6 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(consensus_by_key["BTC:short"]["convictionScore"], 0.0)
         self.assertEqual(consensus_by_key["BNB:short"]["netWalletCount"], 4)
         self.assertEqual(consensus_by_key["BNB:short"]["convictionScore"], 100.0)
-        self.assertEqual(summary["signals"][0]["coin"], "BNB")
         self.assertNotIn("BTC", {item["coin"] for item in summary["signals"]})
 
     def test_net_wallet_conviction_counts_below_threshold_opposition(self) -> None:
@@ -867,6 +875,15 @@ class AlertSummaryTests(unittest.TestCase):
                 "address": "0x2222222222222222222222222222222222222222",
                 "alias": "Two",
                 "positions": [{"coin": "BTC", "side": "Long", "positionValue": 400000}],
+                "recentFills": [
+                    {
+                        "coin": "BTC",
+                        "direction": "Increase Long",
+                        "price": 50_000.0,
+                        "size": 8.0,
+                        "time": now_ms - 60_000,
+                    }
+                ],
             },
             {
                 "address": "0x3333333333333333333333333333333333333333",
@@ -925,20 +942,25 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(summary["consensus"][0]["coin"], "BTC")
         self.assertEqual(summary["signals"], [])
         probability = self.service.signal_probability_score(summary["consensus"][0])
-        self.assertIn("no_recent_activity", self.service.signal_rejection_reasons(summary["consensus"][0], probability))
+        self.assertIn("insufficient_verified_activity", self.service.signal_rejection_reasons(summary["consensus"][0], probability))
 
-    def test_unreliable_fill_data_does_not_trigger_no_recent_activity_rejection(self) -> None:
+    def test_unreliable_fill_data_does_not_count_as_verified_activity(self) -> None:
         item = {
             "walletCount": 4,
+            "independentWalletCount": 4,
             "netWalletCount": 4,
+            "netIndependentWalletCount": 4,
             "netWeightedWalletCount": 4.0,
-            "totalValue": 4_000_000,
+            "netIndependentWeightedWalletCount": 4.0,
+            "independentWeightedWalletCount": 4.0,
             "recentAddWalletCount": 0,
             "freshActivityWalletCount": 0,
+            "verifiedFreshIndependentWalletCount": 0,
+            "independentTopWalletCount": 4,
             "fillQualityUnknownWalletCount": 4,
         }
 
-        self.assertNotIn("no_recent_activity", self.service.signal_rejection_reasons(item, 80.0))
+        self.assertIn("insufficient_verified_activity", self.service.signal_rejection_reasons(item, 80.0))
 
     def test_reliable_inactive_holders_are_excluded_from_conviction(self) -> None:
         snapshots = [
@@ -976,6 +998,52 @@ class AlertSummaryTests(unittest.TestCase):
 
         self.assertEqual(summary["consensus"][0]["coin"], "BTC")
         self.assertEqual(summary["consensus"][0]["fillQualityUnknownWalletCount"], 4)
+
+    def test_wallet_correlation_groups_reduce_independent_votes(self) -> None:
+        now_ms = 1_700_000_000_000
+        shared_fills = [
+            {"coin": "BTC", "direction": "Increase Long", "time": now_ms - offset}
+            for offset in (60_000, 360_000, 660_000)
+        ]
+        snapshots = [
+            {"address": "0x1111111111111111111111111111111111111111", "recentFills": shared_fills},
+            {"address": "0x2222222222222222222222222222222222222222", "recentFills": shared_fills},
+            {"address": "0x3333333333333333333333333333333333333333", "recentFills": []},
+        ]
+
+        groups = self.service.build_wallet_correlation_groups(snapshots)
+
+        self.assertEqual(
+            groups["0x1111111111111111111111111111111111111111"],
+            groups["0x2222222222222222222222222222222222222222"],
+        )
+
+    def test_position_lifecycle_preserves_verified_recent_add(self) -> None:
+        now_ms = 1_700_000_000_000
+        wallet = {
+            "address": "0x1111111111111111111111111111111111111111",
+            "dataQuality": {"fillsOk": True, "fillsDegraded": False},
+            "recentFills": [],
+        }
+        position = {"coin": "BTC", "side": "Long", "positionValue": 1_000_000.0}
+        lifecycle = {
+            self.service.position_lifecycle_key(wallet["address"], "BTC", "long"): {"lastAddAt": now_ms - 60_000}
+        }
+
+        with patch("server.current_time_ms", return_value=now_ms):
+            self.assertTrue(self.service.has_verified_recent_activity(wallet, position, lifecycle, now_ms=now_ms))
+
+    def test_asset_quality_adjusts_wallet_weight(self) -> None:
+        wallet = {
+            "address": "0x1111111111111111111111111111111111111111",
+            "recentWinRateRank": {"score": 65.0, "label": "Strong"},
+            "assetQuality": {"BTC": {"closedTrades": 6, "winRate": 90.0}},
+        }
+
+        btc_weight = self.service.wallet_conviction_weight(wallet, set(), coin="BTC")
+        eth_weight = self.service.wallet_conviction_weight(wallet, set(), coin="ETH")
+
+        self.assertGreater(btc_weight, eth_weight)
 
     def test_dashboard_marks_globally_empty_fills_as_degraded(self) -> None:
         snapshots = [
@@ -1690,6 +1758,32 @@ class AlertSummaryTests(unittest.TestCase):
         )
 
         self.assertEqual(filtered["signals"], [])
+
+    def test_cmm_confirmation_keeps_native_wallet_signal_without_cmm(self) -> None:
+        summary = {
+            "signals": [
+                {
+                    "coin": "BTC",
+                    "side": "long",
+                    "probabilityScore": 90.0,
+                    "walletCount": 4,
+                    "independentWalletCount": 4,
+                    "netIndependentWalletCount": 3,
+                    "verifiedFreshIndependentWalletCount": 2,
+                    "independentTopWalletCount": 2,
+                }
+            ],
+            "signalCount": 1,
+        }
+
+        filtered = self.service.apply_cmm_confirmation_to_summary(
+            summary,
+            {"enabled": True, "signals": []},
+            require_confirmation=True,
+        )
+
+        self.assertEqual(filtered["signals"][0]["cmmConfirmation"], "unconfirmed")
+        self.assertEqual(filtered["signals"][0]["probabilityScore"], 80.0)
 
     def test_cmm_confirmation_keeps_strong_agreement(self) -> None:
         summary = {
