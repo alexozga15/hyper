@@ -2257,6 +2257,34 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertNotIn("BTC long", message)
         self.assertIn("Open positions: 0", message)
 
+    def test_build_positions_message_includes_recent_add_vwap(self) -> None:
+        now_ms = 1_700_000_000_000
+        dashboard = {
+            "wallets": [
+                {
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 70_000}],
+                    "recentFills": [{"coin": "BTC", "direction": "Open Long", "price": 80_000, "size": 1, "time": now_ms - 60_000}],
+                },
+                {
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 70_000}],
+                    "recentFills": [{"coin": "BTC", "direction": "Open Long", "price": 100_000, "size": 1, "time": now_ms - 120_000}],
+                },
+                {
+                    "address": "0x3333333333333333333333333333333333333333",
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 70_000}],
+                    "recentFills": [],
+                },
+            ]
+        }
+
+        with patch("server.current_time_ms", return_value=now_ms):
+            message = self.service.build_positions_message(dashboard)
+
+        self.assertIn("size-w entry $70,000", message)
+        self.assertIn("recent add VWAP $90,000 (2w/7d)", message)
+
     def test_build_position_wallets_message_lists_matching_wallets(self) -> None:
         dashboard = {
             "generatedAt": "2026-04-09T06:00:00Z",
@@ -3024,6 +3052,7 @@ class AlertSummaryTests(unittest.TestCase):
         sent_message = send_telegram_message.call_args.args[2]
         self.assertIn("3+ opens >$500K in 5m", sent_message)
         self.assertIn("- BTC long: 3 wallets, $3.6M", sent_message)
+        self.assertIn("VWAP $102,857", sent_message)
         self.assertIn("Trader One: $1.2M", sent_message)
         saved_dedupe = save_json_file.call_args.args[1]["state"]["alertDedupe"]
         self.assertTrue(next(iter(saved_dedupe)).startswith("position:cluster-open:BTC:long:"))

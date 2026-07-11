@@ -100,6 +100,7 @@ OPEN_POSITION_ALERT_WINDOW_MS = 5 * 60 * 1000
 CLUSTERED_OPEN_ALERT_WINDOW_MS = OPEN_POSITION_ALERT_WINDOW_MS
 COUNTED_POSITION_MAX_UNREALIZED_LOSS = -1_000_000
 RECENT_ADD_POSITION_MIN_PCT = 0.20
+POSITION_RECENT_ADD_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 RECENT_FILL_ALERT_LIMIT = 100
 CONSENSUS_SIZE_ALERT_MIN_DELTA = 2
 CONSENSUS_SIZE_ALERT_MIN_PCT = 0.5
@@ -2351,10 +2352,22 @@ class WalletTrackerService:
                     continue
                 if to_float(current_item.get("totalValue")) < NEW_POSITION_ALERT_MIN_VALUE:
                     continue
-                previous = opened_positions.get(position_key)
-                if previous and int(to_float(previous.get("openTime"))) >= fill_time:
+                fill_price = to_float(fill.get("price"))
+                fill_size = abs(to_float(fill.get("size")))
+                if fill_price <= 0 or fill_size <= 0:
                     continue
-                opened_positions[position_key] = {**current_item, "openTime": fill_time}
+                previous = opened_positions.setdefault(
+                    position_key,
+                    {
+                        **current_item,
+                        "openTime": fill_time,
+                        "openFillValue": 0.0,
+                        "openFillSize": 0.0,
+                    },
+                )
+                previous["openTime"] = max(int(to_float(previous.get("openTime"))), fill_time)
+                previous["openFillValue"] = to_float(previous.get("openFillValue")) + (fill_price * fill_size)
+                previous["openFillSize"] = to_float(previous.get("openFillSize")) + fill_size
 
         groups: dict[str, dict[str, Any]] = {}
         for item in opened_positions.values():
@@ -2369,7 +2382,8 @@ class WalletTrackerService:
                     "walletCount": 0,
                     "totalValue": 0.0,
                     "totalSize": 0.0,
-                    "entryValue": 0.0,
+                    "openFillValue": 0.0,
+                    "openFillSize": 0.0,
                     "earliestOpenTime": 0,
                     "latestOpenTime": 0,
                     "windowMs": window_ms,
@@ -2377,13 +2391,13 @@ class WalletTrackerService:
             )
             total_value = to_float(item.get("totalValue"))
             total_size = to_float(item.get("totalSize"))
-            entry_px = to_float(item.get("entryPx"))
             open_time = int(to_float(item.get("openTime")))
             group["wallets"].append(item)
             group["walletCount"] += 1
             group["totalValue"] += total_value
             group["totalSize"] += total_size
-            group["entryValue"] += entry_px * total_size
+            group["openFillValue"] += to_float(item.get("openFillValue"))
+            group["openFillSize"] += to_float(item.get("openFillSize"))
             group["earliestOpenTime"] = (
                 open_time
                 if not group["earliestOpenTime"]
@@ -2396,6 +2410,7 @@ class WalletTrackerService:
             if int(group["walletCount"]) < min_wallets:
                 continue
             total_size = to_float(group.get("totalSize"))
+            open_fill_size = to_float(group.get("openFillSize"))
             wallets = sorted(group["wallets"], key=lambda item: to_float(item.get("totalValue")), reverse=True)
             alerts.append(
                 {
@@ -2403,7 +2418,10 @@ class WalletTrackerService:
                     "wallets": wallets,
                     "totalValue": round(to_float(group.get("totalValue")), 2),
                     "totalSize": round(total_size, 8),
-                    "entryPx": round(to_float(group.get("entryValue")) / total_size, 8) if total_size > 0 else 0.0,
+                    "entryPx": round(to_float(group.get("openFillValue")) / open_fill_size, 8)
+                    if open_fill_size > 0
+                    else 0.0,
+                    "entryPriceSource": "fill_vwap",
                 }
             )
 
@@ -2882,7 +2900,7 @@ class WalletTrackerService:
                     size_note = f' sz {format_position_size(to_float(item.get("totalSize")))}'
                 entry_note = ""
                 if to_float(item.get("entryPx")) > 0:
-                    entry_note = f' entry ${format_price(to_float(item.get("entryPx")))}'
+                    entry_note = f' VWAP ${format_price(to_float(item.get("entryPx")))}'
                 lines.append(
                     f'- {item["coin"]} {item["side"]}: {int(item.get("walletCount") or 0)} wallets, '
                     f'{format_money_compact(item["totalValue"])}{size_note}{entry_note}'
@@ -3065,8 +3083,32 @@ class WalletTrackerService:
         hip3_only: bool | None = None,
         stock_like_only: bool | None = None,
         commodity_like_only: bool | None = None,
+        now_ms: int | None = None,
     ) -> list[dict[str, Any]]:
         groups: dict[tuple[str, str], dict[str, Any]] = {}
+        checked_ms = current_time_ms() if now_ms is None else now_ms
+        recent_add_cutoff = checked_ms - POSITION_RECENT_ADD_WINDOW_MS
+        recent_adds: dict[str, dict[str, float]] = {}
+
+        for wallet in dashboard.get("wallets", []):
+            address = str(wallet.get("address") or "")
+            if not address or not self.wallet_fill_data_reliable(wallet):
+                continue
+            for fill in wallet.get("recentFills", []):
+                classified = self.classify_fill_direction(fill.get("direction"))
+                if not classified or classified[1] != "add":
+                    continue
+                fill_time = int(to_float(fill.get("time")))
+                fill_price = to_float(fill.get("price"))
+                fill_size = abs(to_float(fill.get("size")))
+                if fill_time < recent_add_cutoff or fill_time > checked_ms or fill_price <= 0 or fill_size <= 0:
+                    continue
+                fill_side, _ = classified
+                key = self.position_lifecycle_key(address, normalize_position_coin(fill.get("coin")), fill_side)
+                bucket = recent_adds.setdefault(key, {"value": 0.0, "size": 0.0, "lastAt": 0.0})
+                bucket["value"] += fill_price * fill_size
+                bucket["size"] += fill_size
+                bucket["lastAt"] = max(bucket["lastAt"], fill_time)
 
         for wallet in dashboard.get("wallets", []):
             address = str(wallet.get("address") or "")
@@ -3108,6 +3150,10 @@ class WalletTrackerService:
                         "entrySum": 0.0,
                         "entryCount": 0,
                         "walletAddresses": set(),
+                        "recentAddValue": 0.0,
+                        "recentAddSize": 0.0,
+                        "recentAddWalletAddresses": set(),
+                        "recentAddAt": 0,
                     },
                 )
                 size = abs(to_float(position.get("size")))
@@ -3122,6 +3168,13 @@ class WalletTrackerService:
                     if entry_px > 0:
                         bucket["entrySum"] += entry_px
                         bucket["entryCount"] += 1
+                recent_add = recent_adds.get(self.position_lifecycle_key(address, coin, side), {})
+                if recent_add:
+                    bucket["recentAddValue"] += to_float(recent_add.get("value"))
+                    bucket["recentAddSize"] += to_float(recent_add.get("size"))
+                    bucket["recentAddAt"] = max(int(bucket["recentAddAt"]), int(to_float(recent_add.get("lastAt"))))
+                    if address:
+                        bucket["recentAddWalletAddresses"].add(address)
         rows = []
         for item in groups.values():
             if item["walletCount"] < min_wallets or item["totalValue"] < min_value:
@@ -3149,6 +3202,11 @@ class WalletTrackerService:
                     else "simple_average"
                     if entry_count > 0
                     else "",
+                    "recentAddPx": round(to_float(item["recentAddValue"]) / to_float(item["recentAddSize"]), 8)
+                    if to_float(item["recentAddSize"]) > 0
+                    else 0.0,
+                    "recentAddWalletCount": len(item["recentAddWalletAddresses"]),
+                    "recentAddAt": int(item["recentAddAt"]),
                 }
             )
 
@@ -4222,10 +4280,16 @@ class WalletTrackerService:
                         if to_float(item.get("entryPx")) > 0:
                             entry_label = "size-w entry" if item.get("entryType") == "size_weighted" else "avg entry"
                             entry_note = f', {entry_label} ${format_price(to_float(item.get("entryPx")))}'
+                        recent_add_note = ""
+                        if to_float(item.get("recentAddPx")) > 0:
+                            recent_add_note = (
+                                f', recent add VWAP ${format_price(to_float(item.get("recentAddPx")))} '
+                                f'({int(to_float(item.get("recentAddWalletCount")))}w/7d)'
+                            )
                         value_note = f', {format_money_thousands(to_float(item.get("totalValue")))}'
                         lines.append(
                             f'- {item["coin"]} {item["side"]} '
-                            f'({item["walletCount"]} wallets, {item["positionCount"]} positions{value_note}{entry_note})'
+                            f'({item["walletCount"]} wallets, {item["positionCount"]} positions{value_note}{entry_note}{recent_add_note})'
                         )
                 else:
                     lines.append("- None")
