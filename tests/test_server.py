@@ -860,7 +860,7 @@ class AlertSummaryTests(unittest.TestCase):
             {
                 "address": "0x1111111111111111111111111111111111111111",
                 "alias": "One",
-                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 500000}],
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 500000, "size": 10}],
                 "recentFills": [
                     {
                         "coin": "BTC",
@@ -874,7 +874,7 @@ class AlertSummaryTests(unittest.TestCase):
             {
                 "address": "0x2222222222222222222222222222222222222222",
                 "alias": "Two",
-                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 400000}],
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 400000, "size": 8}],
                 "recentFills": [
                     {
                         "coin": "BTC",
@@ -888,12 +888,12 @@ class AlertSummaryTests(unittest.TestCase):
             {
                 "address": "0x3333333333333333333333333333333333333333",
                 "alias": "Three",
-                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 300000}],
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 300000, "size": 6}],
             },
             {
                 "address": "0x6666666666666666666666666666666666666666",
                 "alias": "Six",
-                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 300000}],
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 300000, "size": 6}],
             },
             {
                 "address": "0x4444444444444444444444444444444444444444",
@@ -916,6 +916,16 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(summary["signals"][0]["strength"], "extreme")
         self.assertEqual(summary["signals"][0]["convictionScore"], 100.0)
         self.assertGreaterEqual(summary["signals"][0]["probabilityScore"], 70.0)
+        self.assertEqual(summary["signals"][0]["freshAddVwap"], 50000.0)
+        self.assertEqual(summary["signals"][0]["markPrice"], 50000.0)
+
+    def test_signal_rejection_blocks_extended_price_from_fresh_vwap(self) -> None:
+        reasons = self.service.signal_rejection_reasons(
+            {"freshAddVwap": 100.0, "markPrice": 102.0, "entryDistancePct": 2.0, "maxEntryDistancePct": 1.5},
+            90.0,
+        )
+
+        self.assertIn("extended_from_fresh_vwap", reasons)
 
     def test_build_sentiment_summary_requires_recent_activity_for_signals(self) -> None:
         snapshots = [
@@ -1846,7 +1856,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("CMM cohort signals", message)
         self.assertIn("SELL ETH short", message)
 
-    def test_check_alerts_notifies_on_new_cmm_signal(self) -> None:
+    def test_check_alerts_does_not_notify_on_cmm_only_signal(self) -> None:
         current_summary = {
             "overallBias": "mixed",
             "consensus": [],
@@ -1887,12 +1897,10 @@ class AlertSummaryTests(unittest.TestCase):
         ) as send_telegram_message:
             result = self.service.check_alerts(send_notification=True)
 
-        self.assertTrue(result["shouldNotify"])
-        self.assertTrue(result["sent"])
-        self.assertEqual(result["changes"]["addedCmmSignals"][0]["coin"], "SOL")
-        sent_message = send_telegram_message.call_args.args[2]
-        self.assertIn("CMM cohort alerts", sent_message)
-        self.assertIn("SELL SOL short", sent_message)
+        self.assertFalse(result["shouldNotify"])
+        self.assertFalse(result["sent"])
+        self.assertEqual(result["changes"]["addedCmmSignals"], [])
+        send_telegram_message.assert_not_called()
 
     def test_build_holding_only_wallets_returns_30d_holders_by_notional(self) -> None:
         wallets = [
