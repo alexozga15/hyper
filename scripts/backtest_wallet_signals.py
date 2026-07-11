@@ -173,6 +173,11 @@ def split_walk_forward(events: list[dict[str, Any]]) -> dict[str, list[dict[str,
     }
 
 
+def evaluable_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep missing candle history from consuming a walk-forward sample slot."""
+    return [item for item in events if item.get("outcomes")]
+
+
 def fetch_candles(client: HyperliquidClient, coin: str, start_ms: int, end_ms: int) -> list[dict[str, Any]]:
     result = client.safe_post_result(
         {"type": "candleSnapshot", "req": {"coin": coin, "interval": "1h", "startTime": start_ms, "endTime": end_ms}},
@@ -238,6 +243,7 @@ def main() -> int:
             for event in all_events[config["name"]]
             if int(event["time"]) <= candle_end_ms
         ]
+        evaluated = evaluable_events(evaluated)
         splits = split_walk_forward(evaluated)
         configurations.append(
             {

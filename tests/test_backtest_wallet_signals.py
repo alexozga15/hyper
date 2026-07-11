@@ -50,6 +50,14 @@ class WalletSignalBacktestTests(unittest.TestCase):
         self.assertEqual([item["time"] for item in split["validation"]], [4])
         self.assertEqual([item["time"] for item in split["test"]], [5])
 
+    def test_events_without_candles_do_not_consume_walk_forward_slots(self) -> None:
+        events = [
+            {"time": 1, "outcomes": {"1h": {}}},
+            {"time": 2, "outcomes": {}},
+        ]
+
+        self.assertEqual([item["time"] for item in backtest.evaluable_events(events)], [1])
+
 
 if __name__ == "__main__":
     unittest.main()
