@@ -2920,8 +2920,8 @@ class WalletTrackerService:
                     size_note = f' sz {format_position_size(to_float(item.get("totalSize")))}'
                 entry_note = ""
                 if to_float(item.get("entryPx")) > 0:
-                    entry_label = "open" if item.get("entryPriceSource") == "fill" else ""
-                    entry_note = f' {entry_label + " " if entry_label else ""}@${format_price(to_float(item.get("entryPx")))}'
+                    entry_label = "open VWAP" if item.get("entryPriceSource") == "fill" else "entry"
+                    entry_note = f' {entry_label} ${format_price(to_float(item.get("entryPx")))}'
                 lines.append(
                     f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} {format_money_compact(item["totalValue"])}{size_note}{entry_note}'
                 )
@@ -2953,8 +2953,8 @@ class WalletTrackerService:
                     size_note = f' +{format_position_size(to_float(item.get("sizeIncrease")))}'
                 add_price_note = ""
                 if to_float(item.get("addPrice")) > 0:
-                    price_marker = "@" if item.get("addPriceSource") == "fill" else "~$"
-                    add_price_note = f' add {price_marker}{format_price(to_float(item.get("addPrice")))}'
+                    add_label = "recent add VWAP" if item.get("addPriceSource") == "fill" else "estimated add"
+                    add_price_note = f' {add_label} ${format_price(to_float(item.get("addPrice")))}'
                 add_value = to_float(item.get("addValue", item.get("increaseValue")))
                 lines.append(
                     f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} {format_money_compact(item["previousValue"])}->{format_money_compact(item["totalValue"])} (+{format_money_compact(add_value)}{size_note}{add_price_note})'

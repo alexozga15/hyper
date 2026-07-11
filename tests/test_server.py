@@ -2757,7 +2757,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(result["changes"]["newLargePositions"][0]["coin"], "BTC")
         sent_message = send_telegram_message.call_args.args[2]
         self.assertIn("Open >$500K", sent_message)
-        self.assertIn("Trader One: BTC long $1.2M sz 12 open @$100,000", sent_message)
+        self.assertIn("Trader One: BTC long $1.2M sz 12 open VWAP $100,000", sent_message)
 
     def test_check_alerts_notifies_on_closed_large_positions(self) -> None:
         previous_summary = {
@@ -3306,7 +3306,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(len(result["changes"]["increasedLargePositions"]), 1)
         sent_message = send_telegram_message.call_args.args[2]
         self.assertIn("Added >$500K", sent_message)
-        self.assertIn("Trader One: BTC long $1.2M->$2.4M (+$1.2M +10 add ~$120,000)", sent_message)
+        self.assertIn("Trader One: BTC long $1.2M->$2.4M (+$1.2M +10 estimated add $120,000)", sent_message)
         self.assertNotIn("@$78,000", sent_message)
 
     def test_large_position_snapshot_filters_after_aggregation(self) -> None:
