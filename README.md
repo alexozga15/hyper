@@ -98,6 +98,16 @@ For near-real-time replies, deploy the Cloudflare Worker bridge in [`worker/`](w
 
 The Telegram command cursor is stored in [`data/telegram_bot_state.json`](data/telegram_bot_state.json), so the bot only answers new messages once.
 
+## Wallet Signal Backtest
+
+Run a walk-forward evaluation of fresh multi-wallet opening consensus:
+
+```bash
+python3 scripts/backtest_wallet_signals.py --days 30
+```
+
+The report is written to `data/wallet_signal_backtest.json`. It compares 3-wallet/10-minute, 4-wallet/30-minute, and 5-wallet/30-minute variants using only timestamped fills available at each event. Results include 1h, 4h, 12h, and 24h net returns, MFE/MAE, and a chronological 60/20/20 train-validation-test split. It does not claim to backtest CMM confirmation, wallet correlation, or historical top-10 membership, because those historical snapshots are not retained yet.
+
 ## Import format
 
 Paste one wallet per line in any of these formats:
