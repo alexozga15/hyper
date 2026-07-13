@@ -137,10 +137,19 @@ class CoinMarketManClient:
         coin: str,
         segment_ids: Iterable[int] | None = None,
         limit: int = 100,
+        start: str | None = None,
+        end: str | None = None,
+        open_only: bool | None = None,
     ) -> Any:
         params: dict[str, Any] = {"coin": coin.upper(), "limit": limit}
         if segment_ids:
             params["segmentIds"] = [str(item) for item in segment_ids]
+        if start:
+            params["start"] = start
+        if end:
+            params["end"] = end
+        if open_only is not None:
+            params["open"] = "true" if open_only else "false"
         return self.request("positions", params)
 
     def position_metrics(

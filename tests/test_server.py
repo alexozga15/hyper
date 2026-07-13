@@ -1639,6 +1639,9 @@ class AlertSummaryTests(unittest.TestCase):
         signal = enriched["signals"][0]
 
         self.assertEqual(client.kwargs["coin"], "BTC")
+        self.assertRegex(client.kwargs["start"], r"^\d{4}-\d{2}-\d{2}T.*Z$")
+        self.assertRegex(client.kwargs["end"], r"^\d{4}-\d{2}-\d{2}T.*Z$")
+        self.assertTrue(client.kwargs["open_only"])
         self.assertEqual(signal["price"], 100.0)
         self.assertEqual(signal["priceSource"], "position-vwap-entry")
         self.assertEqual(signal["entryPositionCount"], 2)

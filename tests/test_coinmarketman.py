@@ -55,6 +55,31 @@ class CoinMarketManClientTests(unittest.TestCase):
             },
         )
 
+    def test_positions_passes_valid_open_position_window(self) -> None:
+        client = CoinMarketManClient(token="token", base_url="https://example.test")
+
+        with patch.object(client, "request", return_value={}) as request:
+            client.positions(
+                coin="btc",
+                segment_ids=[7, 8, 9],
+                limit=100,
+                start="2026-06-13T20:22:06Z",
+                end="2026-07-13T20:22:06Z",
+                open_only=True,
+            )
+
+        request.assert_called_once_with(
+            "positions",
+            {
+                "coin": "BTC",
+                "limit": 100,
+                "segmentIds": ["7", "8", "9"],
+                "start": "2026-06-13T20:22:06Z",
+                "end": "2026-07-13T20:22:06Z",
+                "open": "true",
+            },
+        )
+
     def test_positions_heatmap_uses_opened_within_filter(self) -> None:
         client = CoinMarketManClient(token="token", base_url="https://example.test")
 

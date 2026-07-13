@@ -4053,6 +4053,8 @@ class WalletTrackerService:
         enriched: list[dict[str, Any]] = []
         errors: list[str] = []
         missing_entries = 0
+        entry_window_start = iso_hours_ago(30 * 24)
+        entry_window_end = now_iso()
         for signal in signals:
             if not isinstance(signal, dict):
                 continue
@@ -4068,6 +4070,9 @@ class WalletTrackerService:
                     coin=coin,
                     segment_ids=self.cmm_signal_segments(),
                     limit=100,
+                    start=entry_window_start,
+                    end=entry_window_end,
+                    open_only=True,
                 )
             except CoinMarketManApiError as exc:
                 errors.append(f"{coin} entries: {exc}")
