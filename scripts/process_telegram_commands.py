@@ -17,6 +17,7 @@ from server import (
     WalletStore,
     WalletTrackerService,
     WALLETS_FILE,
+    current_time_ms,
     load_json_file,
     save_json_file,
 )
@@ -179,6 +180,15 @@ def build_reply(
     if command == "/signals":
         if cmm_cache is not None and summary_cache is not None:
             summary_cache = service.apply_cmm_confirmation_to_summary(summary_cache, cmm_cache)
+        if summary_cache is not None and hasattr(service, "apply_signal_lifecycle") and hasattr(service, "alerts_path"):
+            raw = load_json_file(service.alerts_path, {})
+            alert_state = raw.get("state", {}) if isinstance(raw, dict) else {}
+            previous_summary = alert_state.get("summary", {}) if isinstance(alert_state, dict) else {}
+            summary_cache = service.apply_signal_lifecycle(
+                summary_cache,
+                previous_summary,
+                now_ms=current_time_ms(),
+            )
         return service.build_signals_message(summary_cache, cmm_summary=cmm_cache)
     if command == "/cmm":
         return service.build_cmm_signals_message(cmm_cache, wallet_summary=summary_cache)

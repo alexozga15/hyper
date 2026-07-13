@@ -10,7 +10,13 @@ Hyperwatch Pro is a lightweight Hyperliquid wallet tracker inspired by Hyperdash
 - Use official Hyperliquid WebSocket feeds for live wallet refreshes
 - Discover new wallet candidates automatically by watching public `trades` streams and then scoring discovered addresses
 - Group wallets into familiar cohorts such as `Apex`, `Whale`, and `Money Printer`
-- Generate high-conviction buy/sell signals from consensus positions scoring 80+/100 conviction
+- Generate high-conviction buy/sell signals from fresh, independent multi-wallet flow scoring 70+/100 probability
+
+Wallet alerts require four independent wallets in the current position consensus plus three net independent wallets
+adding at least $500K each in the same direction during a 15-minute window. Opposite fresh flow from two wallets or a
+70+ CoinMarketMan signal in the opposite direction vetoes the alert. Signals use the recent-add VWAP, expire after two
+hours without another add, and move through `NEW`, `CONFIRMED`, and `INVALIDATED` states. Alert outcomes are retained
+for 30 days at 15-minute, 1-hour, 4-hour, and 24-hour horizons.
 
 ## Run
 

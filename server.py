@@ -40,7 +40,16 @@ HEX_ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 MAX_IMPORT_BATCH = 100
 MAX_DISCOVERY_BATCH = 60
 DEFAULT_CONSENSUS_THRESHOLD = 4
-SIGNAL_CONVICTION_ALERT_MIN_DELTA = 10.0
+SIGNAL_CONVICTION_ALERT_MIN_DELTA = 15.0
+SIGNAL_RE_ALERT_VWAP_DELTA_PCT = 1.0
+SIGNAL_LIFETIME_MS = 2 * 60 * 60 * 1000
+SIGNAL_OUTCOME_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
+SIGNAL_OUTCOME_HORIZONS_MS = {
+    "15m": 15 * 60 * 1000,
+    "1h": 60 * 60 * 1000,
+    "4h": 4 * 60 * 60 * 1000,
+    "24h": 24 * 60 * 60 * 1000,
+}
 ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD = 70.0
 EXTREME_SIGNAL_PROBABILITY_THRESHOLD = 85.0
 ACTIONABLE_SIGNAL_MIN_WALLETS = 4
@@ -48,9 +57,11 @@ ACTIONABLE_SIGNAL_MIN_NET_WALLETS = 2
 ACTIONABLE_SIGNAL_MIN_QNET = 1.5
 ACTIONABLE_SIGNAL_MIN_INDEPENDENT_WALLETS = 4
 ACTIONABLE_SIGNAL_MIN_INDEPENDENT_NET_WALLETS = 3
-ACTIONABLE_SIGNAL_MIN_VERIFIED_FRESH_WALLETS = 2
+ACTIONABLE_SIGNAL_MIN_VERIFIED_FRESH_WALLETS = 3
+ACTIONABLE_SIGNAL_MIN_FRESH_NET_WALLETS = 3
+ACTIONABLE_SIGNAL_MAX_OPPOSITE_FRESH_WALLETS = 1
 ACTIONABLE_SIGNAL_MIN_TOP_WALLETS = 2
-WALLET_SIGNAL_ACTIVITY_WINDOW_MS = 30 * 60 * 1000
+WALLET_SIGNAL_ACTIVITY_WINDOW_MS = 15 * 60 * 1000
 WALLET_SIGNAL_MAX_ENTRY_DISTANCE_PCT = 4.0
 WALLET_SIGNAL_MAJOR_ASSET_MAX_ENTRY_DISTANCE_PCT = 1.5
 WALLET_SIGNAL_HIGH_BETA_MAX_ENTRY_DISTANCE_PCT = 2.5
@@ -97,7 +108,7 @@ MIN_POSITION_MESSAGE_VALUE = POSITION_GROUP_DISPLAY_MIN_VALUE
 NEW_POSITION_ALERT_MIN_VALUE = LARGE_POSITION_ALERT_MIN_VALUE
 POSITION_INCREASE_ALERT_MIN_DELTA = LARGE_POSITION_ALERT_MIN_VALUE
 POSITION_INCREASE_ALERT_MIN_PCT = 0.5
-ALERT_DEDUPE_COOLDOWN_MS = 30 * 60 * 1000
+ALERT_DEDUPE_COOLDOWN_MS = 60 * 60 * 1000
 CLUSTERED_OPEN_ALERT_MIN_WALLETS = 3
 OPEN_POSITION_ALERT_WINDOW_MS = 5 * 60 * 1000
 CLUSTERED_OPEN_ALERT_WINDOW_MS = OPEN_POSITION_ALERT_WINDOW_MS
@@ -2019,6 +2030,10 @@ class WalletTrackerService:
             reasons.append("weak_qnet")
         if int(to_float(item.get("verifiedFreshIndependentWalletCount"))) < ACTIONABLE_SIGNAL_MIN_VERIFIED_FRESH_WALLETS:
             reasons.append("insufficient_verified_activity")
+        if int(to_float(item.get("netFreshIndependentWalletCount"))) < ACTIONABLE_SIGNAL_MIN_FRESH_NET_WALLETS:
+            reasons.append("weak_fresh_net")
+        if int(to_float(item.get("oppositeVerifiedFreshIndependentWalletCount"))) > ACTIONABLE_SIGNAL_MAX_OPPOSITE_FRESH_WALLETS:
+            reasons.append("opposite_fresh_flow")
         if int(to_float(item.get("independentTopWalletCount"))) < ACTIONABLE_SIGNAL_MIN_TOP_WALLETS:
             reasons.append("insufficient_top_wallets")
         if to_float(item.get("freshAddVwap")) <= 0 or to_float(item.get("markPrice")) <= 0:
@@ -2067,6 +2082,11 @@ class WalletTrackerService:
                     "verifiedFreshIndependentWalletCount": int(
                         to_float(item.get("verifiedFreshIndependentWalletCount"))
                     ),
+                    "oppositeVerifiedFreshIndependentWalletCount": int(
+                        to_float(item.get("oppositeVerifiedFreshIndependentWalletCount"))
+                    ),
+                    "netFreshIndependentWalletCount": int(to_float(item.get("netFreshIndependentWalletCount"))),
+                    "freshWalletAddresses": list(item.get("freshWalletAddresses", [])),
                     "fillQualityUnknownWalletCount": int(to_float(item.get("fillQualityUnknownWalletCount"))),
                     "topWalletCount": int(to_float(item.get("topWalletCount"))),
                     "independentTopWalletCount": int(to_float(item.get("independentTopWalletCount"))),
@@ -2209,15 +2229,18 @@ class WalletTrackerService:
                         window_ms=CLUSTERED_OPEN_ALERT_WINDOW_MS,
                     ):
                         bucket["freshActivityWalletAddresses"].add(address)
-                    if self.has_verified_recent_activity(snapshot, position, position_lifecycle, now_ms=now_ms):
+                    fresh_add = self.recent_position_add_metrics(
+                        snapshot,
+                        position,
+                        now_ms=now_ms,
+                        window_ms=WALLET_SIGNAL_ACTIVITY_WINDOW_MS,
+                    )
+                    if (
+                        self.wallet_fill_data_reliable(snapshot)
+                        and to_float(fresh_add.get("value")) >= NEW_POSITION_ALERT_MIN_VALUE
+                    ):
                         bucket["verifiedFreshWalletAddresses"].add(address)
                         bucket["verifiedFreshWalletGroups"].add(correlation_group)
-                        fresh_add = self.recent_position_add_metrics(
-                            snapshot,
-                            position,
-                            now_ms=now_ms,
-                            window_ms=WALLET_SIGNAL_ACTIVITY_WINDOW_MS,
-                        )
                         if to_float(fresh_add.get("size")) > 0:
                             bucket["freshAddValue"] += to_float(fresh_add.get("value"))
                             bucket["freshAddSize"] += to_float(fresh_add.get("size"))
@@ -2254,6 +2277,7 @@ class WalletTrackerService:
                 "freshActivityWalletCount": len(bucket["freshActivityWalletAddresses"]),
                 "verifiedFreshWalletCount": len(bucket["verifiedFreshWalletAddresses"]),
                 "verifiedFreshIndependentWalletCount": len(bucket["verifiedFreshWalletGroups"]),
+                "freshWalletAddresses": sorted(bucket["verifiedFreshWalletAddresses"]),
                 "topWalletCount": len(bucket["topWalletAddresses"]),
                 "independentTopWalletCount": len(bucket["topWalletGroups"]),
                 "fillQualityUnknownWalletCount": len(bucket["fillQualityUnknownWalletAddresses"]),
@@ -2275,6 +2299,7 @@ class WalletTrackerService:
         coin_side_raw_counts: dict[str, dict[str, int]] = {}
         coin_side_independent_counts: dict[str, dict[str, int]] = {}
         coin_side_independent_weights: dict[str, dict[str, float]] = {}
+        coin_side_fresh_independent_counts: dict[str, dict[str, int]] = {}
         for bucket in aggregate.values():
             side_counts = coin_side_counts.setdefault(str(bucket["coin"]), {"long": 0.0, "short": 0.0})
             side_counts[str(bucket["side"])] = to_float(bucket["weightedWalletCount"])
@@ -2284,6 +2309,10 @@ class WalletTrackerService:
             independent_counts[str(bucket["side"])] = len(bucket["walletGroups"])
             independent_weights = coin_side_independent_weights.setdefault(str(bucket["coin"]), {"long": 0.0, "short": 0.0})
             independent_weights[str(bucket["side"])] = sum(bucket["walletGroupWeights"].values())
+            fresh_independent_counts = coin_side_fresh_independent_counts.setdefault(
+                str(bucket["coin"]), {"long": 0, "short": 0}
+            )
+            fresh_independent_counts[str(bucket["side"])] = len(bucket["verifiedFreshWalletGroups"])
         max_net_weighted_wallet_count = 0.0
         for item in consensus:
             side = str(item["side"])
@@ -2291,6 +2320,7 @@ class WalletTrackerService:
             raw_counts = coin_side_raw_counts.get(str(item["coin"]), {})
             independent_counts = coin_side_independent_counts.get(str(item["coin"]), {})
             independent_weights = coin_side_independent_weights.get(str(item["coin"]), {})
+            fresh_independent_counts = coin_side_fresh_independent_counts.get(str(item["coin"]), {})
             opposite_side = "short" if side == "long" else "long"
             side_wallet_count = int(to_float(item["walletCount"]))
             opposite_wallet_count = int(to_float(raw_counts.get(opposite_side)))
@@ -2304,6 +2334,9 @@ class WalletTrackerService:
             side_independent_weight = to_float(item["independentWeightedWalletCount"])
             opposite_independent_weight = to_float(independent_weights.get(opposite_side))
             net_independent_weight = max(0.0, side_independent_weight - opposite_independent_weight)
+            side_fresh_independent_count = int(to_float(item["verifiedFreshIndependentWalletCount"]))
+            opposite_fresh_independent_count = int(to_float(fresh_independent_counts.get(opposite_side)))
+            net_fresh_independent_count = max(0, side_fresh_independent_count - opposite_fresh_independent_count)
             item["oppositeWalletCount"] = opposite_wallet_count
             item["netWalletCount"] = net_wallet_count
             item["oppositeWeightedWalletCount"] = round(opposite_weighted_wallet_count, 3)
@@ -2312,6 +2345,8 @@ class WalletTrackerService:
             item["netIndependentWalletCount"] = net_independent_wallet_count
             item["oppositeIndependentWeightedWalletCount"] = round(opposite_independent_weight, 3)
             item["netIndependentWeightedWalletCount"] = round(net_independent_weight, 3)
+            item["oppositeVerifiedFreshIndependentWalletCount"] = opposite_fresh_independent_count
+            item["netFreshIndependentWalletCount"] = net_fresh_independent_count
             item["longWalletCount"] = int(to_float(raw_counts.get("long")))
             item["shortWalletCount"] = int(to_float(raw_counts.get("short")))
             item["longWeightedWalletCount"] = round(to_float(side_counts.get("long")), 3)
@@ -2772,7 +2807,14 @@ class WalletTrackerService:
 
     def signal_event_key(self, event: str, item: dict[str, Any]) -> str:
         probability_bucket = int(to_float(item.get("probabilityScore")) // 5 * 5)
-        return f'signal:{event}:{item.get("coin", "Unknown")}:{item.get("side", "")}:p{probability_bucket}'
+        fresh_signature = ",".join(
+            sorted(str(address).lower() for address in item.get("freshWalletAddresses", []))
+        )
+        vwap = to_float(item.get("freshAddVwap"))
+        return (
+            f'signal:{event}:{item.get("coin", "Unknown")}:{item.get("side", "")}:'
+            f'p{probability_bucket}:v{vwap:.8g}:{fresh_signature}'
+        )
 
     def cmm_signal_event_key(self, event: str, item: dict[str, Any]) -> str:
         probability_bucket = int(to_float(item.get("probabilityScore")) // 5 * 5)
@@ -2782,6 +2824,7 @@ class WalletTrackerService:
         keys: list[str] = []
         for event, field in (("added", "addedSignals"), ("changed", "changedSignals")):
             keys.extend(self.signal_event_key(event, item) for item in changes.get(field, []))
+        keys.extend(self.signal_event_key("invalidated", item) for item in changes.get("removedSignals", []))
         for event, field in (("added", "addedCmmSignals"), ("changed", "changedCmmSignals")):
             keys.extend(self.cmm_signal_event_key(event, item) for item in changes.get(field, []))
         keys.extend(self.clustered_open_event_key(item) for item in changes.get("clusteredOpenPositions", []))
@@ -2822,8 +2865,11 @@ class WalletTrackerService:
                     kept.append(item)
             filtered[field] = kept
 
-        filtered["removedSignals"] = []
-        for event, field in (("added", "addedSignals"), ("changed", "changedSignals")):
+        for event, field in (
+            ("added", "addedSignals"),
+            ("changed", "changedSignals"),
+            ("invalidated", "removedSignals"),
+        ):
             kept = []
             for item in changes.get(field, []):
                 key = self.signal_event_key(event, item)
@@ -2909,9 +2955,22 @@ class WalletTrackerService:
             self.signal_key(item): item
             for item in self.filter_signals_for_alerts(current.get("signals", []), track_hip3)
         }
+        invalidated_signals = {
+            self.signal_key(item): item
+            for item in current.get("invalidatedSignals", [])
+            if isinstance(item, dict)
+        }
 
         added = [current_signals[key] for key in current_signals.keys() - previous_signals.keys()]
-        removed = [previous_signals[key] for key in previous_signals.keys() - current_signals.keys()]
+        removed = [
+            {
+                **previous_signals[key],
+                **invalidated_signals.get(key, {}),
+                "status": "INVALIDATED",
+                "invalidationReason": invalidated_signals.get(key, {}).get("invalidationReason", "ended"),
+            }
+            for key in previous_signals.keys() - current_signals.keys()
+        ]
         changed = []
         for key in current_signals.keys() & previous_signals.keys():
             old_item = previous_signals[key]
@@ -2921,7 +2980,21 @@ class WalletTrackerService:
             score_delta = new_score - old_score
             old_wallet_count = int(to_float(old_item.get("walletCount")))
             new_wallet_count = int(to_float(new_item.get("walletCount")))
-            if abs(score_delta) < SIGNAL_CONVICTION_ALERT_MIN_DELTA and old_wallet_count == new_wallet_count:
+            old_fresh_addresses = {
+                str(address).lower() for address in old_item.get("freshWalletAddresses", [])
+            }
+            new_fresh_addresses = {
+                str(address).lower() for address in new_item.get("freshWalletAddresses", [])
+            }
+            added_fresh_wallets = sorted(new_fresh_addresses - old_fresh_addresses)
+            old_vwap = to_float(old_item.get("freshAddVwap"))
+            new_vwap = to_float(new_item.get("freshAddVwap"))
+            vwap_delta_pct = abs((new_vwap / old_vwap - 1.0) * 100.0) if old_vwap > 0 and new_vwap > 0 else 0.0
+            if (
+                abs(score_delta) < SIGNAL_CONVICTION_ALERT_MIN_DELTA
+                and not added_fresh_wallets
+                and vwap_delta_pct < SIGNAL_RE_ALERT_VWAP_DELTA_PCT
+            ):
                 continue
             changed.append(
                 {
@@ -2931,6 +3004,8 @@ class WalletTrackerService:
                     "probabilityDelta": round(score_delta, 1),
                     "fromWalletCount": old_wallet_count,
                     "toWalletCount": new_wallet_count,
+                    "addedFreshWallets": added_fresh_wallets,
+                    "freshVwapDeltaPct": round(vwap_delta_pct, 2),
                 }
             )
 
@@ -3017,7 +3092,7 @@ class WalletTrackerService:
                     activity_bits.append(f'{int(to_float(item.get("recentAddWalletCount")))} adds')
                 if int(to_float(item.get("verifiedFreshIndependentWalletCount"))):
                     activity_bits.append(
-                        f'{int(to_float(item.get("verifiedFreshIndependentWalletCount")))} verified 30m'
+                        f'{int(to_float(item.get("verifiedFreshIndependentWalletCount")))} verified 15m'
                     )
                 activity_note = f', {"/".join(activity_bits)}' if activity_bits else ""
                 cmm_note = ""
@@ -3026,13 +3101,37 @@ class WalletTrackerService:
                         f', CMM p{to_float(item.get("cmmProbabilityScore")):.0f}'
                         f'/trend {to_float(item.get("cmmTrendScore")):.0f}'
                     )
+                fresh_note = ""
+                if "netFreshIndependentWalletCount" in item:
+                    fresh_note = (
+                        f', fresh +{int(to_float(item.get("netFreshIndependentWalletCount")))}'
+                        f'/-{int(to_float(item.get("oppositeVerifiedFreshIndependentWalletCount")))}'
+                    )
+                price_note = ""
+                if to_float(item.get("freshAddVwap")) > 0:
+                    price_note = (
+                        f', VWAP ${format_price(to_float(item.get("freshAddVwap")))}'
+                        f' live ~${format_price(to_float(item.get("markPrice")))}'
+                        f' dist {to_float(item.get("entryDistancePct")):+.2f}%'
+                    )
                 lines.append(
-                    f'- {str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]}: '
+                    f'- {str(item.get("status") or item.get("action", "watch")).upper()} '
+                    f'{item["coin"]} {item["side"]}: '
                     f'p{to_float(item.get("probabilityScore")):.0f}{move_note}, '
                     f'{item["walletCount"]}w/{int(to_float(item.get("independentWalletCount", item["walletCount"])))}i '
                     f'net +{int(to_float(item.get("netIndependentWalletCount", item.get("netWalletCount"))))}, '
                     f'qnet +{to_float(item.get("netIndependentWeightedWalletCount", item.get("netWeightedWalletCount"))):.1f}, '
-                    f'{format_money_compact(item.get("totalValue"))}{activity_note}{cmm_note}'
+                    f'{format_money_compact(item.get("totalValue"))}{fresh_note}'
+                    f'{activity_note}{price_note}{cmm_note}'
+                )
+
+        if changes.get("removedSignals"):
+            lines.append("")
+            lines.append("Invalidated signals")
+            for item in changes["removedSignals"][:8]:
+                lines.append(
+                    f'- INVALIDATED {item.get("coin", "Unknown")} {item.get("side", "")}: '
+                    f'{str(item.get("invalidationReason") or "ended").replace("_", " ")}'
                 )
 
         cmm_signals = changes.get("addedCmmSignals", []) + changes.get("changedCmmSignals", [])
@@ -3161,7 +3260,7 @@ class WalletTrackerService:
                         activity_bits.append(f'{int(to_float(item.get("recentAddWalletCount")))} adds')
                     if int(to_float(item.get("verifiedFreshIndependentWalletCount"))):
                         activity_bits.append(
-                            f'{int(to_float(item.get("verifiedFreshIndependentWalletCount")))} verified 30m'
+                            f'{int(to_float(item.get("verifiedFreshIndependentWalletCount")))} verified 15m'
                         )
                     activity_note = f', {"/".join(activity_bits)}' if activity_bits else ""
                     lines.append(
@@ -4132,6 +4231,9 @@ class WalletTrackerService:
             int(to_float(signal.get("independentWalletCount"))) >= ACTIONABLE_SIGNAL_MIN_INDEPENDENT_WALLETS
             and int(to_float(signal.get("netIndependentWalletCount"))) >= ACTIONABLE_SIGNAL_MIN_INDEPENDENT_NET_WALLETS
             and int(to_float(signal.get("verifiedFreshIndependentWalletCount"))) >= ACTIONABLE_SIGNAL_MIN_VERIFIED_FRESH_WALLETS
+            and int(to_float(signal.get("netFreshIndependentWalletCount"))) >= ACTIONABLE_SIGNAL_MIN_FRESH_NET_WALLETS
+            and int(to_float(signal.get("oppositeVerifiedFreshIndependentWalletCount")))
+            <= ACTIONABLE_SIGNAL_MAX_OPPOSITE_FRESH_WALLETS
             and int(to_float(signal.get("independentTopWalletCount"))) >= ACTIONABLE_SIGNAL_MIN_TOP_WALLETS
         )
 
@@ -4150,6 +4252,7 @@ class WalletTrackerService:
             if isinstance(signal, dict)
         }
         adjusted_signals: list[dict[str, Any]] = []
+        vetoed_signals: list[dict[str, Any]] = []
         for signal in summary.get("signals", []):
             if not isinstance(signal, dict):
                 continue
@@ -4161,10 +4264,11 @@ class WalletTrackerService:
             original_probability = to_float(signal.get("probabilityScore", signal.get("convictionScore")))
             wallet_native = self.is_wallet_native_signal(signal)
 
-            if same_cmm and to_float(same_cmm.get("probabilityScore")) >= CMM_WATCH_PROBABILITY_THRESHOLD:
-                combined_probability = self.combined_wallet_cmm_probability(signal, same_cmm)
-                if require_confirmation and combined_probability < CMM_ALERT_PROBABILITY_THRESHOLD:
-                    continue
+            if same_cmm and to_float(same_cmm.get("probabilityScore")) >= CMM_SIGNAL_PROBABILITY_THRESHOLD:
+                combined_probability = max(
+                    original_probability,
+                    self.combined_wallet_cmm_probability(signal, same_cmm),
+                )
                 adjusted_signals.append(
                     {
                         **signal,
@@ -4179,29 +4283,23 @@ class WalletTrackerService:
                 )
                 continue
 
-            if opposite_cmm and to_float(opposite_cmm.get("probabilityScore")) >= CMM_WATCH_PROBABILITY_THRESHOLD:
-                downgraded_probability = max(0.0, original_probability - 25.0)
-                if (require_confirmation and not wallet_native) or downgraded_probability < ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD:
-                    continue
-                adjusted_signals.append(
+            if opposite_cmm and to_float(opposite_cmm.get("probabilityScore")) >= CMM_SIGNAL_PROBABILITY_THRESHOLD:
+                vetoed_signals.append(
                     {
                         **signal,
-                        "originalProbabilityScore": round(original_probability, 1),
-                        "probabilityScore": round(downgraded_probability, 1),
-                        "cmmConfirmation": "conflict",
+                        "invalidationReason": "cmm_conflict",
                         "cmmConflictProbabilityScore": to_float(opposite_cmm.get("probabilityScore")),
                     }
                 )
                 continue
 
-            downgraded_probability = max(0.0, original_probability - 10.0)
-            if (require_confirmation and not wallet_native) or downgraded_probability < ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD:
+            if not wallet_native:
                 continue
             adjusted_signals.append(
                 {
                     **signal,
                     "originalProbabilityScore": round(original_probability, 1),
-                    "probabilityScore": round(downgraded_probability, 1),
+                    "probabilityScore": round(original_probability, 1),
                     "cmmConfirmation": "unconfirmed",
                 }
             )
@@ -4215,7 +4313,164 @@ class WalletTrackerService:
                 str(item.get("side")),
             )
         )
-        return {**summary, "signals": adjusted_signals, "signalCount": len(adjusted_signals)}
+        return {
+            **summary,
+            "signals": adjusted_signals,
+            "signalCount": len(adjusted_signals),
+            "vetoedSignals": vetoed_signals,
+        }
+
+    def apply_signal_lifecycle(
+        self,
+        summary: dict[str, Any],
+        previous: dict[str, Any],
+        *,
+        now_ms: int,
+    ) -> dict[str, Any]:
+        if not summary.get("signals") and not previous.get("signals"):
+            return summary
+        previous_signals = {
+            self.signal_key(item): item
+            for item in previous.get("signals", [])
+            if isinstance(item, dict)
+        }
+        current_signals = {
+            self.signal_key(item): item
+            for item in summary.get("signals", [])
+            if isinstance(item, dict)
+        }
+        consensus = {
+            self.signal_key(item): item
+            for item in summary.get("consensus", [])
+            if isinstance(item, dict)
+        }
+        vetoed = {
+            self.signal_key(item): item
+            for item in summary.get("vetoedSignals", [])
+            if isinstance(item, dict)
+        }
+        active: list[dict[str, Any]] = []
+        invalidated: list[dict[str, Any]] = []
+
+        for key, signal in current_signals.items():
+            prior = previous_signals.get(key)
+            fresh_addresses = sorted({str(address).lower() for address in signal.get("freshWalletAddresses", [])})
+            latest_fresh_at = int(to_float(signal.get("freshAddLatestTime"))) or now_ms
+            if prior:
+                prior_addresses = {
+                    str(address).lower() for address in prior.get("freshWalletAddresses", [])
+                }
+                status = "CONFIRMED" if set(fresh_addresses) - prior_addresses else "ACTIVE"
+                first_seen_at = int(to_float(prior.get("firstSeenAt"))) or now_ms
+                latest_fresh_at = max(latest_fresh_at, int(to_float(prior.get("lastFreshAt"))))
+            else:
+                status = "NEW"
+                first_seen_at = latest_fresh_at
+            active.append(
+                {
+                    **signal,
+                    "status": status,
+                    "firstSeenAt": first_seen_at,
+                    "lastFreshAt": latest_fresh_at,
+                    "freshWalletAddresses": fresh_addresses,
+                }
+            )
+
+        for key, prior in previous_signals.items():
+            if key in current_signals:
+                continue
+            last_fresh_at = int(to_float(prior.get("lastFreshAt", prior.get("freshAddLatestTime"))))
+            consensus_item = consensus.get(key)
+            reason = ""
+            if key in vetoed:
+                reason = "cmm_conflict"
+            elif consensus_item and int(
+                to_float(consensus_item.get("oppositeVerifiedFreshIndependentWalletCount"))
+            ) > ACTIONABLE_SIGNAL_MAX_OPPOSITE_FRESH_WALLETS:
+                reason = "opposite_fresh_flow"
+            elif consensus_item and int(to_float(consensus_item.get("netIndependentWalletCount"))) < 2:
+                reason = "consensus_lost"
+            elif not consensus_item:
+                reason = "consensus_lost"
+            elif last_fresh_at <= 0 or now_ms - last_fresh_at >= SIGNAL_LIFETIME_MS:
+                reason = "expired"
+
+            if reason:
+                invalidated.append({**prior, "status": "INVALIDATED", "invalidationReason": reason})
+            else:
+                active.append({**prior, "status": "ACTIVE"})
+
+        active.sort(
+            key=lambda item: (
+                -to_float(item.get("probabilityScore")),
+                -int(to_float(item.get("verifiedFreshIndependentWalletCount"))),
+                str(item.get("coin")),
+            )
+        )
+        return {
+            **summary,
+            "signals": active,
+            "signalCount": len(active),
+            "invalidatedSignals": invalidated,
+        }
+
+    def update_signal_outcomes(
+        self,
+        previous: dict[str, Any],
+        summary: dict[str, Any],
+        *,
+        now_ms: int,
+    ) -> dict[str, Any]:
+        records = {
+            str(key): dict(value)
+            for key, value in (previous.items() if isinstance(previous, dict) else [])
+            if isinstance(value, dict)
+            and now_ms - int(to_float(value.get("startedAt"))) <= SIGNAL_OUTCOME_RETENTION_MS
+        }
+        marks = {
+            self.signal_key(item): to_float(item.get("markPrice"))
+            for item in summary.get("consensus", [])
+            if isinstance(item, dict) and to_float(item.get("markPrice")) > 0
+        }
+
+        for signal in summary.get("signals", []):
+            if not isinstance(signal, dict) or signal.get("status") != "NEW":
+                continue
+            started_at = int(to_float(signal.get("firstSeenAt"))) or now_ms
+            entry_price = to_float(signal.get("freshAddVwap"))
+            if entry_price <= 0:
+                continue
+            record_key = f'{self.signal_key(signal)}:{started_at}'
+            records.setdefault(
+                record_key,
+                {
+                    "coin": signal.get("coin", "Unknown"),
+                    "side": signal.get("side", ""),
+                    "startedAt": started_at,
+                    "entryPrice": round(entry_price, 8),
+                    "probabilityScore": round(to_float(signal.get("probabilityScore")), 1),
+                    "freshWalletCount": int(to_float(signal.get("verifiedFreshIndependentWalletCount"))),
+                    "outcomes": {},
+                },
+            )
+
+        for record in records.values():
+            started_at = int(to_float(record.get("startedAt")))
+            entry_price = to_float(record.get("entryPrice"))
+            mark_price = marks.get(self.signal_key(record), 0.0)
+            if started_at <= 0 or entry_price <= 0 or mark_price <= 0:
+                continue
+            outcomes = record.setdefault("outcomes", {})
+            direction = 1.0 if str(record.get("side") or "").lower() == "long" else -1.0
+            for label, horizon_ms in SIGNAL_OUTCOME_HORIZONS_MS.items():
+                if label in outcomes or now_ms - started_at < horizon_ms:
+                    continue
+                outcomes[label] = {
+                    "markPrice": round(mark_price, 8),
+                    "returnPct": round(((mark_price / entry_price) - 1.0) * 100.0 * direction, 3),
+                    "measuredAt": now_ms,
+                }
+        return records
 
     def cmm_asset_group(self, coin: Any) -> str:
         normalized_coin = normalize_cmm_coin(coin)
@@ -4381,7 +4636,7 @@ class WalletTrackerService:
                     activity_bits.append(f'{int(to_float(item.get("recentAddWalletCount")))} adds')
                 if int(to_float(item.get("verifiedFreshIndependentWalletCount"))):
                     activity_bits.append(
-                        f'{int(to_float(item.get("verifiedFreshIndependentWalletCount")))} verified 30m'
+                        f'{int(to_float(item.get("verifiedFreshIndependentWalletCount")))} verified 15m'
                     )
                 activity_note = f', {"/".join(activity_bits)}' if activity_bits else ""
                 cmm_note = ""
@@ -4398,9 +4653,17 @@ class WalletTrackerService:
                         f'live ~${format_price(to_float(item.get("markPrice")))} '
                         f'dist {to_float(item.get("entryDistancePct")):+.2f}%'
                     )
+                fresh_note = ""
+                if "netFreshIndependentWalletCount" in item:
+                    fresh_note = (
+                        f', fresh +{int(to_float(item.get("netFreshIndependentWalletCount")))}'
+                        f'/-{int(to_float(item.get("oppositeVerifiedFreshIndependentWalletCount")))}'
+                    )
                 lines.append(
-                    f'{index}. {str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]} '
-                    f'({item["walletCount"]} wallets{net_note}, p{probability:.0f}/100{activity_note}{price_note}{cmm_note})'
+                    f'{index}. {str(item.get("status") or item.get("action", "watch")).upper()} '
+                    f'{item["coin"]} {item["side"]} '
+                    f'({item["walletCount"]} wallets{net_note}{fresh_note}, '
+                    f'p{probability:.0f}/100{activity_note}{price_note}{cmm_note})'
                 )
         else:
             lines.append("- No actionable signals right now")
@@ -4725,12 +4988,23 @@ class WalletTrackerService:
             position_lifecycle=position_lifecycle,
         )
         cmm_summary = self.build_cached_cmm_signal_summary(state)
+        previous_summary = state.get("summary", {}) if isinstance(state, dict) else {}
         alert_summary = self.apply_cmm_confirmation_to_summary(
             summary,
             cmm_summary,
             require_confirmation=True,
         )
-        previous_summary = state.get("summary", {}) if isinstance(state, dict) else {}
+        dedupe_now_ms = current_time_ms()
+        alert_summary = self.apply_signal_lifecycle(
+            alert_summary,
+            previous_summary,
+            now_ms=dedupe_now_ms,
+        )
+        signal_outcomes = self.update_signal_outcomes(
+            state.get("signalOutcomes", {}),
+            alert_summary,
+            now_ms=dedupe_now_ms,
+        )
         previous_positions = state.get("largePositions", {}) if isinstance(state, dict) else {}
         previous_dedupe = state.get("alertDedupe", {}) if isinstance(state, dict) else {}
         current_positions = self.build_large_position_snapshot(dashboard)
@@ -4741,7 +5015,6 @@ class WalletTrackerService:
         }
         previous_positions = self.filter_positions_to_tracked_wallets(previous_positions, tracked_addresses)
         fill_prices = self.build_recent_fill_price_map(dashboard, since_ms=iso_to_ms(state.get("lastCheckedAt")))
-        dedupe_now_ms = current_time_ms()
         # Keep HIP-3 available for explicit commands like /hip3, but exclude it
         # from automatic Telegram alerts and change-trigger decisions.
         changes = self.summarize_changes(previous_summary, alert_summary, track_hip3=False)
@@ -4774,6 +5047,7 @@ class WalletTrackerService:
             [
                 changes["addedSignals"],
                 changes["changedSignals"],
+                changes["removedSignals"],
                 changes["addedCmmSignals"],
                 changes["changedCmmSignals"],
                 changes["clusteredOpenPositions"],
@@ -4820,6 +5094,7 @@ class WalletTrackerService:
             "lastSentAt": checked_at if sent else state.get("lastSentAt"),
             "topConvictionWallets": top_cohort,
             "walletPositionLifecycle": position_lifecycle,
+            "signalOutcomes": signal_outcomes,
         }
         if not should_notify or sent or not config.get("enabled"):
             new_state["summary"] = alert_summary
@@ -4860,10 +5135,22 @@ class WalletTrackerService:
             position_lifecycle=position_lifecycle,
         )
         cmm_summary = self.build_cached_cmm_signal_summary(state)
+        previous_summary = state.get("summary", {}) if isinstance(state, dict) else {}
         alert_summary = self.apply_cmm_confirmation_to_summary(
             summary,
             cmm_summary,
             require_confirmation=True,
+        )
+        lifecycle_now_ms = current_time_ms()
+        alert_summary = self.apply_signal_lifecycle(
+            alert_summary,
+            previous_summary,
+            now_ms=lifecycle_now_ms,
+        )
+        signal_outcomes = self.update_signal_outcomes(
+            state.get("signalOutcomes", {}),
+            alert_summary,
+            now_ms=lifecycle_now_ms,
         )
         current_positions = self.build_large_position_snapshot(dashboard)
         self.send_telegram_message(
@@ -4927,6 +5214,7 @@ class WalletTrackerService:
             "lastHourlySyncedAt": synced_at,
             "topConvictionWallets": top_cohort,
             "walletPositionLifecycle": position_lifecycle,
+            "signalOutcomes": signal_outcomes,
             "cmmSignals": cmm_summary,
         }
         if not should_send_position_alert or position_alert_sent or not config.get("enabled"):

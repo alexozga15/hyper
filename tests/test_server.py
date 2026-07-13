@@ -924,13 +924,13 @@ class AlertSummaryTests(unittest.TestCase):
             {
                 "address": "0x2222222222222222222222222222222222222222",
                 "alias": "Two",
-                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 400000, "size": 8}],
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 500000, "size": 10}],
                 "recentFills": [
                     {
                         "coin": "BTC",
                         "direction": "Increase Long",
                         "price": 50_000.0,
-                        "size": 8.0,
+                        "size": 10.0,
                         "time": now_ms - 60_000,
                     }
                 ],
@@ -938,7 +938,16 @@ class AlertSummaryTests(unittest.TestCase):
             {
                 "address": "0x3333333333333333333333333333333333333333",
                 "alias": "Three",
-                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 300000, "size": 6}],
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 500000, "size": 10}],
+                "recentFills": [
+                    {
+                        "coin": "BTC",
+                        "direction": "Increase Long",
+                        "price": 50_000.0,
+                        "size": 10.0,
+                        "time": now_ms - 60_000,
+                    }
+                ],
             },
             {
                 "address": "0x6666666666666666666666666666666666666666",
@@ -976,6 +985,63 @@ class AlertSummaryTests(unittest.TestCase):
         )
 
         self.assertIn("extended_from_fresh_vwap", reasons)
+
+    def test_signal_rejection_requires_three_net_fresh_wallets_and_blocks_opposition(self) -> None:
+        base = {
+            "independentWalletCount": 4,
+            "netIndependentWalletCount": 3,
+            "netIndependentWeightedWalletCount": 2.0,
+            "verifiedFreshIndependentWalletCount": 3,
+            "netFreshIndependentWalletCount": 3,
+            "oppositeVerifiedFreshIndependentWalletCount": 0,
+            "independentTopWalletCount": 2,
+            "freshAddVwap": 100.0,
+            "markPrice": 100.0,
+            "entryDistancePct": 0.0,
+            "maxEntryDistancePct": 1.5,
+        }
+
+        self.assertEqual(self.service.signal_rejection_reasons(base, 80.0), [])
+        self.assertIn(
+            "weak_fresh_net",
+            self.service.signal_rejection_reasons({**base, "netFreshIndependentWalletCount": 2}, 80.0),
+        )
+        self.assertIn(
+            "opposite_fresh_flow",
+            self.service.signal_rejection_reasons(
+                {**base, "oppositeVerifiedFreshIndependentWalletCount": 2}, 80.0
+            ),
+        )
+
+    def test_fresh_signal_flow_requires_500k_per_wallet_inside_15_minutes(self) -> None:
+        now_ms = 1_700_000_000_000
+        snapshots = []
+        for index, (value, age_minutes) in enumerate(
+            ((500_000.0, 1), (500_000.0, 5), (499_999.0, 2), (500_000.0, 16)),
+            start=1,
+        ):
+            size = value / 50_000.0
+            snapshots.append(
+                {
+                    "address": f"0x{index:040x}",
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": value, "size": size}],
+                    "recentFills": [
+                        {
+                            "coin": "BTC",
+                            "direction": "Increase Long",
+                            "price": 50_000.0,
+                            "size": size,
+                            "time": now_ms - age_minutes * 60_000,
+                        }
+                    ],
+                }
+            )
+
+        with patch("server.current_time_ms", return_value=now_ms):
+            summary = self.service.build_sentiment_summary(snapshots, min_wallets=4)
+
+        self.assertEqual(summary["consensus"][0]["verifiedFreshIndependentWalletCount"], 2)
+        self.assertEqual(summary["signals"], [])
 
     def test_build_sentiment_summary_requires_recent_activity_for_signals(self) -> None:
         snapshots = [
@@ -1201,7 +1267,7 @@ class AlertSummaryTests(unittest.TestCase):
                     "action": "buy",
                     "walletCount": 5,
                     "totalValue": 2_000_000.0,
-                    "convictionScore": 95.0,
+                    "convictionScore": 98.0,
                 },
                 {
                     "coin": "ETH",
@@ -1219,7 +1285,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(changes["addedSignals"][0]["coin"], "ETH")
         self.assertEqual(changes["changedSignals"][0]["coin"], "BTC")
         self.assertEqual(changes["changedSignals"][0]["fromProbabilityScore"], 82.0)
-        self.assertEqual(changes["changedSignals"][0]["toProbabilityScore"], 95.0)
+        self.assertEqual(changes["changedSignals"][0]["toProbabilityScore"], 98.0)
 
     def test_build_signals_message_formats_signal_actions(self) -> None:
         summary = {
@@ -1868,7 +1934,9 @@ class AlertSummaryTests(unittest.TestCase):
                     "walletCount": 4,
                     "independentWalletCount": 4,
                     "netIndependentWalletCount": 3,
-                    "verifiedFreshIndependentWalletCount": 2,
+                    "verifiedFreshIndependentWalletCount": 3,
+                    "netFreshIndependentWalletCount": 3,
+                    "oppositeVerifiedFreshIndependentWalletCount": 0,
                     "independentTopWalletCount": 2,
                 }
             ],
@@ -1882,7 +1950,7 @@ class AlertSummaryTests(unittest.TestCase):
         )
 
         self.assertEqual(filtered["signals"][0]["cmmConfirmation"], "unconfirmed")
-        self.assertEqual(filtered["signals"][0]["probabilityScore"], 80.0)
+        self.assertEqual(filtered["signals"][0]["probabilityScore"], 90.0)
 
     def test_cmm_confirmation_keeps_strong_agreement(self) -> None:
         summary = {
@@ -1919,6 +1987,135 @@ class AlertSummaryTests(unittest.TestCase):
 
         self.assertEqual(filtered["signals"][0]["cmmConfirmation"], "confirmed")
         self.assertGreaterEqual(filtered["signals"][0]["probabilityScore"], 80)
+
+    def test_cmm_opposite_signal_at_70_is_hard_veto(self) -> None:
+        wallet_signal = {
+            "coin": "BTC",
+            "side": "long",
+            "probabilityScore": 95.0,
+            "walletCount": 5,
+            "independentWalletCount": 5,
+            "netIndependentWalletCount": 4,
+            "verifiedFreshIndependentWalletCount": 3,
+            "netFreshIndependentWalletCount": 3,
+            "oppositeVerifiedFreshIndependentWalletCount": 0,
+            "independentTopWalletCount": 2,
+        }
+        filtered = self.service.apply_cmm_confirmation_to_summary(
+            {"signals": [wallet_signal], "signalCount": 1},
+            {
+                "enabled": True,
+                "signals": [{"coin": "BTC", "side": "short", "probabilityScore": 70.0}],
+            },
+            require_confirmation=True,
+        )
+
+        self.assertEqual(filtered["signals"], [])
+        self.assertEqual(filtered["vetoedSignals"][0]["invalidationReason"], "cmm_conflict")
+
+    def test_signal_lifecycle_confirms_new_wallet_and_expires_after_two_hours(self) -> None:
+        now_ms = 1_700_000_000_000
+        prior = {
+            "signals": [
+                {
+                    "coin": "BTC",
+                    "side": "long",
+                    "probabilityScore": 80.0,
+                    "walletCount": 4,
+                    "freshWalletAddresses": ["0x1", "0x2", "0x3"],
+                    "firstSeenAt": now_ms - 30 * 60_000,
+                    "lastFreshAt": now_ms - 20 * 60_000,
+                }
+            ]
+        }
+        current_signal = {
+            **prior["signals"][0],
+            "freshWalletAddresses": ["0x1", "0x2", "0x3", "0x4"],
+            "freshAddLatestTime": now_ms - 60_000,
+        }
+
+        confirmed = self.service.apply_signal_lifecycle(
+            {"signals": [current_signal], "consensus": [current_signal]},
+            prior,
+            now_ms=now_ms,
+        )
+        self.assertEqual(confirmed["signals"][0]["status"], "CONFIRMED")
+
+        expired = self.service.apply_signal_lifecycle(
+            {
+                "signals": [],
+                "consensus": [
+                    {
+                        "coin": "BTC",
+                        "side": "long",
+                        "netIndependentWalletCount": 4,
+                        "oppositeVerifiedFreshIndependentWalletCount": 0,
+                    }
+                ],
+            },
+            prior,
+            now_ms=now_ms + 2 * 60 * 60 * 1000,
+        )
+        self.assertEqual(expired["signals"], [])
+        self.assertEqual(expired["invalidatedSignals"][0]["invalidationReason"], "expired")
+
+    def test_signal_realert_ignores_small_drift_but_accepts_new_fresh_wallet(self) -> None:
+        prior_signal = {
+            "coin": "BTC",
+            "side": "long",
+            "walletCount": 4,
+            "probabilityScore": 80.0,
+            "freshAddVwap": 100.0,
+            "freshWalletAddresses": ["0x1", "0x2", "0x3"],
+        }
+        small_drift = {
+            **prior_signal,
+            "walletCount": 5,
+            "probabilityScore": 90.0,
+            "freshAddVwap": 100.5,
+        }
+        confirmed = {**small_drift, "freshWalletAddresses": ["0x1", "0x2", "0x3", "0x4"]}
+
+        quiet = self.service.summarize_signal_changes(
+            {"signals": [prior_signal]}, {"signals": [small_drift]}, track_hip3=False
+        )
+        noisy = self.service.summarize_signal_changes(
+            {"signals": [prior_signal]}, {"signals": [confirmed]}, track_hip3=False
+        )
+
+        self.assertEqual(quiet["changedSignals"], [])
+        self.assertEqual(noisy["changedSignals"][0]["addedFreshWallets"], ["0x4"])
+
+    def test_signal_outcomes_record_direction_adjusted_horizons(self) -> None:
+        started_at = 1_700_000_000_000
+        new_summary = {
+            "signals": [
+                {
+                    "coin": "BTC",
+                    "side": "short",
+                    "status": "NEW",
+                    "firstSeenAt": started_at,
+                    "freshAddVwap": 100.0,
+                    "probabilityScore": 82.0,
+                    "verifiedFreshIndependentWalletCount": 3,
+                }
+            ],
+            "consensus": [{"coin": "BTC", "side": "short", "markPrice": 100.0}],
+        }
+        records = self.service.update_signal_outcomes({}, new_summary, now_ms=started_at)
+        measured = self.service.update_signal_outcomes(
+            records,
+            {
+                "signals": [],
+                "consensus": [{"coin": "BTC", "side": "short", "markPrice": 95.0}],
+            },
+            now_ms=started_at + 60 * 60 * 1000,
+        )
+
+        record = next(iter(measured.values()))
+        self.assertEqual(record["outcomes"]["15m"]["returnPct"], 5.0)
+        self.assertEqual(record["outcomes"]["1h"]["returnPct"], 5.0)
+        self.assertNotIn("4h", record["outcomes"])
 
     def test_build_signals_message_includes_cmm_section(self) -> None:
         summary = {"generatedAt": "2026-06-16T00:00:00Z", "signals": []}
@@ -2812,7 +3009,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertTrue(result["sent"])
         sent_message = send_telegram_message.call_args.args[2]
         self.assertIn("Actionable signals", sent_message)
-        self.assertIn("BUY BTC long: p82", sent_message)
+        self.assertIn("NEW BTC long: p82", sent_message)
 
     def test_check_alerts_notifies_on_new_large_positions(self) -> None:
         now_ms = 1_700_000_000_000
