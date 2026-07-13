@@ -9,6 +9,7 @@ from server import (
     ELITE_WALLET_OVERRIDES,
     HyperliquidClient,
     TrackedWallet,
+    WALLETS_FILE,
     WalletStore,
     WalletTrackerService,
     build_wallet_quality_rank,
@@ -727,6 +728,55 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn(toxic_address, cohort["demoted"])
         self.assertEqual(len(selected), 3)
 
+    def test_monthly_quality_gate_requires_repeatable_positive_results(self) -> None:
+        eligible = {
+            "address": "0x1111111111111111111111111111111111111111",
+            "qualityClosedEvents30d": 8,
+            "qualityNetPnl30d": 20_000.0,
+            "qualityProfitFactor30d": 1.6,
+            "qualityTopWinConcentrationPct": 45.0,
+            "qualityHoldout6dEvents": 2,
+            "qualityHoldout6dNetPnl": 1_000.0,
+            "realizedPnl30d": 20_000.0,
+            "unrealizedPnl": 0.0,
+        }
+
+        self.assertTrue(self.service.is_monthly_quality_eligible(eligible))
+        for field, bad_value in (
+            ("qualityClosedEvents30d", 4),
+            ("qualityNetPnl30d", -1.0),
+            ("qualityProfitFactor30d", 1.2),
+            ("qualityTopWinConcentrationPct", 60.0),
+            ("qualityHoldout6dNetPnl", -1.0),
+        ):
+            with self.subTest(field=field):
+                candidate = {**eligible, field: bad_value}
+                self.assertFalse(self.service.is_monthly_quality_eligible(candidate))
+
+    def test_monthly_cohort_demotes_wallet_that_fails_quality_gate(self) -> None:
+        address = "0x1111111111111111111111111111111111111111"
+        wallet = {
+            "address": address,
+            "recentWinRateRank": {"score": 100.0, "label": "Elite"},
+            "qualityClosedEvents30d": 10,
+            "qualityNetPnl30d": 10_000.0,
+            "qualityProfitFactor30d": 2.0,
+            "qualityTopWinConcentrationPct": 70.0,
+            "qualityHoldout6dEvents": 1,
+            "qualityHoldout6dNetPnl": 1_000.0,
+            "realizedPnl30d": 10_000.0,
+            "unrealizedPnl": 0.0,
+        }
+
+        selected, cohort = self.service.resolve_monthly_top_conviction_cohort(
+            [wallet],
+            {"topConvictionWallets": {"month": "2026-07", "addresses": [address]}},
+            month_key="2026-07",
+        )
+
+        self.assertEqual(selected, set())
+        self.assertEqual(cohort["demoted"], [address])
+
     def test_stale_positions_need_recent_large_add_for_conviction(self) -> None:
         now_ms = 1_700_000_000_000
         snapshots = [
@@ -1054,6 +1104,45 @@ class AlertSummaryTests(unittest.TestCase):
         eth_weight = self.service.wallet_conviction_weight(wallet, set(), coin="ETH")
 
         self.assertGreater(btc_weight, eth_weight)
+
+    def test_backtest_tiers_and_global_caps_bound_wallet_weight(self) -> None:
+        rank = {"score": 100.0, "label": "Elite"}
+        elite = {
+            "address": "0x8bae3527e5a33fa0cf184f37bc112d071463ab6d",
+            "recentWinRateRank": rank,
+        }
+        review = {
+            "address": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
+            "recentWinRateRank": rank,
+        }
+        standard = {
+            "address": "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
+            "recentWinRateRank": rank,
+        }
+        ordinary = {
+            "address": "0x1111111111111111111111111111111111111111",
+            "recentWinRateRank": rank,
+        }
+
+        self.assertEqual(self.service.wallet_conviction_weight(elite, set()), 1.5)
+        self.assertEqual(self.service.wallet_conviction_weight(standard, set()), 1.0)
+        self.assertEqual(self.service.wallet_conviction_weight(review, set()), 0.5)
+        self.assertEqual(self.service.wallet_conviction_weight(ordinary, {ordinary["address"]}), 1.5)
+
+    def test_tracked_wallet_list_excludes_backtest_removals(self) -> None:
+        removed = {
+            "0xb3e475368ed0fa0ad23c04de0423d48a0758806f",
+            "0x3d89bcea338f35edfaeb313b1c713978c6dceb14",
+            "0x69906b0ed626ca01a4b7c001e5711e5714ccf207",
+            "0x939f95036d2e7b6d7419ec072bf9d967352204d2",
+            "0x99b1098d9d50aa076f78bd26ab22e6abd3710729",
+            "0x091144e651b334341eabdbbbfed644ad0100023e",
+            "0xdbcc96bcada067864902aad14e029fe7c422f147",
+        }
+        addresses = {wallet.address.lower() for wallet in WalletStore(Path(WALLETS_FILE)).list_wallets()}
+
+        self.assertEqual(len(addresses), 28)
+        self.assertTrue(removed.isdisjoint(addresses))
 
     def test_dashboard_marks_globally_empty_fills_as_degraded(self) -> None:
         snapshots = [

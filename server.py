@@ -129,6 +129,34 @@ ELITE_WALLET_OVERRIDES = {"0xc9e839a529d1a3a46e2b48d20c461d4afecb72e4"}
 TOP_CONVICTION_WALLET_COUNT = 10
 TOP_CONVICTION_WALLET_MULTIPLIER = 1.5
 NON_TOP_CONVICTION_WALLET_MULTIPLIER = 0.5
+CONVICTION_WALLET_WEIGHT_MIN = 0.5
+CONVICTION_WALLET_WEIGHT_MAX = 1.5
+MONTHLY_QUALITY_MIN_CLOSED_EVENTS = 5
+MONTHLY_QUALITY_MIN_PROFIT_FACTOR = 1.2
+MONTHLY_QUALITY_MAX_WIN_CONCENTRATION_PCT = 60.0
+MONTHLY_QUALITY_HOLDOUT_MS = 6 * 24 * 60 * 60 * 1000
+MONTHLY_QUALITY_EVENT_WINDOW_MS = 5 * 60 * 1000
+BACKTEST_ELITE_WALLETS = {
+    "0x8bae3527e5a33fa0cf184f37bc112d071463ab6d",
+    "0xa20fb0c9e04063eec5be286e9269028d966646fa",
+}
+BACKTEST_STANDARD_WALLETS = {
+    "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
+    "0x7d5c17cddaabc227c7d1a34ac7f6cdfda6985d48",
+    "0x2d99fe0f36c1aebd28a1a2c0e82e8ca13c2ea351",
+    "0x418aa6bf98a2b2bc93779f810330d88cde488888",
+    "0x2fcb6898d5a0623de19c3691904927685014c4d8",
+    "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
+    "0xe9ffe7698f46f96f980f2877e18c43f5b4165903",
+    "0x1f67d79afc8d0e7609ddba6c9b657cc635f69981",
+}
+BACKTEST_REVIEW_WALLETS = {
+    "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
+    "0x8607a7d180de23645db594d90621d837749408d5",
+    "0x54a7240cea67b8c41b7c7f2b485360f37331aef4",
+    "0x63d417a577b50c96f4f09148d4e4d70950db0522",
+    "0xf5a523b171032c060d49c39fbf2e9bec473e1286",
+}
 TOXIC_CONVICTION_WALLET_MAX_30D_PNL = -500_000
 RANKING_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 HOLDING_ONLY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
@@ -1050,6 +1078,7 @@ class WalletTrackerService:
         now_ms = current_time_ms()
         cutoff_7d_ms = now_ms - RANKING_WINDOW_MS
         cutoff_30d_ms = now_ms - HOLDING_ONLY_WINDOW_MS
+        cutoff_holdout_ms = now_ms - MONTHLY_QUALITY_HOLDOUT_MS
         with ThreadPoolExecutor(max_workers=HYPERLIQUID_SNAPSHOT_WORKERS) as executor:
             futures = {
                 "state": executor.submit(
@@ -1128,13 +1157,21 @@ class WalletTrackerService:
         fills_30d_count = 0
         last_fill_time = 0
         asset_trade_stats: dict[str, dict[str, float]] = {}
+        quality_events: dict[tuple[str, str, int], float] = {}
         for fill in fills:
             closed_pnl = to_float(fill.get("closedPnl"))
+            fee = abs(to_float(fill.get("fee")))
             fill_time = int(to_float(fill.get("time")))
             last_fill_time = max(last_fill_time, fill_time)
             if fill_time >= cutoff_30d_ms:
                 fills_30d_count += 1
                 if closed_pnl != 0:
+                    event_key = (
+                        normalize_position_coin(fill.get("coin")),
+                        str(fill.get("dir") or "").lower(),
+                        fill_time // MONTHLY_QUALITY_EVENT_WINDOW_MS,
+                    )
+                    quality_events[event_key] = quality_events.get(event_key, 0.0) + closed_pnl - fee
                     realized_pnl_30d += closed_pnl
                     if closed_pnl > 0:
                         gross_profit_30d += closed_pnl
@@ -1169,7 +1206,7 @@ class WalletTrackerService:
                         "price": to_float(fill.get("px")),
                         "size": to_float(fill.get("sz")),
                         "closedPnl": closed_pnl,
-                        "fee": to_float(fill.get("fee")),
+                        "fee": fee,
                         "time": fill.get("time"),
                     }
                 )
@@ -1194,6 +1231,24 @@ class WalletTrackerService:
         hit_rate = (win_count / max(recent_closed_trade_count, 1)) * 100
         closed_trade_count_30d = win_count_30d + loss_count_30d
         hit_rate_30d = (win_count_30d / max(closed_trade_count_30d, 1)) * 100
+        quality_event_pnls = list(quality_events.values())
+        quality_wins = [pnl for pnl in quality_event_pnls if pnl > 0]
+        quality_losses = [abs(pnl) for pnl in quality_event_pnls if pnl < 0]
+        quality_gross_profit = sum(quality_wins)
+        quality_gross_loss = sum(quality_losses)
+        quality_profit_factor = (
+            quality_gross_profit / quality_gross_loss
+            if quality_gross_loss > 0
+            else (float("inf") if quality_gross_profit > 0 else 0.0)
+        )
+        quality_top_win_concentration_pct = (
+            max(quality_wins) / quality_gross_profit * 100 if quality_gross_profit > 0 else 100.0
+        )
+        holdout_event_pnls = [
+            pnl
+            for (_, _, time_bucket), pnl in quality_events.items()
+            if time_bucket * MONTHLY_QUALITY_EVENT_WINDOW_MS >= cutoff_holdout_ms
+        ]
 
         account_value = to_float(margin_summary.get("accountValue"))
         total_notional = to_float(margin_summary.get("totalNtlPos"))
@@ -1257,6 +1312,14 @@ class WalletTrackerService:
             "closedTrades30d": win_count_30d + loss_count_30d,
             "grossProfit30d": gross_profit_30d,
             "grossLoss30d": gross_loss_30d,
+            "qualityClosedEvents30d": len(quality_event_pnls),
+            "qualityNetPnl30d": round(sum(quality_event_pnls), 2),
+            "qualityProfitFactor30d": (
+                "inf" if quality_profit_factor == float("inf") else round(quality_profit_factor, 2)
+            ),
+            "qualityTopWinConcentrationPct": round(quality_top_win_concentration_pct, 1),
+            "qualityHoldout6dEvents": len(holdout_event_pnls),
+            "qualityHoldout6dNetPnl": round(sum(holdout_event_pnls), 2),
             "fills30d": fills_30d_count,
             "daysSinceLastFill": days_since_last_fill,
             "holdingOnly30d": holding_only_30d,
@@ -1564,6 +1627,22 @@ class WalletTrackerService:
             or to_float(wallet.get("unrealizedPnl")) < COUNTED_POSITION_MAX_UNREALIZED_LOSS
         )
 
+    def is_monthly_quality_eligible(self, wallet: dict[str, Any]) -> bool:
+        if "qualityClosedEvents30d" not in wallet:
+            return not self.is_toxic_conviction_wallet(wallet)
+        profit_factor_raw = wallet.get("qualityProfitFactor30d")
+        profit_factor = float("inf") if profit_factor_raw == "inf" else to_float(profit_factor_raw)
+        holdout_events = int(to_float(wallet.get("qualityHoldout6dEvents")))
+        return (
+            int(to_float(wallet.get("qualityClosedEvents30d"))) >= MONTHLY_QUALITY_MIN_CLOSED_EVENTS
+            and to_float(wallet.get("qualityNetPnl30d")) > 0
+            and profit_factor > MONTHLY_QUALITY_MIN_PROFIT_FACTOR
+            and to_float(wallet.get("qualityTopWinConcentrationPct", 100.0))
+            < MONTHLY_QUALITY_MAX_WIN_CONCENTRATION_PCT
+            and (holdout_events == 0 or to_float(wallet.get("qualityHoldout6dNetPnl")) > 0)
+            and not self.is_toxic_conviction_wallet(wallet)
+        )
+
     def current_top_conviction_month(self) -> str:
         return datetime.fromtimestamp(current_time_ms() / 1000, timezone.utc).strftime("%Y-%m")
 
@@ -1589,16 +1668,16 @@ class WalletTrackerService:
         ]
         use_stored = isinstance(stored, dict) and stored.get("month") == active_month and stored_addresses
 
-        toxic_addresses = {
+        ineligible_addresses = {
             address
             for address, wallet in wallet_by_address.items()
-            if self.is_toxic_conviction_wallet(wallet)
+            if not self.is_monthly_quality_eligible(wallet)
         }
         selected: list[str] = []
         demoted: list[str] = []
         if use_stored:
             for address in stored_addresses:
-                if address not in wallet_by_address or address in toxic_addresses:
+                if address not in wallet_by_address or address in ineligible_addresses:
                     demoted.append(address)
                     continue
                 if address not in selected:
@@ -1607,7 +1686,7 @@ class WalletTrackerService:
         ranked = self.rank_top_conviction_wallets(wallets)
         for wallet in ranked:
             address = str(wallet.get("address") or "").lower()
-            if not address or address in selected or address in toxic_addresses:
+            if not address or address in selected or address in ineligible_addresses:
                 continue
             if not use_stored or len(selected) < limit:
                 selected.append(address)
@@ -1671,6 +1750,12 @@ class WalletTrackerService:
             else:
                 base_weight = round(max(0.5, min(score / ELITE_MIN_QUALITY_SCORE, 1.5)), 3)
         address = str(wallet.get("address") or "").lower()
+        if address in BACKTEST_ELITE_WALLETS:
+            base_weight = 1.5
+        elif address in BACKTEST_STANDARD_WALLETS:
+            base_weight = 1.0
+        elif address in BACKTEST_REVIEW_WALLETS:
+            base_weight = 0.5
         if not top_wallet_addresses:
             multiplier = 1.0
         else:
@@ -1688,7 +1773,8 @@ class WalletTrackerService:
                 multiplier *= max(0.75, min(1.25, asset_win_rate / 60.0))
         if self.is_wallet_quarantined(wallet):
             multiplier *= 0.5
-        return round(base_weight * multiplier, 3)
+        weight = base_weight * multiplier
+        return round(max(CONVICTION_WALLET_WEIGHT_MIN, min(weight, CONVICTION_WALLET_WEIGHT_MAX)), 3)
 
     def is_wallet_quarantined(self, wallet: dict[str, Any]) -> bool:
         rank = wallet.get("recentWinRateRank", {})
