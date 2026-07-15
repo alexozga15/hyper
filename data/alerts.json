@@ -6,7 +6,7 @@
   },
   "state": {
     "summary": {
-      "generatedAt": "2026-07-15T14:08:35.118148Z",
+      "generatedAt": "2026-07-15T14:25:01.837939Z",
       "overallBias": "mixed",
       "consensus": [
         {
@@ -14,8 +14,90 @@
           "side": "short",
           "walletCount": 7,
           "independentWalletCount": 7,
-          "weightedWalletCount": 6.125,
-          "independentWeightedWalletCount": 6.125,
+          "weightedWalletCount": 7.125,
+          "independentWeightedWalletCount": 7.125,
+          "recentAddWalletCount": 0,
+          "freshActivityWalletCount": 0,
+          "verifiedFreshWalletCount": 0,
+          "verifiedFreshIndependentWalletCount": 0,
+          "freshWalletAddresses": [],
+          "topWalletCount": 4,
+          "independentTopWalletCount": 4,
+          "fillQualityUnknownWalletCount": 1,
+          "quarantinedWalletCount": 0,
+          "totalValue": 21539858.35,
+          "markPrice": 1922.79316529,
+          "freshAddVwap": 0.0,
+          "freshAddLatestTime": 0,
+          "wallets": [
+            {
+              "address": "0x45d26f28196d226497130c4bac709d808fed4029",
+              "alias": "0x45d2...4029",
+              "value": 9686654.7,
+              "qualityWeight": 0.5
+            },
+            {
+              "address": "0x418aa6bf98a2b2bc93779f810330d88cde488888",
+              "alias": "0x418aa6bf98a2b2bc93779f810330d88cde488888",
+              "value": 4806250.0,
+              "qualityWeight": 1.5
+            },
+            {
+              "address": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
+              "alias": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
+              "value": 3845000.0,
+              "qualityWeight": 0.5
+            },
+            {
+              "address": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
+              "alias": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
+              "value": 2019891.16,
+              "qualityWeight": 1.5
+            },
+            {
+              "address": "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c",
+              "alias": "0x5bc4...3b0c",
+              "value": 719434.21,
+              "qualityWeight": 1.5
+            },
+            {
+              "address": "0x95fde6cf0d305078b7eeac44182a931c169dd947",
+              "alias": "0x95fde6cf0d305078b7eeac44182a931c169dd947",
+              "value": 282414.1,
+              "qualityWeight": 0.5
+            },
+            {
+              "address": "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
+              "alias": "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
+              "value": 180214.19,
+              "qualityWeight": 1.125
+            }
+          ],
+          "oppositeWalletCount": 2,
+          "netWalletCount": 5,
+          "oppositeWeightedWalletCount": 1.0,
+          "netWeightedWalletCount": 6.125,
+          "oppositeIndependentWalletCount": 2,
+          "netIndependentWalletCount": 5,
+          "oppositeIndependentWeightedWalletCount": 1.0,
+          "netIndependentWeightedWalletCount": 6.125,
+          "oppositeVerifiedFreshIndependentWalletCount": 0,
+          "netFreshIndependentWalletCount": 0,
+          "longWalletCount": 2,
+          "shortWalletCount": 7,
+          "longWeightedWalletCount": 1.0,
+          "shortWeightedWalletCount": 7.125,
+          "entryDistancePct": 0.0,
+          "maxEntryDistancePct": 1.5,
+          "convictionScore": 100.0
+        },
+        {
+          "coin": "NVDA",
+          "side": "short",
+          "walletCount": 5,
+          "independentWalletCount": 5,
+          "weightedWalletCount": 5.736,
+          "independentWeightedWalletCount": 5.736,
           "recentAddWalletCount": 0,
           "freshActivityWalletCount": 0,
           "verifiedFreshWalletCount": 0,
@@ -23,73 +105,335 @@
           "freshWalletAddresses": [],
           "topWalletCount": 3,
           "independentTopWalletCount": 3,
-          "fillQualityUnknownWalletCount": 2,
+          "fillQualityUnknownWalletCount": 0,
           "quarantinedWalletCount": 0,
-          "totalValue": 21635541.33,
-          "markPrice": 1931.33447338,
+          "totalValue": 8173378.79,
+          "markPrice": 210.09712396,
+          "freshAddVwap": 0.0,
+          "freshAddLatestTime": 0,
+          "wallets": [
+            {
+              "address": "0xe9ffe7698f46f96f980f2877e18c43f5b4165903",
+              "alias": "0xe9ffe7698f46f96f980f2877e18c43f5b4165903",
+              "value": 6923139.56,
+              "qualityWeight": 0.5
+            },
+            {
+              "address": "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c",
+              "alias": "0x5bc4...3b0c",
+              "value": 755549.11,
+              "qualityWeight": 1.5
+            },
+            {
+              "address": "0xa20fb0c9e04063eec5be286e9269028d966646fa",
+              "alias": "0xa20f...46fa",
+              "value": 410933.75,
+              "qualityWeight": 1.5
+            },
+            {
+              "address": "0x1337c163a5d5b60618ffceaf3a7f2130e607f39b",
+              "alias": "0x1337c163a5d5b60618ffceaf3a7f2130e607f39b",
+              "value": 56815.48,
+              "qualityWeight": 0.736
+            },
+            {
+              "address": "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
+              "alias": "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
+              "value": 26940.89,
+              "qualityWeight": 1.5
+            }
+          ],
+          "oppositeWalletCount": 1,
+          "netWalletCount": 4,
+          "oppositeWeightedWalletCount": 0.5,
+          "netWeightedWalletCount": 5.236,
+          "oppositeIndependentWalletCount": 1,
+          "netIndependentWalletCount": 4,
+          "oppositeIndependentWeightedWalletCount": 0.5,
+          "netIndependentWeightedWalletCount": 5.236,
+          "oppositeVerifiedFreshIndependentWalletCount": 0,
+          "netFreshIndependentWalletCount": 0,
+          "longWalletCount": 1,
+          "shortWalletCount": 5,
+          "longWeightedWalletCount": 0.5,
+          "shortWeightedWalletCount": 5.736,
+          "entryDistancePct": 0.0,
+          "maxEntryDistancePct": 4.0,
+          "convictionScore": 85.5
+        },
+        {
+          "coin": "HYPE",
+          "side": "short",
+          "walletCount": 6,
+          "independentWalletCount": 6,
+          "weightedWalletCount": 7.0,
+          "independentWeightedWalletCount": 7.0,
+          "recentAddWalletCount": 0,
+          "freshActivityWalletCount": 0,
+          "verifiedFreshWalletCount": 0,
+          "verifiedFreshIndependentWalletCount": 0,
+          "freshWalletAddresses": [],
+          "topWalletCount": 4,
+          "independentTopWalletCount": 4,
+          "fillQualityUnknownWalletCount": 0,
+          "quarantinedWalletCount": 0,
+          "totalValue": 3558119.68,
+          "markPrice": 68.27145254,
+          "freshAddVwap": 0.0,
+          "freshAddLatestTime": 0,
+          "wallets": [
+            {
+              "address": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
+              "alias": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
+              "value": 2389416.37,
+              "qualityWeight": 0.5
+            },
+            {
+              "address": "0x63d417a577b50c96f4f09148d4e4d70950db0522",
+              "alias": "0x63d417a577b50c96f4f09148d4e4d70950db0522",
+              "value": 490855.48,
+              "qualityWeight": 0.5
+            },
+            {
+              "address": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
+              "alias": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
+              "value": 299657.22,
+              "qualityWeight": 1.5
+            },
+            {
+              "address": "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
+              "alias": "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
+              "value": 219914.29,
+              "qualityWeight": 1.5
+            },
+            {
+              "address": "0xa20fb0c9e04063eec5be286e9269028d966646fa",
+              "alias": "0xa20f...46fa",
+              "value": 136799.67,
+              "qualityWeight": 1.5
+            },
+            {
+              "address": "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c",
+              "alias": "0x5bc4...3b0c",
+              "value": 21476.67,
+              "qualityWeight": 1.5
+            }
+          ],
+          "oppositeWalletCount": 2,
+          "netWalletCount": 4,
+          "oppositeWeightedWalletCount": 2.0,
+          "netWeightedWalletCount": 5.0,
+          "oppositeIndependentWalletCount": 2,
+          "netIndependentWalletCount": 4,
+          "oppositeIndependentWeightedWalletCount": 2.0,
+          "netIndependentWeightedWalletCount": 5.0,
+          "oppositeVerifiedFreshIndependentWalletCount": 0,
+          "netFreshIndependentWalletCount": 0,
+          "longWalletCount": 2,
+          "shortWalletCount": 6,
+          "longWeightedWalletCount": 2.0,
+          "shortWeightedWalletCount": 7.0,
+          "entryDistancePct": 0.0,
+          "maxEntryDistancePct": 2.5,
+          "convictionScore": 81.6
+        },
+        {
+          "coin": "BNB",
+          "side": "short",
+          "walletCount": 4,
+          "independentWalletCount": 4,
+          "weightedWalletCount": 5.0,
+          "independentWeightedWalletCount": 5.0,
+          "recentAddWalletCount": 0,
+          "freshActivityWalletCount": 0,
+          "verifiedFreshWalletCount": 0,
+          "verifiedFreshIndependentWalletCount": 0,
+          "freshWalletAddresses": [],
+          "topWalletCount": 3,
+          "independentTopWalletCount": 3,
+          "fillQualityUnknownWalletCount": 1,
+          "quarantinedWalletCount": 0,
+          "totalValue": 1280573.15,
+          "markPrice": 580.93900897,
+          "freshAddVwap": 0.0,
+          "freshAddLatestTime": 0,
+          "wallets": [
+            {
+              "address": "0x418aa6bf98a2b2bc93779f810330d88cde488888",
+              "alias": "0x418aa6bf98a2b2bc93779f810330d88cde488888",
+              "value": 1103748.0,
+              "qualityWeight": 1.5
+            },
+            {
+              "address": "0xa20fb0c9e04063eec5be286e9269028d966646fa",
+              "alias": "0xa20f...46fa",
+              "value": 102020.82,
+              "qualityWeight": 1.5
+            },
+            {
+              "address": "0x45d26f28196d226497130c4bac709d808fed4029",
+              "alias": "0x45d2...4029",
+              "value": 74368.0,
+              "qualityWeight": 0.5
+            },
+            {
+              "address": "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c",
+              "alias": "0x5bc4...3b0c",
+              "value": 436.33,
+              "qualityWeight": 1.5
+            }
+          ],
+          "oppositeWalletCount": 0,
+          "netWalletCount": 4,
+          "oppositeWeightedWalletCount": 0.0,
+          "netWeightedWalletCount": 5.0,
+          "oppositeIndependentWalletCount": 0,
+          "netIndependentWalletCount": 4,
+          "oppositeIndependentWeightedWalletCount": 0.0,
+          "netIndependentWeightedWalletCount": 5.0,
+          "oppositeVerifiedFreshIndependentWalletCount": 0,
+          "netFreshIndependentWalletCount": 0,
+          "longWalletCount": 0,
+          "shortWalletCount": 4,
+          "longWeightedWalletCount": 0.0,
+          "shortWeightedWalletCount": 5.0,
+          "entryDistancePct": 0.0,
+          "maxEntryDistancePct": 4.0,
+          "convictionScore": 81.6
+        },
+        {
+          "coin": "WLFI",
+          "side": "short",
+          "walletCount": 4,
+          "independentWalletCount": 4,
+          "weightedWalletCount": 4.0,
+          "independentWeightedWalletCount": 4.0,
+          "recentAddWalletCount": 0,
+          "freshActivityWalletCount": 0,
+          "verifiedFreshWalletCount": 0,
+          "verifiedFreshIndependentWalletCount": 0,
+          "freshWalletAddresses": [],
+          "topWalletCount": 2,
+          "independentTopWalletCount": 2,
+          "fillQualityUnknownWalletCount": 0,
+          "quarantinedWalletCount": 0,
+          "totalValue": 213355.95,
+          "markPrice": 0.05690437,
+          "freshAddVwap": 0.0,
+          "freshAddLatestTime": 0,
+          "wallets": [
+            {
+              "address": "0xa20fb0c9e04063eec5be286e9269028d966646fa",
+              "alias": "0xa20f...46fa",
+              "value": 99531.34,
+              "qualityWeight": 1.5
+            },
+            {
+              "address": "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
+              "alias": "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
+              "value": 50766.3,
+              "qualityWeight": 1.5
+            },
+            {
+              "address": "0x63d417a577b50c96f4f09148d4e4d70950db0522",
+              "alias": "0x63d417a577b50c96f4f09148d4e4d70950db0522",
+              "value": 32199.58,
+              "qualityWeight": 0.5
+            },
+            {
+              "address": "0x7d5c17cddaabc227c7d1a34ac7f6cdfda6985d48",
+              "alias": "0x7d5c...5d48",
+              "value": 30858.73,
+              "qualityWeight": 0.5
+            }
+          ],
+          "oppositeWalletCount": 0,
+          "netWalletCount": 4,
+          "oppositeWeightedWalletCount": 0.0,
+          "netWeightedWalletCount": 4.0,
+          "oppositeIndependentWalletCount": 0,
+          "netIndependentWalletCount": 4,
+          "oppositeIndependentWeightedWalletCount": 0.0,
+          "netIndependentWeightedWalletCount": 4.0,
+          "oppositeVerifiedFreshIndependentWalletCount": 0,
+          "netFreshIndependentWalletCount": 0,
+          "longWalletCount": 0,
+          "shortWalletCount": 4,
+          "longWeightedWalletCount": 0.0,
+          "shortWeightedWalletCount": 4.0,
+          "entryDistancePct": 0.0,
+          "maxEntryDistancePct": 4.0,
+          "convictionScore": 65.3
+        },
+        {
+          "coin": "LIT",
+          "side": "short",
+          "walletCount": 5,
+          "independentWalletCount": 5,
+          "weightedWalletCount": 4.125,
+          "independentWeightedWalletCount": 4.125,
+          "recentAddWalletCount": 1,
+          "freshActivityWalletCount": 0,
+          "verifiedFreshWalletCount": 0,
+          "verifiedFreshIndependentWalletCount": 0,
+          "freshWalletAddresses": [],
+          "topWalletCount": 2,
+          "independentTopWalletCount": 2,
+          "fillQualityUnknownWalletCount": 1,
+          "quarantinedWalletCount": 0,
+          "totalValue": 1378412.15,
+          "markPrice": 2.52024856,
           "freshAddVwap": 0.0,
           "freshAddLatestTime": 0,
           "wallets": [
             {
               "address": "0x45d26f28196d226497130c4bac709d808fed4029",
               "alias": "0x45d2...4029",
-              "value": 9728965.5,
-              "qualityWeight": 0.5
-            },
-            {
-              "address": "0x418aa6bf98a2b2bc93779f810330d88cde488888",
-              "alias": "0x418aa6bf98a2b2bc93779f810330d88cde488888",
-              "value": 4828000.0,
-              "qualityWeight": 1.5
-            },
-            {
-              "address": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
-              "alias": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
-              "value": 3862400.0,
+              "value": 655447.0,
               "qualityWeight": 0.5
             },
             {
               "address": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
               "alias": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
-              "value": 2029031.89,
-              "qualityWeight": 1.5
+              "value": 323130.99,
+              "qualityWeight": 1.125
             },
             {
-              "address": "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c",
-              "alias": "0x5bc4...3b0c",
-              "value": 722460.69,
+              "address": "0x63d417a577b50c96f4f09148d4e4d70950db0522",
+              "alias": "0x63d417a577b50c96f4f09148d4e4d70950db0522",
+              "value": 289650.39,
               "qualityWeight": 0.5
+            },
+            {
+              "address": "0xa20fb0c9e04063eec5be286e9269028d966646fa",
+              "alias": "0xa20f...46fa",
+              "value": 90401.27,
+              "qualityWeight": 1.5
             },
             {
               "address": "0x95fde6cf0d305078b7eeac44182a931c169dd947",
               "alias": "0x95fde6cf0d305078b7eeac44182a931c169dd947",
-              "value": 283692.12,
+              "value": 19782.5,
               "qualityWeight": 0.5
-            },
-            {
-              "address": "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
-              "alias": "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
-              "value": 180991.13,
-              "qualityWeight": 1.125
             }
           ],
-          "oppositeWalletCount": 2,
-          "netWalletCount": 5,
-          "oppositeWeightedWalletCount": 1.0,
-          "netWeightedWalletCount": 5.125,
-          "oppositeIndependentWalletCount": 2,
-          "netIndependentWalletCount": 5,
-          "oppositeIndependentWeightedWalletCount": 1.0,
-          "netIndependentWeightedWalletCount": 5.125,
+          "oppositeWalletCount": 1,
+          "netWalletCount": 4,
+          "oppositeWeightedWalletCount": 0.5,
+          "netWeightedWalletCount": 3.625,
+          "oppositeIndependentWalletCount": 1,
+          "netIndependentWalletCount": 4,
+          "oppositeIndependentWeightedWalletCount": 0.5,
+          "netIndependentWeightedWalletCount": 3.625,
           "oppositeVerifiedFreshIndependentWalletCount": 0,
           "netFreshIndependentWalletCount": 0,
-          "longWalletCount": 2,
-          "shortWalletCount": 7,
-          "longWeightedWalletCount": 1.0,
-          "shortWeightedWalletCount": 6.125,
+          "longWalletCount": 1,
+          "shortWalletCount": 5,
+          "longWeightedWalletCount": 0.5,
+          "shortWeightedWalletCount": 4.125,
           "entryDistancePct": 0.0,
-          "maxEntryDistancePct": 1.5,
-          "convictionScore": 100.0
+          "maxEntryDistancePct": 4.0,
+          "convictionScore": 59.2
         },
         {
           "coin": "MU",
@@ -107,33 +451,33 @@
           "independentTopWalletCount": 2,
           "fillQualityUnknownWalletCount": 1,
           "quarantinedWalletCount": 0,
-          "totalValue": 1773447.87,
-          "markPrice": 953.34,
+          "totalValue": 1714243.39,
+          "markPrice": 921.51385714,
           "freshAddVwap": 0.0,
           "freshAddLatestTime": 0,
           "wallets": [
             {
               "address": "0x45d26f28196d226497130c4bac709d808fed4029",
               "alias": "0x45d2...4029",
-              "value": 1620678.0,
+              "value": 1566720.0,
               "qualityWeight": 0.5
             },
             {
               "address": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
               "alias": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
-              "value": 95398.83,
+              "value": 92122.6,
               "qualityWeight": 1.5
             },
             {
               "address": "0xe9ffe7698f46f96f980f2877e18c43f5b4165903",
               "alias": "0xe9ffe7698f46f96f980f2877e18c43f5b4165903",
-              "value": 57200.4,
+              "value": 55236.0,
               "qualityWeight": 0.5
             },
             {
               "address": "0x1f67d79afc8d0e7609ddba6c9b657cc635f69981",
               "alias": "0x1f67d79afc8d0e7609ddba6c9b657cc635f69981",
-              "value": 170.65,
+              "value": 164.79,
               "qualityWeight": 1.5
             }
           ],
@@ -153,281 +497,7 @@
           "shortWeightedWalletCount": 4.0,
           "entryDistancePct": 0.0,
           "maxEntryDistancePct": 4.0,
-          "convictionScore": 68.3
-        },
-        {
-          "coin": "NVDA",
-          "side": "short",
-          "walletCount": 5,
-          "independentWalletCount": 5,
-          "weightedWalletCount": 3.982,
-          "independentWeightedWalletCount": 3.982,
-          "recentAddWalletCount": 0,
-          "freshActivityWalletCount": 0,
-          "verifiedFreshWalletCount": 0,
-          "verifiedFreshIndependentWalletCount": 0,
-          "freshWalletAddresses": [],
-          "topWalletCount": 1,
-          "independentTopWalletCount": 1,
-          "fillQualityUnknownWalletCount": 2,
-          "quarantinedWalletCount": 0,
-          "totalValue": 8219664.61,
-          "markPrice": 211.28690345,
-          "freshAddVwap": 0.0,
-          "freshAddLatestTime": 0,
-          "wallets": [
-            {
-              "address": "0xe9ffe7698f46f96f980f2877e18c43f5b4165903",
-              "alias": "0xe9ffe7698f46f96f980f2877e18c43f5b4165903",
-              "value": 6961692.98,
-              "qualityWeight": 0.5
-            },
-            {
-              "address": "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c",
-              "alias": "0x5bc4...3b0c",
-              "value": 760260.72,
-              "qualityWeight": 0.5
-            },
-            {
-              "address": "0xa20fb0c9e04063eec5be286e9269028d966646fa",
-              "alias": "0xa20f...46fa",
-              "value": 413476.41,
-              "qualityWeight": 0.75
-            },
-            {
-              "address": "0x1337c163a5d5b60618ffceaf3a7f2130e607f39b",
-              "alias": "0x1337c163a5d5b60618ffceaf3a7f2130e607f39b",
-              "value": 57134.59,
-              "qualityWeight": 0.732
-            },
-            {
-              "address": "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
-              "alias": "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
-              "value": 27099.9,
-              "qualityWeight": 1.5
-            }
-          ],
-          "oppositeWalletCount": 1,
-          "netWalletCount": 4,
-          "oppositeWeightedWalletCount": 0.5,
-          "netWeightedWalletCount": 3.482,
-          "oppositeIndependentWalletCount": 1,
-          "netIndependentWalletCount": 4,
-          "oppositeIndependentWeightedWalletCount": 0.5,
-          "netIndependentWeightedWalletCount": 3.482,
-          "oppositeVerifiedFreshIndependentWalletCount": 0,
-          "netFreshIndependentWalletCount": 0,
-          "longWalletCount": 1,
-          "shortWalletCount": 5,
-          "longWeightedWalletCount": 0.5,
-          "shortWeightedWalletCount": 3.982,
-          "entryDistancePct": 0.0,
-          "maxEntryDistancePct": 4.0,
-          "convictionScore": 67.9
-        },
-        {
-          "coin": "HYPE",
-          "side": "short",
-          "walletCount": 6,
-          "independentWalletCount": 6,
-          "weightedWalletCount": 5.25,
-          "independentWeightedWalletCount": 5.25,
-          "recentAddWalletCount": 0,
-          "freshActivityWalletCount": 0,
-          "verifiedFreshWalletCount": 0,
-          "verifiedFreshIndependentWalletCount": 0,
-          "freshWalletAddresses": [],
-          "topWalletCount": 2,
-          "independentTopWalletCount": 2,
-          "fillQualityUnknownWalletCount": 2,
-          "quarantinedWalletCount": 0,
-          "totalValue": 3572928.97,
-          "markPrice": 68.5556059,
-          "freshAddVwap": 0.0,
-          "freshAddLatestTime": 0,
-          "wallets": [
-            {
-              "address": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
-              "alias": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
-              "value": 2399426.37,
-              "qualityWeight": 0.5
-            },
-            {
-              "address": "0x63d417a577b50c96f4f09148d4e4d70950db0522",
-              "alias": "0x63d417a577b50c96f4f09148d4e4d70950db0522",
-              "value": 492911.82,
-              "qualityWeight": 0.5
-            },
-            {
-              "address": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
-              "alias": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
-              "value": 300912.57,
-              "qualityWeight": 1.5
-            },
-            {
-              "address": "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
-              "alias": "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
-              "value": 220770.89,
-              "qualityWeight": 1.5
-            },
-            {
-              "address": "0xa20fb0c9e04063eec5be286e9269028d966646fa",
-              "alias": "0xa20f...46fa",
-              "value": 137348.51,
-              "qualityWeight": 0.75
-            },
-            {
-              "address": "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c",
-              "alias": "0x5bc4...3b0c",
-              "value": 21558.81,
-              "qualityWeight": 0.5
-            }
-          ],
-          "oppositeWalletCount": 2,
-          "netWalletCount": 4,
-          "oppositeWeightedWalletCount": 2.0,
-          "netWeightedWalletCount": 3.25,
-          "oppositeIndependentWalletCount": 2,
-          "netIndependentWalletCount": 4,
-          "oppositeIndependentWeightedWalletCount": 2.0,
-          "netIndependentWeightedWalletCount": 3.25,
-          "oppositeVerifiedFreshIndependentWalletCount": 0,
-          "netFreshIndependentWalletCount": 0,
-          "longWalletCount": 2,
-          "shortWalletCount": 6,
-          "longWeightedWalletCount": 2.0,
-          "shortWeightedWalletCount": 5.25,
-          "entryDistancePct": 0.0,
-          "maxEntryDistancePct": 2.5,
-          "convictionScore": 63.4
-        },
-        {
-          "coin": "BNB",
-          "side": "short",
-          "walletCount": 4,
-          "independentWalletCount": 4,
-          "weightedWalletCount": 3.25,
-          "independentWeightedWalletCount": 3.25,
-          "recentAddWalletCount": 0,
-          "freshActivityWalletCount": 0,
-          "verifiedFreshWalletCount": 0,
-          "verifiedFreshIndependentWalletCount": 0,
-          "freshWalletAddresses": [],
-          "topWalletCount": 1,
-          "independentTopWalletCount": 1,
-          "fillQualityUnknownWalletCount": 3,
-          "quarantinedWalletCount": 0,
-          "totalValue": 1285651.29,
-          "markPrice": 583.24273384,
-          "freshAddVwap": 0.0,
-          "freshAddLatestTime": 0,
-          "wallets": [
-            {
-              "address": "0x418aa6bf98a2b2bc93779f810330d88cde488888",
-              "alias": "0x418aa6bf98a2b2bc93779f810330d88cde488888",
-              "value": 1108156.0,
-              "qualityWeight": 1.5
-            },
-            {
-              "address": "0xa20fb0c9e04063eec5be286e9269028d966646fa",
-              "alias": "0xa20f...46fa",
-              "value": 102400.04,
-              "qualityWeight": 0.75
-            },
-            {
-              "address": "0x45d26f28196d226497130c4bac709d808fed4029",
-              "alias": "0x45d2...4029",
-              "value": 74657.28,
-              "qualityWeight": 0.5
-            },
-            {
-              "address": "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c",
-              "alias": "0x5bc4...3b0c",
-              "value": 437.97,
-              "qualityWeight": 0.5
-            }
-          ],
-          "oppositeWalletCount": 0,
-          "netWalletCount": 4,
-          "oppositeWeightedWalletCount": 0.0,
-          "netWeightedWalletCount": 3.25,
-          "oppositeIndependentWalletCount": 0,
-          "netIndependentWalletCount": 4,
-          "oppositeIndependentWeightedWalletCount": 0.0,
-          "netIndependentWeightedWalletCount": 3.25,
-          "oppositeVerifiedFreshIndependentWalletCount": 0,
-          "netFreshIndependentWalletCount": 0,
-          "longWalletCount": 0,
-          "shortWalletCount": 4,
-          "longWeightedWalletCount": 0.0,
-          "shortWeightedWalletCount": 3.25,
-          "entryDistancePct": 0.0,
-          "maxEntryDistancePct": 4.0,
-          "convictionScore": 63.4
-        },
-        {
-          "coin": "WLFI",
-          "side": "short",
-          "walletCount": 4,
-          "independentWalletCount": 4,
-          "weightedWalletCount": 3.25,
-          "independentWeightedWalletCount": 3.25,
-          "recentAddWalletCount": 0,
-          "freshActivityWalletCount": 0,
-          "verifiedFreshWalletCount": 0,
-          "verifiedFreshIndependentWalletCount": 0,
-          "freshWalletAddresses": [],
-          "topWalletCount": 1,
-          "independentTopWalletCount": 1,
-          "fillQualityUnknownWalletCount": 2,
-          "quarantinedWalletCount": 0,
-          "totalValue": 213390.27,
-          "markPrice": 0.05691353,
-          "freshAddVwap": 0.0,
-          "freshAddLatestTime": 0,
-          "wallets": [
-            {
-              "address": "0xa20fb0c9e04063eec5be286e9269028d966646fa",
-              "alias": "0xa20f...46fa",
-              "value": 99557.58,
-              "qualityWeight": 0.75
-            },
-            {
-              "address": "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
-              "alias": "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
-              "value": 50777.0,
-              "qualityWeight": 1.5
-            },
-            {
-              "address": "0x63d417a577b50c96f4f09148d4e4d70950db0522",
-              "alias": "0x63d417a577b50c96f4f09148d4e4d70950db0522",
-              "value": 32188.83,
-              "qualityWeight": 0.5
-            },
-            {
-              "address": "0x7d5c17cddaabc227c7d1a34ac7f6cdfda6985d48",
-              "alias": "0x7d5c...5d48",
-              "value": 30866.86,
-              "qualityWeight": 0.5
-            }
-          ],
-          "oppositeWalletCount": 0,
-          "netWalletCount": 4,
-          "oppositeWeightedWalletCount": 0.0,
-          "netWeightedWalletCount": 3.25,
-          "oppositeIndependentWalletCount": 0,
-          "netIndependentWalletCount": 4,
-          "oppositeIndependentWeightedWalletCount": 0.0,
-          "netIndependentWeightedWalletCount": 3.25,
-          "oppositeVerifiedFreshIndependentWalletCount": 0,
-          "netFreshIndependentWalletCount": 0,
-          "longWalletCount": 0,
-          "shortWalletCount": 4,
-          "longWeightedWalletCount": 0.0,
-          "shortWeightedWalletCount": 3.25,
-          "entryDistancePct": 0.0,
-          "maxEntryDistancePct": 4.0,
-          "convictionScore": 63.4
+          "convictionScore": 57.1
         },
         {
           "coin": "SP500",
@@ -445,33 +515,33 @@
           "independentTopWalletCount": 1,
           "fillQualityUnknownWalletCount": 1,
           "quarantinedWalletCount": 0,
-          "totalValue": 27811424.11,
-          "markPrice": 7574.24521078,
+          "totalValue": 27756044.29,
+          "markPrice": 7559.16290681,
           "freshAddVwap": 0.0,
           "freshAddLatestTime": 0,
           "wallets": [
             {
               "address": "0xe9ffe7698f46f96f980f2877e18c43f5b4165903",
               "alias": "0xe9ffe7698f46f96f980f2877e18c43f5b4165903",
-              "value": 15237078.73,
+              "value": 15205494.92,
               "qualityWeight": 0.625
             },
             {
               "address": "0x5d2f4460ac3514ada79f5d9838916e508ab39bb7",
               "alias": "0x5d2f4460ac3514ada79f5d9838916e508ab39bb7",
-              "value": 9089675.05,
+              "value": 9072274.07,
               "qualityWeight": 0.5
             },
             {
               "address": "0x45d26f28196d226497130c4bac709d808fed4029",
               "alias": "0x45d2...4029",
-              "value": 3484178.0,
+              "value": 3477784.0,
               "qualityWeight": 0.5
             },
             {
               "address": "0x1f67d79afc8d0e7609ddba6c9b657cc635f69981",
               "alias": "0x1f67d79afc8d0e7609ddba6c9b657cc635f69981",
-              "value": 492.32,
+              "value": 491.3,
               "qualityWeight": 1.5
             }
           ],
@@ -491,149 +561,15 @@
           "shortWeightedWalletCount": 0.0,
           "entryDistancePct": 0.0,
           "maxEntryDistancePct": 1.5,
-          "convictionScore": 61.0
-        },
-        {
-          "coin": "LIT",
-          "side": "short",
-          "walletCount": 5,
-          "independentWalletCount": 5,
-          "weightedWalletCount": 3.375,
-          "independentWeightedWalletCount": 3.375,
-          "recentAddWalletCount": 1,
-          "freshActivityWalletCount": 0,
-          "verifiedFreshWalletCount": 0,
-          "verifiedFreshIndependentWalletCount": 0,
-          "freshWalletAddresses": [],
-          "topWalletCount": 1,
-          "independentTopWalletCount": 1,
-          "fillQualityUnknownWalletCount": 2,
-          "quarantinedWalletCount": 0,
-          "totalValue": 1390660.28,
-          "markPrice": 2.54264268,
-          "freshAddVwap": 0.0,
-          "freshAddLatestTime": 0,
-          "wallets": [
-            {
-              "address": "0x45d26f28196d226497130c4bac709d808fed4029",
-              "alias": "0x45d2...4029",
-              "value": 660920.0,
-              "qualityWeight": 0.5
-            },
-            {
-              "address": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
-              "alias": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
-              "value": 326206.31,
-              "qualityWeight": 1.125
-            },
-            {
-              "address": "0x63d417a577b50c96f4f09148d4e4d70950db0522",
-              "alias": "0x63d417a577b50c96f4f09148d4e4d70950db0522",
-              "value": 292407.07,
-              "qualityWeight": 0.5
-            },
-            {
-              "address": "0xa20fb0c9e04063eec5be286e9269028d966646fa",
-              "alias": "0xa20f...46fa",
-              "value": 91156.12,
-              "qualityWeight": 0.75
-            },
-            {
-              "address": "0x95fde6cf0d305078b7eeac44182a931c169dd947",
-              "alias": "0x95fde6cf0d305078b7eeac44182a931c169dd947",
-              "value": 19970.78,
-              "qualityWeight": 0.5
-            }
-          ],
-          "oppositeWalletCount": 1,
-          "netWalletCount": 4,
-          "oppositeWeightedWalletCount": 0.5,
-          "netWeightedWalletCount": 2.875,
-          "oppositeIndependentWalletCount": 1,
-          "netIndependentWalletCount": 4,
-          "oppositeIndependentWeightedWalletCount": 0.5,
-          "netIndependentWeightedWalletCount": 2.875,
-          "oppositeVerifiedFreshIndependentWalletCount": 0,
-          "netFreshIndependentWalletCount": 0,
-          "longWalletCount": 1,
-          "shortWalletCount": 5,
-          "longWeightedWalletCount": 0.5,
-          "shortWeightedWalletCount": 3.375,
-          "entryDistancePct": 0.0,
-          "maxEntryDistancePct": 4.0,
-          "convictionScore": 56.1
+          "convictionScore": 51.0
         },
         {
           "coin": "VIRTUAL",
           "side": "short",
           "walletCount": 4,
           "independentWalletCount": 4,
-          "weightedWalletCount": 2.25,
-          "independentWeightedWalletCount": 2.25,
-          "recentAddWalletCount": 0,
-          "freshActivityWalletCount": 0,
-          "verifiedFreshWalletCount": 0,
-          "verifiedFreshIndependentWalletCount": 0,
-          "freshWalletAddresses": [],
-          "topWalletCount": 0,
-          "independentTopWalletCount": 0,
-          "fillQualityUnknownWalletCount": 4,
-          "quarantinedWalletCount": 0,
-          "totalValue": 429047.25,
-          "markPrice": 0.61549565,
-          "freshAddVwap": 0.0,
-          "freshAddLatestTime": 0,
-          "wallets": [
-            {
-              "address": "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c",
-              "alias": "0x5bc4...3b0c",
-              "value": 276077.63,
-              "qualityWeight": 0.5
-            },
-            {
-              "address": "0xa20fb0c9e04063eec5be286e9269028d966646fa",
-              "alias": "0xa20f...46fa",
-              "value": 92952.51,
-              "qualityWeight": 0.75
-            },
-            {
-              "address": "0x45d26f28196d226497130c4bac709d808fed4029",
-              "alias": "0x45d2...4029",
-              "value": 58170.42,
-              "qualityWeight": 0.5
-            },
-            {
-              "address": "0x2fcb6898d5a0623de19c3691904927685014c4d8",
-              "alias": "0x2fcb...c4d8",
-              "value": 1846.68,
-              "qualityWeight": 0.5
-            }
-          ],
-          "oppositeWalletCount": 2,
-          "netWalletCount": 2,
-          "oppositeWeightedWalletCount": 1.0,
-          "netWeightedWalletCount": 1.25,
-          "oppositeIndependentWalletCount": 2,
-          "netIndependentWalletCount": 2,
-          "oppositeIndependentWeightedWalletCount": 1.0,
-          "netIndependentWeightedWalletCount": 1.25,
-          "oppositeVerifiedFreshIndependentWalletCount": 0,
-          "netFreshIndependentWalletCount": 0,
-          "longWalletCount": 2,
-          "shortWalletCount": 4,
-          "longWeightedWalletCount": 1.0,
-          "shortWeightedWalletCount": 2.25,
-          "entryDistancePct": 0.0,
-          "maxEntryDistancePct": 4.0,
-          "convictionScore": 24.4
-        },
-        {
-          "coin": "BTC",
-          "side": "short",
-          "walletCount": 6,
-          "independentWalletCount": 6,
-          "weightedWalletCount": 5.25,
-          "independentWeightedWalletCount": 5.25,
+          "weightedWalletCount": 4.0,
+          "independentWeightedWalletCount": 4.0,
           "recentAddWalletCount": 0,
           "freshActivityWalletCount": 0,
           "verifiedFreshWalletCount": 0,
@@ -641,131 +577,195 @@
           "freshWalletAddresses": [],
           "topWalletCount": 2,
           "independentTopWalletCount": 2,
-          "fillQualityUnknownWalletCount": 3,
+          "fillQualityUnknownWalletCount": 2,
           "quarantinedWalletCount": 0,
-          "totalValue": 20305000.66,
-          "markPrice": 65299.03698389,
+          "totalValue": 426026.0,
+          "markPrice": 0.61116149,
+          "freshAddVwap": 0.0,
+          "freshAddLatestTime": 0,
+          "wallets": [
+            {
+              "address": "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c",
+              "alias": "0x5bc4...3b0c",
+              "value": 274117.37,
+              "qualityWeight": 1.5
+            },
+            {
+              "address": "0xa20fb0c9e04063eec5be286e9269028d966646fa",
+              "alias": "0xa20f...46fa",
+              "value": 92327.35,
+              "qualityWeight": 1.5
+            },
+            {
+              "address": "0x45d26f28196d226497130c4bac709d808fed4029",
+              "alias": "0x45d2...4029",
+              "value": 57748.0,
+              "qualityWeight": 0.5
+            },
+            {
+              "address": "0x2fcb6898d5a0623de19c3691904927685014c4d8",
+              "alias": "0x2fcb...c4d8",
+              "value": 1833.27,
+              "qualityWeight": 0.5
+            }
+          ],
+          "oppositeWalletCount": 2,
+          "netWalletCount": 2,
+          "oppositeWeightedWalletCount": 1.0,
+          "netWeightedWalletCount": 3.0,
+          "oppositeIndependentWalletCount": 2,
+          "netIndependentWalletCount": 2,
+          "oppositeIndependentWeightedWalletCount": 1.0,
+          "netIndependentWeightedWalletCount": 3.0,
+          "oppositeVerifiedFreshIndependentWalletCount": 0,
+          "netFreshIndependentWalletCount": 0,
+          "longWalletCount": 2,
+          "shortWalletCount": 4,
+          "longWeightedWalletCount": 1.0,
+          "shortWeightedWalletCount": 4.0,
+          "entryDistancePct": 0.0,
+          "maxEntryDistancePct": 4.0,
+          "convictionScore": 49.0
+        },
+        {
+          "coin": "BTC",
+          "side": "short",
+          "walletCount": 6,
+          "independentWalletCount": 6,
+          "weightedWalletCount": 7.0,
+          "independentWeightedWalletCount": 7.0,
+          "recentAddWalletCount": 0,
+          "freshActivityWalletCount": 0,
+          "verifiedFreshWalletCount": 0,
+          "verifiedFreshIndependentWalletCount": 0,
+          "freshWalletAddresses": [],
+          "topWalletCount": 4,
+          "independentTopWalletCount": 4,
+          "fillQualityUnknownWalletCount": 1,
+          "quarantinedWalletCount": 0,
+          "totalValue": 20277775.72,
+          "markPrice": 65211.48405099,
           "freshAddVwap": 0.0,
           "freshAddLatestTime": 0,
           "wallets": [
             {
               "address": "0x45d26f28196d226497130c4bac709d808fed4029",
               "alias": "0x45d2...4029",
-              "value": 6727033.0,
+              "value": 6716733.0,
               "qualityWeight": 0.5
             },
             {
               "address": "0x418aa6bf98a2b2bc93779f810330d88cde488888",
               "alias": "0x418aa6bf98a2b2bc93779f810330d88cde488888",
-              "value": 6104989.0,
+              "value": 6097228.5,
               "qualityWeight": 1.5
             },
             {
               "address": "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c",
               "alias": "0x5bc4...3b0c",
-              "value": 2978981.18,
-              "qualityWeight": 0.5
+              "value": 2975513.37,
+              "qualityWeight": 1.5
             },
             {
               "address": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
               "alias": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
-              "value": 2017785.05,
+              "value": 2015220.1,
               "qualityWeight": 1.5
             },
             {
               "address": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
               "alias": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
-              "value": 1958820.0,
+              "value": 1956330.0,
               "qualityWeight": 0.5
             },
             {
               "address": "0xa20fb0c9e04063eec5be286e9269028d966646fa",
               "alias": "0xa20f...46fa",
-              "value": 517392.44,
-              "qualityWeight": 0.75
+              "value": 516750.76,
+              "qualityWeight": 1.5
             }
           ],
           "oppositeWalletCount": 5,
           "netWalletCount": 1,
-          "oppositeWeightedWalletCount": 4.5,
-          "netWeightedWalletCount": 0.75,
+          "oppositeWeightedWalletCount": 5.5,
+          "netWeightedWalletCount": 1.5,
           "oppositeIndependentWalletCount": 5,
           "netIndependentWalletCount": 1,
-          "oppositeIndependentWeightedWalletCount": 4.5,
-          "netIndependentWeightedWalletCount": 0.75,
+          "oppositeIndependentWeightedWalletCount": 5.5,
+          "netIndependentWeightedWalletCount": 1.5,
           "oppositeVerifiedFreshIndependentWalletCount": 0,
           "netFreshIndependentWalletCount": 0,
           "longWalletCount": 5,
           "shortWalletCount": 6,
-          "longWeightedWalletCount": 4.5,
-          "shortWeightedWalletCount": 5.25,
+          "longWeightedWalletCount": 5.5,
+          "shortWeightedWalletCount": 7.0,
           "entryDistancePct": 0.0,
           "maxEntryDistancePct": 1.5,
-          "convictionScore": 14.6
+          "convictionScore": 24.5
         },
         {
-          "coin": "SOL",
-          "side": "long",
+          "coin": "ZEC",
+          "side": "short",
           "walletCount": 4,
           "independentWalletCount": 4,
-          "weightedWalletCount": 3.25,
-          "independentWeightedWalletCount": 3.25,
-          "recentAddWalletCount": 0,
+          "weightedWalletCount": 4.0,
+          "independentWeightedWalletCount": 4.0,
+          "recentAddWalletCount": 1,
           "freshActivityWalletCount": 0,
           "verifiedFreshWalletCount": 0,
           "verifiedFreshIndependentWalletCount": 0,
           "freshWalletAddresses": [],
-          "topWalletCount": 1,
-          "independentTopWalletCount": 1,
+          "topWalletCount": 2,
+          "independentTopWalletCount": 2,
           "fillQualityUnknownWalletCount": 1,
           "quarantinedWalletCount": 0,
-          "totalValue": 13419911.32,
-          "markPrice": 78.25696516,
+          "totalValue": 1684393.76,
+          "markPrice": 580.08332674,
           "freshAddVwap": 0.0,
           "freshAddLatestTime": 0,
           "wallets": [
             {
-              "address": "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
-              "alias": "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
-              "value": 13288580.14,
+              "address": "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c",
+              "alias": "0x5bc4...3b0c",
+              "value": 1188508.14,
               "qualityWeight": 1.5
-            },
-            {
-              "address": "0x54a7240cea67b8c41b7c7f2b485360f37331aef4",
-              "alias": "0x54a7240cea67b8c41b7c7f2b485360f37331aef4",
-              "value": 117379.5,
-              "qualityWeight": 0.5
-            },
-            {
-              "address": "0x8607a7d180de23645db594d90621d837749408d5",
-              "alias": "Wanyewest",
-              "value": 13873.4,
-              "qualityWeight": 0.5
             },
             {
               "address": "0xa20fb0c9e04063eec5be286e9269028d966646fa",
               "alias": "0xa20f...46fa",
-              "value": 78.28,
-              "qualityWeight": 0.75
+              "value": 485156.24,
+              "qualityWeight": 1.5
+            },
+            {
+              "address": "0x95fde6cf0d305078b7eeac44182a931c169dd947",
+              "alias": "0x95fde6cf0d305078b7eeac44182a931c169dd947",
+              "value": 10149.32,
+              "qualityWeight": 0.5
+            },
+            {
+              "address": "0x2fcb6898d5a0623de19c3691904927685014c4d8",
+              "alias": "0x2fcb...c4d8",
+              "value": 580.06,
+              "qualityWeight": 0.5
             }
           ],
-          "oppositeWalletCount": 4,
-          "netWalletCount": 0,
-          "oppositeWeightedWalletCount": 3.0,
-          "netWeightedWalletCount": 0.25,
-          "oppositeIndependentWalletCount": 4,
-          "netIndependentWalletCount": 0,
-          "oppositeIndependentWeightedWalletCount": 3.0,
-          "netIndependentWeightedWalletCount": 0.25,
+          "oppositeWalletCount": 3,
+          "netWalletCount": 1,
+          "oppositeWeightedWalletCount": 2.5,
+          "netWeightedWalletCount": 1.5,
+          "oppositeIndependentWalletCount": 3,
+          "netIndependentWalletCount": 1,
+          "oppositeIndependentWeightedWalletCount": 2.5,
+          "netIndependentWeightedWalletCount": 1.5,
           "oppositeVerifiedFreshIndependentWalletCount": 0,
           "netFreshIndependentWalletCount": 0,
-          "longWalletCount": 4,
+          "longWalletCount": 3,
           "shortWalletCount": 4,
-          "longWeightedWalletCount": 3.25,
-          "shortWeightedWalletCount": 3.0,
+          "longWeightedWalletCount": 2.5,
+          "shortWeightedWalletCount": 4.0,
           "entryDistancePct": 0.0,
-          "maxEntryDistancePct": 2.5,
-          "convictionScore": 4.9
+          "maxEntryDistancePct": 4.0,
+          "convictionScore": 24.5
         },
         {
           "coin": "NEAR",
@@ -781,116 +781,52 @@
           "freshWalletAddresses": [],
           "topWalletCount": 0,
           "independentTopWalletCount": 0,
-          "fillQualityUnknownWalletCount": 2,
+          "fillQualityUnknownWalletCount": 3,
           "quarantinedWalletCount": 0,
-          "totalValue": 738650.42,
-          "markPrice": 2.0865,
+          "totalValue": 735341.8,
+          "markPrice": 2.07715399,
           "freshAddVwap": 0.0,
           "freshAddLatestTime": 0,
           "wallets": [
             {
               "address": "0x45d26f28196d226497130c4bac709d808fed4029",
               "alias": "0x45d2...4029",
-              "value": 577751.85,
+              "value": 575176.68,
               "qualityWeight": 0.5
             },
             {
               "address": "0x8607a7d180de23645db594d90621d837749408d5",
               "alias": "Wanyewest",
-              "value": 113284.43,
+              "value": 112763.21,
               "qualityWeight": 0.5
             },
             {
               "address": "0x2fcb6898d5a0623de19c3691904927685014c4d8",
               "alias": "0x2fcb...c4d8",
-              "value": 47612.05,
+              "value": 47399.83,
               "qualityWeight": 0.5
             },
             {
               "address": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
               "alias": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
-              "value": 2.09,
+              "value": 2.08,
               "qualityWeight": 0.5
             }
           ],
           "oppositeWalletCount": 2,
           "netWalletCount": 2,
-          "oppositeWeightedWalletCount": 2.25,
+          "oppositeWeightedWalletCount": 3.0,
           "netWeightedWalletCount": 0.0,
           "oppositeIndependentWalletCount": 2,
           "netIndependentWalletCount": 2,
-          "oppositeIndependentWeightedWalletCount": 2.25,
+          "oppositeIndependentWeightedWalletCount": 3.0,
           "netIndependentWeightedWalletCount": 0.0,
           "oppositeVerifiedFreshIndependentWalletCount": 0,
           "netFreshIndependentWalletCount": 0,
           "longWalletCount": 2,
           "shortWalletCount": 4,
-          "longWeightedWalletCount": 2.25,
+          "longWeightedWalletCount": 3.0,
           "shortWeightedWalletCount": 2.0,
-          "entryDistancePct": 0.0,
-          "maxEntryDistancePct": 4.0,
-          "convictionScore": 0.0
-        },
-        {
-          "coin": "ZEC",
-          "side": "short",
-          "walletCount": 4,
-          "independentWalletCount": 4,
-          "weightedWalletCount": 2.25,
-          "independentWeightedWalletCount": 2.25,
-          "recentAddWalletCount": 1,
-          "freshActivityWalletCount": 0,
-          "verifiedFreshWalletCount": 0,
-          "verifiedFreshIndependentWalletCount": 0,
-          "freshWalletAddresses": [],
-          "topWalletCount": 0,
-          "independentTopWalletCount": 0,
-          "fillQualityUnknownWalletCount": 3,
-          "quarantinedWalletCount": 0,
-          "totalValue": 1691780.33,
-          "markPrice": 582.62716576,
-          "freshAddVwap": 0.0,
-          "freshAddLatestTime": 0,
-          "wallets": [
-            {
-              "address": "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c",
-              "alias": "0x5bc4...3b0c",
-              "value": 1193589.51,
-              "qualityWeight": 0.5
-            },
-            {
-              "address": "0xa20fb0c9e04063eec5be286e9269028d966646fa",
-              "alias": "0xa20f...46fa",
-              "value": 487405.78,
-              "qualityWeight": 0.75
-            },
-            {
-              "address": "0x95fde6cf0d305078b7eeac44182a931c169dd947",
-              "alias": "0x95fde6cf0d305078b7eeac44182a931c169dd947",
-              "value": 10202.2,
-              "qualityWeight": 0.5
-            },
-            {
-              "address": "0x2fcb6898d5a0623de19c3691904927685014c4d8",
-              "alias": "0x2fcb...c4d8",
-              "value": 582.84,
-              "qualityWeight": 0.5
-            }
-          ],
-          "oppositeWalletCount": 3,
-          "netWalletCount": 1,
-          "oppositeWeightedWalletCount": 2.5,
-          "netWeightedWalletCount": 0.0,
-          "oppositeIndependentWalletCount": 3,
-          "netIndependentWalletCount": 1,
-          "oppositeIndependentWeightedWalletCount": 2.5,
-          "netIndependentWeightedWalletCount": 0.0,
-          "oppositeVerifiedFreshIndependentWalletCount": 0,
-          "netFreshIndependentWalletCount": 0,
-          "longWalletCount": 3,
-          "shortWalletCount": 4,
-          "longWeightedWalletCount": 2.5,
-          "shortWeightedWalletCount": 2.25,
           "entryDistancePct": 0.0,
           "maxEntryDistancePct": 4.0,
           "convictionScore": 0.0
@@ -900,8 +836,78 @@
           "side": "long",
           "walletCount": 5,
           "independentWalletCount": 5,
-          "weightedWalletCount": 4.5,
-          "independentWeightedWalletCount": 4.5,
+          "weightedWalletCount": 5.5,
+          "independentWeightedWalletCount": 5.5,
+          "recentAddWalletCount": 0,
+          "freshActivityWalletCount": 0,
+          "verifiedFreshWalletCount": 0,
+          "verifiedFreshIndependentWalletCount": 0,
+          "freshWalletAddresses": [],
+          "topWalletCount": 3,
+          "independentTopWalletCount": 3,
+          "fillQualityUnknownWalletCount": 0,
+          "quarantinedWalletCount": 0,
+          "totalValue": 5129626.55,
+          "markPrice": 65211.89751211,
+          "freshAddVwap": 0.0,
+          "freshAddLatestTime": 0,
+          "wallets": [
+            {
+              "address": "0xcb58b8f5ec6d47985f0728465c25a08ef9ad2c7b",
+              "alias": "0xcb58b8f5ec6d47985f0728465c25a08ef9ad2c7b",
+              "value": 3260600.0,
+              "qualityWeight": 0.5
+            },
+            {
+              "address": "0x2d99fe0f36c1aebd28a1a2c0e82e8ca13c2ea351",
+              "alias": "0x2d99...a351",
+              "value": 1328384.09,
+              "qualityWeight": 1.5
+            },
+            {
+              "address": "0x54a7240cea67b8c41b7c7f2b485360f37331aef4",
+              "alias": "0x54a7240cea67b8c41b7c7f2b485360f37331aef4",
+              "value": 521688.0,
+              "qualityWeight": 0.5
+            },
+            {
+              "address": "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
+              "alias": "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
+              "value": 14925.07,
+              "qualityWeight": 1.5
+            },
+            {
+              "address": "0x1f67d79afc8d0e7609ddba6c9b657cc635f69981",
+              "alias": "0x1f67d79afc8d0e7609ddba6c9b657cc635f69981",
+              "value": 4029.39,
+              "qualityWeight": 1.5
+            }
+          ],
+          "oppositeWalletCount": 6,
+          "netWalletCount": 0,
+          "oppositeWeightedWalletCount": 7.0,
+          "netWeightedWalletCount": 0.0,
+          "oppositeIndependentWalletCount": 6,
+          "netIndependentWalletCount": 0,
+          "oppositeIndependentWeightedWalletCount": 7.0,
+          "netIndependentWeightedWalletCount": 0.0,
+          "oppositeVerifiedFreshIndependentWalletCount": 0,
+          "netFreshIndependentWalletCount": 0,
+          "longWalletCount": 5,
+          "shortWalletCount": 6,
+          "longWeightedWalletCount": 5.5,
+          "shortWeightedWalletCount": 7.0,
+          "entryDistancePct": 0.0,
+          "maxEntryDistancePct": 1.5,
+          "convictionScore": 0.0
+        },
+        {
+          "coin": "SOL",
+          "side": "long",
+          "walletCount": 4,
+          "independentWalletCount": 4,
+          "weightedWalletCount": 4.0,
+          "independentWeightedWalletCount": 4.0,
           "recentAddWalletCount": 0,
           "freshActivityWalletCount": 0,
           "verifiedFreshWalletCount": 0,
@@ -911,58 +917,52 @@
           "independentTopWalletCount": 2,
           "fillQualityUnknownWalletCount": 1,
           "quarantinedWalletCount": 0,
-          "totalValue": 5135590.61,
-          "markPrice": 65287.71741526,
+          "totalValue": 13355267.43,
+          "markPrice": 77.8800003,
           "freshAddVwap": 0.0,
           "freshAddLatestTime": 0,
           "wallets": [
             {
-              "address": "0xcb58b8f5ec6d47985f0728465c25a08ef9ad2c7b",
-              "alias": "0xcb58b8f5ec6d47985f0728465c25a08ef9ad2c7b",
-              "value": 3264350.0,
-              "qualityWeight": 0.5
-            },
-            {
-              "address": "0x2d99fe0f36c1aebd28a1a2c0e82e8ca13c2ea351",
-              "alias": "0x2d99...a351",
-              "value": 1329911.86,
-              "qualityWeight": 0.5
+              "address": "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
+              "alias": "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
+              "value": 13224562.93,
+              "qualityWeight": 1.5
             },
             {
               "address": "0x54a7240cea67b8c41b7c7f2b485360f37331aef4",
               "alias": "0x54a7240cea67b8c41b7c7f2b485360f37331aef4",
-              "value": 522352.0,
+              "value": 116820.0,
               "qualityWeight": 0.5
             },
             {
-              "address": "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
-              "alias": "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
-              "value": 14942.24,
-              "qualityWeight": 1.5
+              "address": "0x8607a7d180de23645db594d90621d837749408d5",
+              "alias": "Wanyewest",
+              "value": 13806.57,
+              "qualityWeight": 0.5
             },
             {
-              "address": "0x1f67d79afc8d0e7609ddba6c9b657cc635f69981",
-              "alias": "0x1f67d79afc8d0e7609ddba6c9b657cc635f69981",
-              "value": 4034.52,
+              "address": "0xa20fb0c9e04063eec5be286e9269028d966646fa",
+              "alias": "0xa20f...46fa",
+              "value": 77.93,
               "qualityWeight": 1.5
             }
           ],
-          "oppositeWalletCount": 6,
+          "oppositeWalletCount": 4,
           "netWalletCount": 0,
-          "oppositeWeightedWalletCount": 5.25,
+          "oppositeWeightedWalletCount": 4.0,
           "netWeightedWalletCount": 0.0,
-          "oppositeIndependentWalletCount": 6,
+          "oppositeIndependentWalletCount": 4,
           "netIndependentWalletCount": 0,
-          "oppositeIndependentWeightedWalletCount": 5.25,
+          "oppositeIndependentWeightedWalletCount": 4.0,
           "netIndependentWeightedWalletCount": 0.0,
           "oppositeVerifiedFreshIndependentWalletCount": 0,
           "netFreshIndependentWalletCount": 0,
-          "longWalletCount": 5,
-          "shortWalletCount": 6,
-          "longWeightedWalletCount": 4.5,
-          "shortWeightedWalletCount": 5.25,
+          "longWalletCount": 4,
+          "shortWalletCount": 4,
+          "longWeightedWalletCount": 4.0,
+          "shortWeightedWalletCount": 4.0,
           "entryDistancePct": 0.0,
-          "maxEntryDistancePct": 1.5,
+          "maxEntryDistancePct": 2.5,
           "convictionScore": 0.0
         },
         {
@@ -970,61 +970,61 @@
           "side": "short",
           "walletCount": 4,
           "independentWalletCount": 4,
-          "weightedWalletCount": 3.0,
-          "independentWeightedWalletCount": 3.0,
+          "weightedWalletCount": 4.0,
+          "independentWeightedWalletCount": 4.0,
           "recentAddWalletCount": 0,
           "freshActivityWalletCount": 0,
           "verifiedFreshWalletCount": 0,
           "verifiedFreshIndependentWalletCount": 0,
           "freshWalletAddresses": [],
-          "topWalletCount": 1,
-          "independentTopWalletCount": 1,
-          "fillQualityUnknownWalletCount": 2,
+          "topWalletCount": 2,
+          "independentTopWalletCount": 2,
+          "fillQualityUnknownWalletCount": 1,
           "quarantinedWalletCount": 0,
-          "totalValue": 5057499.0,
-          "markPrice": 78.26464616,
+          "totalValue": 5032798.71,
+          "markPrice": 77.88240985,
           "freshAddVwap": 0.0,
           "freshAddLatestTime": 0,
           "wallets": [
             {
               "address": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
               "alias": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
-              "value": 2503622.57,
+              "value": 2491688.83,
               "qualityWeight": 1.5
             },
             {
               "address": "0x45d26f28196d226497130c4bac709d808fed4029",
               "alias": "0x45d2...4029",
-              "value": 1966443.84,
+              "value": 1956471.2,
               "qualityWeight": 0.5
             },
             {
               "address": "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c",
               "alias": "0x5bc4...3b0c",
-              "value": 471505.47,
-              "qualityWeight": 0.5
+              "value": 469264.13,
+              "qualityWeight": 1.5
             },
             {
               "address": "0x63d417a577b50c96f4f09148d4e4d70950db0522",
               "alias": "0x63d417a577b50c96f4f09148d4e4d70950db0522",
-              "value": 115927.12,
+              "value": 115374.55,
               "qualityWeight": 0.5
             }
           ],
           "oppositeWalletCount": 4,
           "netWalletCount": 0,
-          "oppositeWeightedWalletCount": 3.25,
+          "oppositeWeightedWalletCount": 4.0,
           "netWeightedWalletCount": 0.0,
           "oppositeIndependentWalletCount": 4,
           "netIndependentWalletCount": 0,
-          "oppositeIndependentWeightedWalletCount": 3.25,
+          "oppositeIndependentWeightedWalletCount": 4.0,
           "netIndependentWeightedWalletCount": 0.0,
           "oppositeVerifiedFreshIndependentWalletCount": 0,
           "netFreshIndependentWalletCount": 0,
           "longWalletCount": 4,
           "shortWalletCount": 4,
-          "longWeightedWalletCount": 3.25,
-          "shortWeightedWalletCount": 3.0,
+          "longWeightedWalletCount": 4.0,
+          "shortWeightedWalletCount": 4.0,
           "entryDistancePct": 0.0,
           "maxEntryDistancePct": 2.5,
           "convictionScore": 0.0
@@ -1033,8 +1033,8 @@
       "hip3Consensus": [],
       "signals": [],
       "signalCount": 0,
-      "longExposure": 152338351.33,
-      "shortExposure": 106529469.47,
+      "longExposure": 147554819.29,
+      "shortExposure": 105880249.0,
       "longWalletCount": 16,
       "shortWalletCount": 18,
       "walletCount": 28,
@@ -1047,13 +1047,13 @@
           "0x418aa6bf98a2b2bc93779f810330d88cde488888",
           "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
           "0x8bae3527e5a33fa0cf184f37bc112d071463ab6d",
-          "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff"
-        ],
-        "updatedAt": "2026-07-15T14:08:35.087979Z",
-        "demoted": [
+          "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
           "0x2d99fe0f36c1aebd28a1a2c0e82e8ca13c2ea351",
-          "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c"
-        ]
+          "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c",
+          "0xa20fb0c9e04063eec5be286e9269028d966646fa"
+        ],
+        "updatedAt": "2026-07-15T14:25:01.797589Z",
+        "demoted": []
       },
       "vetoedSignals": []
     },
@@ -1063,7 +1063,7 @@
         "alias": "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
         "coin": "ZEC",
         "side": "long",
-        "totalValue": 28872866.93,
+        "totalValue": 28736070.98,
         "totalSize": 49563.75,
         "entryValue": 17955836.397,
         "entryPx": 362.2776
@@ -1073,7 +1073,7 @@
         "alias": "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
         "coin": "SOL",
         "side": "long",
-        "totalValue": 13288580.14,
+        "totalValue": 13224562.93,
         "totalSize": 169806.92,
         "entryValue": 12683099.603796002,
         "entryPx": 74.6913
@@ -1083,7 +1083,7 @@
         "alias": "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
         "coin": "NEAR",
         "side": "long",
-        "totalValue": 8821937.54,
+        "totalValue": 8781347.74,
         "totalSize": 4228103.3,
         "entryValue": 9374127.826429999,
         "entryPx": 2.2171
@@ -1093,7 +1093,7 @@
         "alias": "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
         "coin": "AAVE",
         "side": "long",
-        "totalValue": 8021613.04,
+        "totalValue": 7987387.8,
         "totalSize": 81683.16,
         "entryValue": 6973242.359304001,
         "entryPx": 85.3694
@@ -1103,27 +1103,17 @@
         "alias": "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
         "coin": "SKHX",
         "side": "long",
-        "totalValue": 5372169.0,
+        "totalValue": 5221260.91,
         "totalSize": 3981.744,
         "entryValue": 4895068.4752319995,
         "entryPx": 1229.378
-      },
-      "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae:WLD:long": {
-        "address": "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
-        "alias": "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
-        "coin": "WLD",
-        "side": "long",
-        "totalValue": 4054618.57,
-        "totalSize": 9737082.6,
-        "entryValue": 5011384.301742,
-        "entryPx": 0.51467
       },
       "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae:XPL:long": {
         "address": "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
         "alias": "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
         "coin": "XPL",
         "side": "long",
-        "totalValue": 3605793.88,
+        "totalValue": 3583726.27,
         "totalSize": 38988721.0,
         "entryValue": 4054826.9839999997,
         "entryPx": 0.104
@@ -1133,7 +1123,7 @@
         "alias": "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
         "coin": "ASTER",
         "side": "long",
-        "totalValue": 2275446.27,
+        "totalValue": 2270822.4,
         "totalSize": 3584396.0,
         "entryValue": 2664353.23472,
         "entryPx": 0.74332
@@ -1143,7 +1133,7 @@
         "alias": "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
         "coin": "XMR",
         "side": "long",
-        "totalValue": 2134953.73,
+        "totalValue": 2131678.67,
         "totalSize": 6421.686,
         "entryValue": 2163318.314622,
         "entryPx": 336.877
@@ -1153,7 +1143,7 @@
         "alias": "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
         "coin": "OIL",
         "side": "short",
-        "totalValue": 517468.25,
+        "totalValue": 516363.34,
         "totalSize": 6537.9,
         "entryValue": 524999.9079,
         "entryPx": 80.301
@@ -1163,7 +1153,7 @@
         "alias": "0xe9ffe7698f46f96f980f2877e18c43f5b4165903",
         "coin": "SP500",
         "side": "long",
-        "totalValue": 15237078.73,
+        "totalValue": 15205494.92,
         "totalSize": 2011.708,
         "entryValue": 14924223.940564001,
         "entryPx": 7418.683
@@ -1173,7 +1163,7 @@
         "alias": "0xe9ffe7698f46f96f980f2877e18c43f5b4165903",
         "coin": "NVDA",
         "side": "short",
-        "totalValue": 6961692.98,
+        "totalValue": 6923139.56,
         "totalSize": 32951.64,
         "entryValue": 7091555.39604,
         "entryPx": 215.211
@@ -1183,7 +1173,7 @@
         "alias": "0xe9ffe7698f46f96f980f2877e18c43f5b4165903",
         "coin": "SILVER",
         "side": "short",
-        "totalValue": 5903686.13,
+        "totalValue": 5883966.39,
         "totalSize": 101126.88,
         "entryValue": 7949270.543472,
         "entryPx": 78.6069
@@ -1193,7 +1183,7 @@
         "alias": "0xe9ffe7698f46f96f980f2877e18c43f5b4165903",
         "coin": "NBIS",
         "side": "short",
-        "totalValue": 3773736.62,
+        "totalValue": 3663260.3,
         "totalSize": 18661.54,
         "entryValue": 4345001.815126,
         "entryPx": 232.8319
@@ -1203,7 +1193,7 @@
         "alias": "0xe9ffe7698f46f96f980f2877e18c43f5b4165903",
         "coin": "SPCX",
         "side": "short",
-        "totalValue": 3169170.0,
+        "totalValue": 3145710.0,
         "totalSize": 23000.0,
         "entryValue": 4338694.7,
         "entryPx": 188.6389
@@ -1213,7 +1203,7 @@
         "alias": "0xe9ffe7698f46f96f980f2877e18c43f5b4165903",
         "coin": "OIL",
         "side": "short",
-        "totalValue": 2714810.7,
+        "totalValue": 2709700.0,
         "totalSize": 34300.0,
         "entryValue": 2570510.5999999996,
         "entryPx": 74.942
@@ -1223,7 +1213,7 @@
         "alias": "0xe9ffe7698f46f96f980f2877e18c43f5b4165903",
         "coin": "SKHY",
         "side": "long",
-        "totalValue": 2573259.0,
+        "totalValue": 2409659.62,
         "totalSize": 13724.78,
         "entryValue": 2570744.622504,
         "entryPx": 187.3068
@@ -1233,7 +1223,7 @@
         "alias": "0xe9ffe7698f46f96f980f2877e18c43f5b4165903",
         "coin": "CRCL",
         "side": "short",
-        "totalValue": 2331831.49,
+        "totalValue": 2291564.38,
         "totalSize": 35198.519,
         "entryValue": 3515768.871796,
         "entryPx": 99.884
@@ -1243,7 +1233,7 @@
         "alias": "0xe9ffe7698f46f96f980f2877e18c43f5b4165903",
         "coin": "TSM",
         "side": "short",
-        "totalValue": 990086.36,
+        "totalValue": 978108.66,
         "totalSize": 2334.834,
         "entryValue": 968493.812868,
         "entryPx": 414.802
@@ -1253,7 +1243,7 @@
         "alias": "0xe9ffe7698f46f96f980f2877e18c43f5b4165903",
         "coin": "HOOD",
         "side": "short",
-        "totalValue": 899158.51,
+        "totalValue": 894195.57,
         "totalSize": 7877.681,
         "entryValue": 697222.0345859999,
         "entryPx": 88.506
@@ -1263,7 +1253,7 @@
         "alias": "0xe9ffe7698f46f96f980f2877e18c43f5b4165903",
         "coin": "GOOGL",
         "side": "short",
-        "totalValue": 852686.72,
+        "totalValue": 853013.76,
         "totalSize": 2336.0,
         "entryValue": 845671.7119999999,
         "entryPx": 362.017
@@ -1273,7 +1263,7 @@
         "alias": "0x45d2...4029",
         "coin": "ETH",
         "side": "short",
-        "totalValue": 9728965.5,
+        "totalValue": 9686654.7,
         "totalSize": 5037.0,
         "entryValue": 12014604.99,
         "entryPx": 2385.27
@@ -1283,7 +1273,7 @@
         "alias": "0x45d2...4029",
         "coin": "BTC",
         "side": "short",
-        "totalValue": 6727033.0,
+        "totalValue": 6716733.0,
         "totalSize": 103.0,
         "entryValue": 10317767.5,
         "entryPx": 100172.5
@@ -1293,7 +1283,7 @@
         "alias": "0x45d2...4029",
         "coin": "XYZ100",
         "side": "long",
-        "totalValue": 5049170.0,
+        "totalValue": 5011940.0,
         "totalSize": 170.0,
         "entryValue": 4169080.0,
         "entryPx": 24524.0
@@ -1303,7 +1293,7 @@
         "alias": "0x45d2...4029",
         "coin": "SP500",
         "side": "long",
-        "totalValue": 3484178.0,
+        "totalValue": 3477784.0,
         "totalSize": 460.0,
         "entryValue": 3024424.56,
         "entryPx": 6574.836
@@ -1313,7 +1303,7 @@
         "alias": "0x45d2...4029",
         "coin": "SOL",
         "side": "short",
-        "totalValue": 1966443.84,
+        "totalValue": 1956471.2,
         "totalSize": 25120.0,
         "entryValue": 2349556.496,
         "entryPx": 93.5333
@@ -1323,7 +1313,7 @@
         "alias": "0x45d2...4029",
         "coin": "MU",
         "side": "short",
-        "totalValue": 1620678.0,
+        "totalValue": 1566720.0,
         "totalSize": 1700.0,
         "entryValue": 625554.1,
         "entryPx": 367.973
@@ -1333,7 +1323,7 @@
         "alias": "0x45d2...4029",
         "coin": "LIT",
         "side": "short",
-        "totalValue": 660920.0,
+        "totalValue": 655447.0,
         "totalSize": 260000.0,
         "entryValue": 491090.86,
         "entryPx": 1.888811
@@ -1343,7 +1333,7 @@
         "alias": "0x45d2...4029",
         "coin": "NEAR",
         "side": "short",
-        "totalValue": 577751.85,
+        "totalValue": 575176.68,
         "totalSize": 276900.0,
         "entryValue": 661779.924,
         "entryPx": 2.38996
@@ -1353,7 +1343,7 @@
         "alias": "0x45d2...4029",
         "coin": "OIL",
         "side": "long",
-        "totalValue": 517086.2,
+        "totalValue": 516435.2,
         "totalSize": 6200.0,
         "entryValue": 455335.43999999994,
         "entryPx": 73.4412
@@ -1363,7 +1353,7 @@
         "alias": "0x45d2...4029",
         "coin": "DOGE",
         "side": "short",
-        "totalValue": 507022.78,
+        "totalValue": 506805.62,
         "totalSize": 6786000.0,
         "entryValue": 726461.6579999999,
         "entryPx": 0.107053
@@ -1373,7 +1363,7 @@
         "alias": "0x5d2f4460ac3514ada79f5d9838916e508ab39bb7",
         "coin": "XYZ100",
         "side": "long",
-        "totalValue": 20203936.02,
+        "totalValue": 20053607.09,
         "totalSize": 680.2214,
         "entryValue": 16887006.42105,
         "entryPx": 24825.75
@@ -1383,7 +1373,7 @@
         "alias": "0x5d2f4460ac3514ada79f5d9838916e508ab39bb7",
         "coin": "SP500",
         "side": "long",
-        "totalValue": 9089675.05,
+        "totalValue": 9072274.07,
         "totalSize": 1200.068,
         "entryValue": 8365091.99502,
         "entryPx": 6970.515
@@ -1393,7 +1383,7 @@
         "alias": "0x795cfd1b03eafc11c4ec958b8a94cfc9aa64a242",
         "coin": "HYPE",
         "side": "long",
-        "totalValue": 10672472.44,
+        "totalValue": 10631062.82,
         "totalSize": 155675.25,
         "entryValue": 8863930.78965,
         "entryPx": 56.9386
@@ -1403,17 +1393,17 @@
         "alias": "Wanyewest",
         "coin": "SKHX",
         "side": "long",
-        "totalValue": 1063555.47,
-        "totalSize": 788.286,
-        "entryValue": 1021403.453922,
-        "entryPx": 1295.727
+        "totalValue": 1295741.77,
+        "totalSize": 988.286,
+        "entryValue": 1283404.0121759998,
+        "entryPx": 1298.616
       },
       "0x8607a7d180de23645db594d90621d837749408d5:SPCX:long": {
         "address": "0x8607a7d180de23645db594d90621d837749408d5",
         "alias": "Wanyewest",
         "coin": "SPCX",
         "side": "long",
-        "totalValue": 1026352.15,
+        "totalValue": 1019051.93,
         "totalSize": 7449.21,
         "entryValue": 1258397.2800629998,
         "entryPx": 168.9303
@@ -1423,7 +1413,7 @@
         "alias": "Wanyewest",
         "coin": "MU",
         "side": "long",
-        "totalValue": 608984.24,
+        "totalValue": 588610.25,
         "totalSize": 638.683,
         "entryValue": 659772.3126599999,
         "entryPx": 1033.02
@@ -1433,7 +1423,7 @@
         "alias": "0x2fcb...c4d8",
         "coin": "SILVER",
         "side": "short",
-        "totalValue": 1371695.0,
+        "totalValue": 1368123.0,
         "totalSize": 23500.0,
         "entryValue": 1909664.0499999998,
         "entryPx": 81.2623
@@ -1443,7 +1433,7 @@
         "alias": "0x5bc4...3b0c",
         "coin": "BTC",
         "side": "short",
-        "totalValue": 2978981.18,
+        "totalValue": 2975513.37,
         "totalSize": 45.62901,
         "entryValue": 2863813.55463,
         "entryPx": 62763.0
@@ -1453,7 +1443,7 @@
         "alias": "0x5bc4...3b0c",
         "coin": "ZEC",
         "side": "short",
-        "totalValue": 1193589.51,
+        "totalValue": 1188508.14,
         "totalSize": 2048.94,
         "entryValue": 908203.104594,
         "entryPx": 443.2551
@@ -1463,7 +1453,7 @@
         "alias": "0x5bc4...3b0c",
         "coin": "NVDA",
         "side": "short",
-        "totalValue": 760260.72,
+        "totalValue": 755549.11,
         "totalSize": 3596.654,
         "entryValue": 754398.1765,
         "entryPx": 209.75
@@ -1473,7 +1463,7 @@
         "alias": "0x5bc4...3b0c",
         "coin": "ETH",
         "side": "short",
-        "totalValue": 722460.69,
+        "totalValue": 719434.21,
         "totalSize": 374.1013,
         "entryValue": 686079.338122,
         "entryPx": 1833.94
@@ -1483,7 +1473,7 @@
         "alias": "0x5bc4...3b0c",
         "coin": "ZRO",
         "side": "short",
-        "totalValue": 539507.35,
+        "totalValue": 536815.62,
         "totalSize": 624531.0,
         "entryValue": 677253.9070199999,
         "entryPx": 1.08442
@@ -1493,7 +1483,7 @@
         "alias": "0xa87a233e8a7d8951ff790a2e39738086cb5f71b7",
         "coin": "SOL",
         "side": "short",
-        "totalValue": 2767342.03,
+        "totalValue": 2754010.47,
         "totalSize": 35362.23,
         "entryValue": 5567012.216886001,
         "entryPx": 157.4282
@@ -1503,7 +1493,7 @@
         "alias": "0xa87a233e8a7d8951ff790a2e39738086cb5f71b7",
         "coin": "DOGE",
         "side": "short",
-        "totalValue": 504523.44,
+        "totalValue": 504435.63,
         "totalSize": 6754809.0,
         "entryValue": 1231340.887419,
         "entryPx": 0.182291
@@ -1513,7 +1503,7 @@
         "alias": "0x418aa6bf98a2b2bc93779f810330d88cde488888",
         "coin": "BTC",
         "side": "short",
-        "totalValue": 6104989.0,
+        "totalValue": 6097228.5,
         "totalSize": 93.5,
         "entryValue": 5893192.8,
         "entryPx": 63028.8
@@ -1523,7 +1513,7 @@
         "alias": "0x418aa6bf98a2b2bc93779f810330d88cde488888",
         "coin": "ETH",
         "side": "short",
-        "totalValue": 4828000.0,
+        "totalValue": 4806250.0,
         "totalSize": 2500.0,
         "entryValue": 5428850.0,
         "entryPx": 2171.54
@@ -1533,7 +1523,7 @@
         "alias": "0x418aa6bf98a2b2bc93779f810330d88cde488888",
         "coin": "BNB",
         "side": "short",
-        "totalValue": 1108156.0,
+        "totalValue": 1103748.0,
         "totalSize": 1900.0,
         "entryValue": 1273704.9,
         "entryPx": 670.371
@@ -1543,7 +1533,7 @@
         "alias": "0xa20f...46fa",
         "coin": "BTC",
         "side": "short",
-        "totalValue": 517392.44,
+        "totalValue": 516750.76,
         "totalSize": 7.92198,
         "entryValue": 496189.25630999997,
         "entryPx": 62634.5
@@ -1553,7 +1543,7 @@
         "alias": "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
         "coin": "BB",
         "side": "long",
-        "totalValue": 689988.03,
+        "totalValue": 684972.94,
         "totalSize": 63482.2,
         "entryValue": 637286.379004,
         "entryPx": 10.03882
@@ -1563,7 +1553,7 @@
         "alias": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
         "coin": "ETH",
         "side": "short",
-        "totalValue": 3862400.0,
+        "totalValue": 3845000.0,
         "totalSize": 2000.0,
         "entryValue": 3468080.0,
         "entryPx": 1734.04
@@ -1573,7 +1563,7 @@
         "alias": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
         "coin": "HYPE",
         "side": "short",
-        "totalValue": 2399426.37,
+        "totalValue": 2389416.37,
         "totalSize": 35000.02,
         "entryValue": 2359907.8485179995,
         "entryPx": 67.4259
@@ -1583,7 +1573,7 @@
         "alias": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
         "coin": "BTC",
         "side": "short",
-        "totalValue": 1958820.0,
+        "totalValue": 1956330.0,
         "totalSize": 30.0,
         "entryValue": 1898616.0,
         "entryPx": 63287.2
@@ -1593,7 +1583,7 @@
         "alias": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
         "coin": "SOL",
         "side": "short",
-        "totalValue": 2503622.57,
+        "totalValue": 2491688.83,
         "totalSize": 31993.95,
         "entryValue": 2495121.776835,
         "entryPx": 77.9873
@@ -1603,7 +1593,7 @@
         "alias": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
         "coin": "ETH",
         "side": "short",
-        "totalValue": 2029031.89,
+        "totalValue": 2019891.16,
         "totalSize": 1050.6586,
         "entryValue": 2000674.612706,
         "entryPx": 1904.21
@@ -1613,7 +1603,7 @@
         "alias": "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
         "coin": "BTC",
         "side": "short",
-        "totalValue": 2017785.05,
+        "totalValue": 2015220.1,
         "totalSize": 30.90307,
         "entryValue": 2000000.335795,
         "entryPx": 64718.5
@@ -1623,37 +1613,17 @@
         "alias": "0x2d99...a351",
         "coin": "BTC",
         "side": "long",
-        "totalValue": 1329911.86,
+        "totalValue": 1328384.09,
         "totalSize": 20.37024,
         "entryValue": 1248938.117856,
         "entryPx": 61311.9
-      },
-      "0xcb58b8f5ec6d47985f0728465c25a08ef9ad2c7b:BTC:long": {
-        "address": "0xcb58b8f5ec6d47985f0728465c25a08ef9ad2c7b",
-        "alias": "0xcb58b8f5ec6d47985f0728465c25a08ef9ad2c7b",
-        "coin": "BTC",
-        "side": "long",
-        "totalValue": 3264350.0,
-        "totalSize": 50.0,
-        "entryValue": 3193145.0,
-        "entryPx": 63862.9
-      },
-      "0xcb58b8f5ec6d47985f0728465c25a08ef9ad2c7b:NVDA:long": {
-        "address": "0xcb58b8f5ec6d47985f0728465c25a08ef9ad2c7b",
-        "alias": "0xcb58b8f5ec6d47985f0728465c25a08ef9ad2c7b",
-        "coin": "NVDA",
-        "side": "long",
-        "totalValue": 2535960.0,
-        "totalSize": 12000.0,
-        "entryValue": 2410356.0,
-        "entryPx": 200.863
       },
       "0x8bae3527e5a33fa0cf184f37bc112d071463ab6d:META:long": {
         "address": "0x8bae3527e5a33fa0cf184f37bc112d071463ab6d",
         "alias": "0x8bae3527e5a33fa0cf184f37bc112d071463ab6d",
         "coin": "META",
         "side": "long",
-        "totalValue": 2018742.98,
+        "totalValue": 2015307.59,
         "totalSize": 3013.499,
         "entryValue": 1903021.605001,
         "entryPx": 631.499
@@ -1663,38 +1633,50 @@
         "alias": "0x8bae3527e5a33fa0cf184f37bc112d071463ab6d",
         "coin": "AMZN",
         "side": "long",
-        "totalValue": 549103.13,
+        "totalValue": 549861.17,
         "totalSize": 2165.831,
         "entryValue": 529461.212091,
         "entryPx": 244.461
       },
-      "0x8bae3527e5a33fa0cf184f37bc112d071463ab6d:SKHY:short": {
-        "address": "0x8bae3527e5a33fa0cf184f37bc112d071463ab6d",
-        "alias": "0x8bae3527e5a33fa0cf184f37bc112d071463ab6d",
-        "coin": "SKHY",
-        "side": "short",
-        "totalValue": 500544.5,
-        "totalSize": 2675.85,
-        "entryValue": 506516.9982,
-        "entryPx": 189.292
+      "0xcb58b8f5ec6d47985f0728465c25a08ef9ad2c7b:BTC:long": {
+        "address": "0xcb58b8f5ec6d47985f0728465c25a08ef9ad2c7b",
+        "alias": "0xcb58b8f5ec6d47985f0728465c25a08ef9ad2c7b",
+        "coin": "BTC",
+        "side": "long",
+        "totalValue": 3260600.0,
+        "totalSize": 50.0,
+        "entryValue": 3193145.0,
+        "entryPx": 63862.9
+      },
+      "0xcb58b8f5ec6d47985f0728465c25a08ef9ad2c7b:NVDA:long": {
+        "address": "0xcb58b8f5ec6d47985f0728465c25a08ef9ad2c7b",
+        "alias": "0xcb58b8f5ec6d47985f0728465c25a08ef9ad2c7b",
+        "coin": "NVDA",
+        "side": "long",
+        "totalValue": 2521080.0,
+        "totalSize": 12000.0,
+        "entryValue": 2410356.0,
+        "entryPx": 200.863
       },
       "0x54a7240cea67b8c41b7c7f2b485360f37331aef4:BTC:long": {
         "address": "0x54a7240cea67b8c41b7c7f2b485360f37331aef4",
         "alias": "0x54a7240cea67b8c41b7c7f2b485360f37331aef4",
         "coin": "BTC",
         "side": "long",
-        "totalValue": 522352.0,
+        "totalValue": 521688.0,
         "totalSize": 8.0,
         "entryValue": 473571.2,
         "entryPx": 59196.4
       }
     },
-    "lastCheckedAt": "2026-07-15T14:08:42.796579Z",
-    "lastSentAt": "2026-07-15T14:08:42.796579Z",
+    "lastCheckedAt": "2026-07-15T14:25:02.209414Z",
+    "lastSentAt": "2026-07-15T14:25:02.209414Z",
     "lastHourlySyncedAt": "2026-07-15T14:08:42.796579Z",
     "alertDedupe": {
       "position:add:0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8:ETH:short:s516:v100": 1784124522479,
-      "position:add:0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8:SOL:short:s127:v99": 1784124522479
+      "position:add:0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8:SOL:short:s127:v99": 1784124522479,
+      "position:close:0x8def9f50456c6c4e37fa5d3d57f108ed23992dae:WLD:long:s97:v41": 1784125501838,
+      "position:close:0x8bae3527e5a33fa0cf184f37bc112d071463ab6d:SKHY:short:s27:v50": 1784125501838
     },
     "topConvictionWallets": {
       "month": "2026-07",
@@ -1705,13 +1687,13 @@
         "0x418aa6bf98a2b2bc93779f810330d88cde488888",
         "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae",
         "0x8bae3527e5a33fa0cf184f37bc112d071463ab6d",
-        "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff"
-      ],
-      "updatedAt": "2026-07-15T14:08:35.087979Z",
-      "demoted": [
+        "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
         "0x2d99fe0f36c1aebd28a1a2c0e82e8ca13c2ea351",
-        "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c"
-      ]
+        "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c",
+        "0xa20fb0c9e04063eec5be286e9269028d966646fa"
+      ],
+      "updatedAt": "2026-07-15T14:25:01.797589Z",
+      "demoted": []
     },
     "cmmSignals": {
       "enabled": true,
@@ -9322,2216 +9304,2218 @@
         "lowValueCandidates": 127
       },
       "error": "",
-      "generatedAt": "2026-07-15T14:08:42.042471Z"
+      "generatedAt": "2026-07-15T14:08:42.042471Z",
+      "cacheHit": true,
+      "checkedAt": "2026-07-15T14:25:01.838264Z"
     },
     "walletPositionLifecycle": {
       "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae:ZEC:long": {
         "openedAt": 1783677818855,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515079
+        "updatedAt": 1784125501786
       },
       "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae:SOL:long": {
         "openedAt": 1782755860702,
         "lastAddAt": 1782888950906,
         "lastAddPrice": 74.274,
-        "updatedAt": 1784124515079
+        "updatedAt": 1784125501786
       },
       "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae:HYPE:long": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515079
+        "updatedAt": 1784125501786
       },
       "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae:NEAR:long": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515079
+        "updatedAt": 1784125501786
       },
       "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae:AAVE:long": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515079
+        "updatedAt": 1784125501786
       },
       "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae:SKHX:long": {
         "openedAt": 1783974119576,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515080
+        "updatedAt": 1784125501786
       },
       "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae:WLD:long": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515080
+        "updatedAt": 1784125501786
       },
       "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae:XPL:long": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515080
+        "updatedAt": 1784125501786
       },
       "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae:ASTER:long": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515080
+        "updatedAt": 1784125501786
       },
       "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae:XMR:long": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515080
+        "updatedAt": 1784125501786
       },
       "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae:OIL:short": {
         "openedAt": 1783999566614,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515080
+        "updatedAt": 1784125501786
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:SP500:long": {
         "openedAt": 1783677818854,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515080
+        "updatedAt": 1784125501786
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:NVDA:short": {
         "openedAt": 1782909027921,
         "lastAddAt": 1783054231704,
         "lastAddPrice": 196.17,
-        "updatedAt": 1784124515080
+        "updatedAt": 1784125501787
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:SILVER:short": {
         "openedAt": 1783026601142,
         "lastAddAt": 1783026614489,
         "lastAddPrice": 61.057,
-        "updatedAt": 1784124515080
+        "updatedAt": 1784125501787
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:NBIS:short": {
         "openedAt": 1782909273622,
         "lastAddAt": 1782978123195,
         "lastAddPrice": 225.23,
-        "updatedAt": 1784124515080
+        "updatedAt": 1784125501787
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:SPCX:short": {
         "openedAt": 1783677818854,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515080
+        "updatedAt": 1784125501787
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:OIL:short": {
         "openedAt": 1783677818854,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515080
+        "updatedAt": 1784125501787
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:SKHY:long": {
         "openedAt": 1784094215315,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515080
+        "updatedAt": 1784125501787
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:CRCL:short": {
         "openedAt": 1783677818854,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515080
+        "updatedAt": 1784125501787
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:TSM:short": {
         "openedAt": 1783054375242,
         "lastAddAt": 1783054375242,
         "lastAddPrice": 444.9,
-        "updatedAt": 1784124515080
+        "updatedAt": 1784125501787
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:HOOD:short": {
         "openedAt": 1783054393629,
         "lastAddAt": 1783054393629,
         "lastAddPrice": 112.32,
-        "updatedAt": 1784124515080
+        "updatedAt": 1784125501787
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:GOOGL:short": {
         "openedAt": 1782957544006,
         "lastAddAt": 1782960544006,
         "lastAddPrice": 360.33,
-        "updatedAt": 1784124515080
+        "updatedAt": 1784125501787
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:INTC:short": {
         "openedAt": 1783677818854,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515080
+        "updatedAt": 1784125501787
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:RKLB:short": {
         "openedAt": 1783054433960,
         "lastAddAt": 1783054433960,
         "lastAddPrice": 100.95,
-        "updatedAt": 1784124515080
+        "updatedAt": 1784125501787
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:NATGAS:short": {
         "openedAt": 1783677818855,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515080
+        "updatedAt": 1784125501787
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:TSLA:short": {
         "openedAt": 1784085644992,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515080
+        "updatedAt": 1784125501787
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:GOLD:short": {
         "openedAt": 1783677818855,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515080
+        "updatedAt": 1784125501787
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:QCOM:short": {
         "openedAt": 1783677818855,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515080
+        "updatedAt": 1784125501787
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:AMZN:short": {
         "openedAt": 1783054499638,
         "lastAddAt": 1783054499638,
         "lastAddPrice": 244.39,
-        "updatedAt": 1784124515080
+        "updatedAt": 1784125501787
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:CBRS:long": {
         "openedAt": 1782936146877,
         "lastAddAt": 1782979905704,
         "lastAddPrice": 214.15,
-        "updatedAt": 1784124515080
+        "updatedAt": 1784125501787
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:KIOXIA:short": {
         "openedAt": 1783677818855,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501787
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:STRC:short": {
         "openedAt": 1783677818855,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501787
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:IBM:short": {
         "openedAt": 1783677818855,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501787
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:MSFT:short": {
         "openedAt": 1783677818855,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501787
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:NFLX:short": {
         "openedAt": 1783054592316,
         "lastAddAt": 1783054592316,
         "lastAddPrice": 77.76,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501787
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:META:short": {
         "openedAt": 1782909245186,
         "lastAddAt": 1782909245186,
         "lastAddPrice": 587.6152655,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501787
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:MSTR:short": {
         "openedAt": 1783677818855,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501787
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:MU:short": {
         "openedAt": 1784110513088,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501787
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:SMH:short": {
         "openedAt": 1782980333062,
         "lastAddAt": 1782980333062,
         "lastAddPrice": 611.4,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501787
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:AVGO:short": {
         "openedAt": 1784085644993,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:GME:short": {
         "openedAt": 1783677818855,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:ORCL:short": {
         "openedAt": 1784094215316,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:BABA:short": {
         "openedAt": 1784113827514,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:BB:short": {
         "openedAt": 1784094215316,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:RIVN:short": {
         "openedAt": 1784096836815,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:ARM:short": {
         "openedAt": 1783054761313,
         "lastAddAt": 1783054761313,
         "lastAddPrice": 321.38,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:AMD:short": {
         "openedAt": 1784094215316,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:PURRDAT:short": {
         "openedAt": 1784119243103,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:SNDK:short": {
         "openedAt": 1784107854522,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0xe9ffe7698f46f96f980f2877e18c43f5b4165903:WDC:short": {
         "openedAt": 1784100759737,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:HYPE:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:ETH:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:BTC:short": {
         "openedAt": 1781486968969,
         "lastAddAt": 1781486968969,
         "lastAddPrice": 65399.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:XYZ100:long": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:SP500:long": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:SOL:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:MU:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:LIT:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:NEAR:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:OIL:long": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:DOGE:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:FARTCOIN:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:UNI:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:TAO:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:PUMP:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:ENA:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:MON:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:VVV:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:XRP:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:XPL:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:2Z:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:kSHIB:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:APEX:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:BNB:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:MOODENG:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:AVAX:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:TRX:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:CRV:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:VIRTUAL:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:ONDO:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:SPX:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:ZRO:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:ARB:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:PENGU:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:ATOM:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:ASTER:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:STX:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:FIL:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:POL:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:CHIP:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:kFLOKI:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:kBONK:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:OP:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:GRASS:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:SEI:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:SYRUP:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:INIT:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x45d26f28196d226497130c4bac709d808fed4029:TIA:short": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x5d2f4460ac3514ada79f5d9838916e508ab39bb7:XYZ100:long": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x5d2f4460ac3514ada79f5d9838916e508ab39bb7:SP500:long": {
         "openedAt": 1783677818856,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x795cfd1b03eafc11c4ec958b8a94cfc9aa64a242:HYPE:long": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:BTC:long": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:SKHX:long": {
         "openedAt": 1783928162587,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:SPCX:long": {
         "openedAt": 1781186228081,
         "lastAddAt": 1781293051259,
         "lastAddPrice": 161.03527351,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:MU:long": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515081
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:META:long": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515082
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:OIL:long": {
         "openedAt": 1781175209410,
         "lastAddAt": 1781446476503,
         "lastAddPrice": 82.0,
-        "updatedAt": 1784124515082
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:HYPE:long": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515082
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:LIT:long": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515082
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:NEAR:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515082
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:VIRTUAL:long": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515082
-      },
-      "0x8607a7d180de23645db594d90621d837749408d5:PENGU:short": {
-        "openedAt": 1783677818857,
-        "lastAddAt": 0,
-        "lastAddPrice": 0.0,
-        "updatedAt": 1784124515082
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:STRC:long": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515082
+        "updatedAt": 1784125501788
+      },
+      "0x8607a7d180de23645db594d90621d837749408d5:PENGU:short": {
+        "openedAt": 1783677818857,
+        "lastAddAt": 0,
+        "lastAddPrice": 0.0,
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:XRP:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515082
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:LTC:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515082
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:GRASS:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515082
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:kBONK:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515082
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:AAPL:long": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515082
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:FARTCOIN:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515082
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:BERA:long": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515082
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:AMZN:long": {
         "openedAt": 1783797559082,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515082
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:TAO:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515082
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:RUNE:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515082
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:SEI:long": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515082
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:USUAL:long": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515082
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:SOL:long": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515082
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:RENDER:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515082
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:AVAX:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515082
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:AIXBT:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:kNEIRO:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:RESOLV:long": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:GOAT:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:kPEPE:long": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:TIA:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:LDO:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:POPCAT:long": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x8607a7d180de23645db594d90621d837749408d5:DOGE:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x2fcb6898d5a0623de19c3691904927685014c4d8:SILVER:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x2fcb6898d5a0623de19c3691904927685014c4d8:WLD:short": {
         "openedAt": 1781164267707,
         "lastAddAt": 1781736807508,
         "lastAddPrice": 0.65699,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x2fcb6898d5a0623de19c3691904927685014c4d8:NEAR:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x2fcb6898d5a0623de19c3691904927685014c4d8:MELANIA:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x2fcb6898d5a0623de19c3691904927685014c4d8:MET:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x2fcb6898d5a0623de19c3691904927685014c4d8:DASH:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x2fcb6898d5a0623de19c3691904927685014c4d8:FIL:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x2fcb6898d5a0623de19c3691904927685014c4d8:VVV:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x2fcb6898d5a0623de19c3691904927685014c4d8:STRK:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x2fcb6898d5a0623de19c3691904927685014c4d8:XLM:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x2fcb6898d5a0623de19c3691904927685014c4d8:BCH:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x2fcb6898d5a0623de19c3691904927685014c4d8:ZEN:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x2fcb6898d5a0623de19c3691904927685014c4d8:ORDI:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x2fcb6898d5a0623de19c3691904927685014c4d8:STBL:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x2fcb6898d5a0623de19c3691904927685014c4d8:UNI:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x2fcb6898d5a0623de19c3691904927685014c4d8:BERA:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x2fcb6898d5a0623de19c3691904927685014c4d8:TRUMP:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x2fcb6898d5a0623de19c3691904927685014c4d8:ZRO:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x2fcb6898d5a0623de19c3691904927685014c4d8:TNSR:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x2fcb6898d5a0623de19c3691904927685014c4d8:ICP:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x2fcb6898d5a0623de19c3691904927685014c4d8:CHIP:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x2fcb6898d5a0623de19c3691904927685014c4d8:0G:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x2fcb6898d5a0623de19c3691904927685014c4d8:FOGO:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x2fcb6898d5a0623de19c3691904927685014c4d8:AVNT:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x2fcb6898d5a0623de19c3691904927685014c4d8:VIRTUAL:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x2fcb6898d5a0623de19c3691904927685014c4d8:kLUNC:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x2fcb6898d5a0623de19c3691904927685014c4d8:ANIME:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x2fcb6898d5a0623de19c3691904927685014c4d8:ZEC:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:BTC:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:ZEC:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:NVDA:short": {
         "openedAt": 1781798673679,
         "lastAddAt": 1781799028401,
         "lastAddPrice": 209.23,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501788
       },
       "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:ETH:short": {
         "openedAt": 1783974119577,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501789
       },
       "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:ZRO:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501789
       },
       "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:PLTR:short": {
         "openedAt": 1781798589552,
         "lastAddAt": 1781799019138,
         "lastAddPrice": 127.86,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501789
       },
       "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:SOL:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501789
       },
       "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:PAXG:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501789
       },
       "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:SPCX:long": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501789
       },
       "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:VIRTUAL:short": {
         "openedAt": 1781798598709,
         "lastAddAt": 1781799005941,
         "lastAddPrice": 0.57851,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501789
       },
       "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:BABA:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501789
       },
       "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:QCOM:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501789
       },
       "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:GRASS:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501789
       },
       "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:MON:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501789
       },
       "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:NBIS:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501789
       },
       "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:POL:short": {
         "openedAt": 1783695053675,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501789
       },
       "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:STABLE:long": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501789
       },
       "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:ADA:long": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501789
       },
       "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:LTC:short": {
         "openedAt": 1783955433657,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501789
       },
       "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:META:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501790
       },
       "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:HYPE:short": {
         "openedAt": 1783706454630,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501790
       },
       "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:CBRS:long": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501790
       },
       "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:ZETA:long": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501790
       },
       "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:SUSHI:long": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501790
       },
       "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:MSFT:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
-      },
-      "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:AMD:short": {
-        "openedAt": 1783677818857,
-        "lastAddAt": 0,
-        "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501790
       },
       "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:MEGA:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501790
+      },
+      "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:AMD:short": {
+        "openedAt": 1783677818857,
+        "lastAddAt": 0,
+        "lastAddPrice": 0.0,
+        "updatedAt": 1784125501790
       },
       "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:DYDX:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501790
       },
       "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:ENA:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501790
       },
       "0x5bc43f38c2ddcd85857f218674cd384f172c3b0c:BNB:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501790
       },
       "0xa87a233e8a7d8951ff790a2e39738086cb5f71b7:HYPE:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501790
       },
       "0xa87a233e8a7d8951ff790a2e39738086cb5f71b7:SOL:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501790
       },
       "0xa87a233e8a7d8951ff790a2e39738086cb5f71b7:DOGE:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501790
       },
       "0xa87a233e8a7d8951ff790a2e39738086cb5f71b7:VIRTUAL:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501790
       },
       "0xa87a233e8a7d8951ff790a2e39738086cb5f71b7:SUI:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501790
       },
       "0xa87a233e8a7d8951ff790a2e39738086cb5f71b7:APT:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501790
       },
       "0xa87a233e8a7d8951ff790a2e39738086cb5f71b7:ENA:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501790
       },
       "0xa87a233e8a7d8951ff790a2e39738086cb5f71b7:SPCX:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501790
       },
       "0x418aa6bf98a2b2bc93779f810330d88cde488888:BTC:short": {
         "openedAt": 1781113677210,
         "lastAddAt": 1781612410691,
         "lastAddPrice": 66650.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501790
       },
       "0x418aa6bf98a2b2bc93779f810330d88cde488888:ETH:short": {
         "openedAt": 1783677818859,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501790
       },
       "0x418aa6bf98a2b2bc93779f810330d88cde488888:BNB:short": {
         "openedAt": 1783677818859,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501790
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:BTC:short": {
         "openedAt": 1781198931543,
         "lastAddAt": 1781198936798,
         "lastAddPrice": 62666.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501790
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:ZEC:short": {
         "openedAt": 1781810371026,
         "lastAddAt": 1781810454545,
         "lastAddPrice": 446.15,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501790
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:XLM:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501791
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:NVDA:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501791
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:MON:short": {
         "openedAt": 1782518429902,
-        "lastAddAt": 1782518430459,
+        "lastAddAt": 1782518430526,
         "lastAddPrice": 0.019712,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501791
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:COIN:long": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501791
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:PENDLE:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501791
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:MET:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501791
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:AVAX:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501791
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:XMR:long": {
         "openedAt": 1781629826440,
         "lastAddAt": 1781629934856,
         "lastAddPrice": 340.52,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501791
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:AMZN:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501791
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:XPL:short": {
         "openedAt": 1782410536600,
         "lastAddAt": 1782444883926,
         "lastAddPrice": 0.09949,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501791
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:ENA:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501791
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:ONDO:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501791
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:HBAR:short": {
         "openedAt": 1782338488588,
         "lastAddAt": 1782338488588,
         "lastAddPrice": 0.077115,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501791
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:HYPE:short": {
         "openedAt": 1781792266640,
         "lastAddAt": 1781885584474,
         "lastAddPrice": 70.591,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501791
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:SKY:long": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501791
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:SUI:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501791
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:AERO:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501791
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:NEAR:long": {
         "openedAt": 1781297248672,
         "lastAddAt": 1781297249030,
         "lastAddPrice": 1.9963,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501791
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:MORPHO:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501791
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:kPEPE:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501791
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:WIF:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501791
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:LDO:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501791
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:BNB:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501791
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:WLFI:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501791
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:SPX:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501792
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:CRV:short": {
         "openedAt": 1781463097473,
         "lastAddAt": 1781471940165,
         "lastAddPrice": 0.23172,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501792
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:VIRTUAL:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501792
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:LIT:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501792
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:DOGE:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501792
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:RENDER:short": {
         "openedAt": 1781468388035,
         "lastAddAt": 1781471762667,
         "lastAddPrice": 1.7495,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501792
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:LINK:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501792
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:FIL:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501792
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:ASTER:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501792
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:FET:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501792
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:DOT:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501792
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:MEGA:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501792
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:ETHFI:short": {
         "openedAt": 1781927353842,
         "lastAddAt": 1781927354591,
         "lastAddPrice": 0.35325,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501792
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:XRP:long": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501792
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:TAO:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501792
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:STX:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501792
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:INJ:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501792
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:FARTCOIN:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501792
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:HOOD:short": {
         "openedAt": 1782136117922,
         "lastAddAt": 1782136117988,
         "lastAddPrice": 111.04,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501792
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:CAKE:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501792
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:POL:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501792
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:KAS:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501792
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:ALGO:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501792
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:PENGU:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501792
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:STRK:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501793
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:DASH:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501793
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:GALA:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501793
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:ICP:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501793
       },
       "0xa20fb0c9e04063eec5be286e9269028d966646fa:SOL:long": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501793
       },
       "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:BB:long": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501793
       },
       "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:HYPE:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515083
+        "updatedAt": 1784125501793
       },
       "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:ETH:short": {
         "openedAt": 1784038377018,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515084
+        "updatedAt": 1784125501793
       },
       "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:SUI:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515084
-      },
-      "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:ADA:short": {
-        "openedAt": 1783677818858,
-        "lastAddAt": 0,
-        "lastAddPrice": 0.0,
-        "updatedAt": 1784124515084
+        "updatedAt": 1784125501793
       },
       "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:AMZN:long": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515084
+        "updatedAt": 1784125501793
+      },
+      "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:ADA:short": {
+        "openedAt": 1783677818858,
+        "lastAddAt": 0,
+        "lastAddPrice": 0.0,
+        "updatedAt": 1784125501793
       },
       "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:MET:long": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515084
+        "updatedAt": 1784125501793
       },
       "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:APT:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515084
+        "updatedAt": 1784125501793
       },
       "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:PENDLE:long": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515084
+        "updatedAt": 1784125501793
       },
       "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:SPCX:long": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515084
+        "updatedAt": 1784125501793
       },
       "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:KAITO:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515084
+        "updatedAt": 1784125501793
       },
       "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:WLFI:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515084
+        "updatedAt": 1784125501793
       },
       "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:PUMP:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515084
+        "updatedAt": 1784125501793
       },
       "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:ZRO:long": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515084
+        "updatedAt": 1784125501793
       },
       "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:LLY:long": {
         "openedAt": 1784124515084,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515084
+        "updatedAt": 1784125501793
       },
       "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:IMX:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515084
+        "updatedAt": 1784125501793
       },
       "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:2Z:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515084
+        "updatedAt": 1784125501793
       },
       "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:MSTR:short": {
         "openedAt": 1781843900408,
         "lastAddAt": 1782309184998,
         "lastAddPrice": 100.311617,
-        "updatedAt": 1784124515084
+        "updatedAt": 1784125501793
       },
       "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:NVDA:short": {
         "openedAt": 1783677818859,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515084
+        "updatedAt": 1784125501793
       },
       "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:DOT:short": {
         "openedAt": 1783677818859,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515084
+        "updatedAt": 1784125501793
       },
       "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:XAI:short": {
         "openedAt": 1783677818859,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515084
+        "updatedAt": 1784125501793
       },
       "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:BERA:short": {
         "openedAt": 1783677818859,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515084
+        "updatedAt": 1784125501793
       },
       "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:TAO:long": {
         "openedAt": 1783677818859,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515084
+        "updatedAt": 1784125501793
       },
       "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:LINEA:short": {
         "openedAt": 1783677818859,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515084
+        "updatedAt": 1784125501793
       },
       "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:BTC:long": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515084
+        "updatedAt": 1784125501793
       },
       "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:STRC:long": {
         "openedAt": 1783677818859,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515084
+        "updatedAt": 1784125501794
       },
       "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:0G:short": {
         "openedAt": 1783677818859,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515084
+        "updatedAt": 1784125501794
       },
       "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:REZ:long": {
         "openedAt": 1783677818859,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515084
+        "updatedAt": 1784125501794
       },
       "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:MERL:long": {
         "openedAt": 1783677818859,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515084
+        "updatedAt": 1784125501794
       },
       "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff:PURR:long": {
         "openedAt": 1783677818859,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515084
+        "updatedAt": 1784125501794
       },
       "0x63d417a577b50c96f4f09148d4e4d70950db0522:HYPE:short": {
         "openedAt": 1781098524732,
         "lastAddAt": 1781520884147,
         "lastAddPrice": 68.0,
-        "updatedAt": 1784124515084
+        "updatedAt": 1784125501794
       },
       "0x63d417a577b50c96f4f09148d4e4d70950db0522:LIT:short": {
         "openedAt": 1781717027926,
         "lastAddAt": 1781719187843,
         "lastAddPrice": 1.9175,
-        "updatedAt": 1784124515084
+        "updatedAt": 1784125501794
       },
       "0x63d417a577b50c96f4f09148d4e4d70950db0522:VIRTUAL:long": {
         "openedAt": 1783778005693,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515084
+        "updatedAt": 1784125501794
       },
       "0x63d417a577b50c96f4f09148d4e4d70950db0522:SUI:short": {
         "openedAt": 1781094677460,
         "lastAddAt": 1781094804210,
         "lastAddPrice": 0.75229,
-        "updatedAt": 1784124515085
+        "updatedAt": 1784125501794
       },
       "0x63d417a577b50c96f4f09148d4e4d70950db0522:BB:long": {
         "openedAt": 1783677818859,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515085
+        "updatedAt": 1784125501794
       },
       "0x63d417a577b50c96f4f09148d4e4d70950db0522:XMR:long": {
         "openedAt": 1781251456546,
         "lastAddAt": 1781444028655,
         "lastAddPrice": 333.75,
-        "updatedAt": 1784124515085
+        "updatedAt": 1784125501794
       },
       "0x63d417a577b50c96f4f09148d4e4d70950db0522:SOL:short": {
         "openedAt": 1783677818859,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515085
+        "updatedAt": 1784125501794
       },
       "0x63d417a577b50c96f4f09148d4e4d70950db0522:MORPHO:long": {
         "openedAt": 1783677818859,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515085
+        "updatedAt": 1784125501794
       },
       "0x63d417a577b50c96f4f09148d4e4d70950db0522:ZEC:long": {
         "openedAt": 1784119243107,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515085
+        "updatedAt": 1784125501794
       },
       "0x63d417a577b50c96f4f09148d4e4d70950db0522:PUMP:short": {
         "openedAt": 1783677818859,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515085
+        "updatedAt": 1784125501794
       },
       "0x63d417a577b50c96f4f09148d4e4d70950db0522:GRASS:long": {
         "openedAt": 1784100759742,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515085
+        "updatedAt": 1784125501794
       },
       "0x63d417a577b50c96f4f09148d4e4d70950db0522:OP:short": {
         "openedAt": 1783677818859,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515085
+        "updatedAt": 1784125501794
       },
       "0x63d417a577b50c96f4f09148d4e4d70950db0522:ETH:long": {
         "openedAt": 1784044068492,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515085
+        "updatedAt": 1784125501794
       },
       "0x63d417a577b50c96f4f09148d4e4d70950db0522:ONDO:short": {
         "openedAt": 1783677818860,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515085
+        "updatedAt": 1784125501794
       },
       "0x63d417a577b50c96f4f09148d4e4d70950db0522:ARB:short": {
         "openedAt": 1783677818860,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515085
+        "updatedAt": 1784125501794
       },
       "0x63d417a577b50c96f4f09148d4e4d70950db0522:CC:short": {
         "openedAt": 1783677818860,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515085
+        "updatedAt": 1784125501794
       },
       "0x63d417a577b50c96f4f09148d4e4d70950db0522:SKHX:short": {
         "openedAt": 1784044068493,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515085
+        "updatedAt": 1784125501794
       },
       "0x63d417a577b50c96f4f09148d4e4d70950db0522:WLFI:short": {
         "openedAt": 1783677818860,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515085
+        "updatedAt": 1784125501794
       },
       "0x63d417a577b50c96f4f09148d4e4d70950db0522:LAYER:short": {
         "openedAt": 1783677818860,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515085
+        "updatedAt": 1784125501794
       },
       "0x63d417a577b50c96f4f09148d4e4d70950db0522:ZRO:long": {
         "openedAt": 1783677818860,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515085
+        "updatedAt": 1784125501794
       },
       "0x63d417a577b50c96f4f09148d4e4d70950db0522:WLD:short": {
         "openedAt": 1783677818860,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515085
+        "updatedAt": 1784125501794
       },
       "0x63d417a577b50c96f4f09148d4e4d70950db0522:DOGE:long": {
         "openedAt": 1783677818860,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515085
+        "updatedAt": 1784125501794
       },
       "0x63d417a577b50c96f4f09148d4e4d70950db0522:IMX:short": {
         "openedAt": 1783677818860,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515085
+        "updatedAt": 1784125501795
       },
       "0x63d417a577b50c96f4f09148d4e4d70950db0522:MEGA:long": {
         "openedAt": 1783677818860,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515085
+        "updatedAt": 1784125501795
       },
       "0x63d417a577b50c96f4f09148d4e4d70950db0522:XAI:short": {
         "openedAt": 1783677818860,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515085
+        "updatedAt": 1784125501795
       },
       "0x63d417a577b50c96f4f09148d4e4d70950db0522:2Z:short": {
         "openedAt": 1783677818860,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515085
+        "updatedAt": 1784125501795
       },
       "0x63d417a577b50c96f4f09148d4e4d70950db0522:0G:short": {
         "openedAt": 1783677818860,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515085
+        "updatedAt": 1784125501795
       },
       "0x63d417a577b50c96f4f09148d4e4d70950db0522:TAO:long": {
         "openedAt": 1783677818860,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515085
+        "updatedAt": 1784125501795
       },
       "0x350e33a777d510616fbdb483d1de3b50d1edfcfb:ETH:short": {
         "openedAt": 1781107480658,
         "lastAddAt": 1781107502518,
         "lastAddPrice": 1650.92161752,
-        "updatedAt": 1784124515085
+        "updatedAt": 1784125501795
       },
       "0x350e33a777d510616fbdb483d1de3b50d1edfcfb:HYPE:short": {
         "openedAt": 1781094823640,
         "lastAddAt": 1781967789254,
         "lastAddPrice": 70.72,
-        "updatedAt": 1784124515086
+        "updatedAt": 1784125501795
       },
       "0x350e33a777d510616fbdb483d1de3b50d1edfcfb:BTC:short": {
         "openedAt": 1781094811467,
         "lastAddAt": 1781206477651,
         "lastAddPrice": 63723.0,
-        "updatedAt": 1784124515086
+        "updatedAt": 1784125501795
       },
       "0x350e33a777d510616fbdb483d1de3b50d1edfcfb:MSTR:short": {
         "openedAt": 1781277452049,
         "lastAddAt": 1781339754613,
         "lastAddPrice": 124.75,
-        "updatedAt": 1784124515086
+        "updatedAt": 1784125501795
       },
       "0x350e33a777d510616fbdb483d1de3b50d1edfcfb:XRP:short": {
         "openedAt": 1781180371531,
         "lastAddAt": 1781180389020,
         "lastAddPrice": 1.11812616,
-        "updatedAt": 1784124515086
+        "updatedAt": 1784125501795
       },
       "0x350e33a777d510616fbdb483d1de3b50d1edfcfb:VVV:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515086
+        "updatedAt": 1784125501795
       },
       "0x350e33a777d510616fbdb483d1de3b50d1edfcfb:NEAR:short": {
         "openedAt": 1783677818858,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515086
+        "updatedAt": 1784125501795
       },
       "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8:SOL:short": {
         "openedAt": 1784085645000,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515086
+        "updatedAt": 1784125501795
       },
       "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8:ETH:short": {
         "openedAt": 1781498161712,
         "lastAddAt": 1781498161712,
         "lastAddPrice": 1718.5,
-        "updatedAt": 1784124515086
+        "updatedAt": 1784125501795
       },
       "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8:BTC:short": {
         "openedAt": 1781498221001,
         "lastAddAt": 1781634120030,
         "lastAddPrice": 65976.0,
-        "updatedAt": 1784124515086
+        "updatedAt": 1784125501795
       },
       "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8:LIT:short": {
         "openedAt": 1783677818857,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515086
+        "updatedAt": 1784125501795
       },
       "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8:HYPE:short": {
         "openedAt": 1781621445527,
         "lastAddAt": 1781634105156,
         "lastAddPrice": 73.956,
-        "updatedAt": 1784124515086
+        "updatedAt": 1784125501795
       },
       "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8:MU:short": {
         "openedAt": 1784085645000,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515086
+        "updatedAt": 1784125501795
       },
       "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8:CXMT:short": {
         "openedAt": 1784107854525,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515086
+        "updatedAt": 1784125501795
       },
       "0x2d99fe0f36c1aebd28a1a2c0e82e8ca13c2ea351:BTC:long": {
         "openedAt": 1783677818860,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515086
+        "updatedAt": 1784125501796
       },
       "0x2d99fe0f36c1aebd28a1a2c0e82e8ca13c2ea351:SKHX:short": {
         "openedAt": 1784073585944,
         "lastAddAt": 1784073585944,
         "lastAddPrice": 1415.67082574,
-        "updatedAt": 1784124515086
-      },
-      "0xcb58b8f5ec6d47985f0728465c25a08ef9ad2c7b:BTC:long": {
-        "openedAt": 1783677818861,
-        "lastAddAt": 0,
-        "lastAddPrice": 0.0,
-        "updatedAt": 1784124515086
-      },
-      "0xcb58b8f5ec6d47985f0728465c25a08ef9ad2c7b:NVDA:long": {
-        "openedAt": 1783677818861,
-        "lastAddAt": 0,
-        "lastAddPrice": 0.0,
-        "updatedAt": 1784124515086
-      },
-      "0xcb58b8f5ec6d47985f0728465c25a08ef9ad2c7b:AR:long": {
-        "openedAt": 1783677818861,
-        "lastAddAt": 0,
-        "lastAddPrice": 0.0,
-        "updatedAt": 1784124515086
+        "updatedAt": 1784125501796
       },
       "0x8bae3527e5a33fa0cf184f37bc112d071463ab6d:META:long": {
         "openedAt": 1783677818861,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515086
+        "updatedAt": 1784125501796
       },
       "0x8bae3527e5a33fa0cf184f37bc112d071463ab6d:AMZN:long": {
         "openedAt": 1783677818861,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515086
+        "updatedAt": 1784125501796
       },
       "0x8bae3527e5a33fa0cf184f37bc112d071463ab6d:SKHY:short": {
         "openedAt": 1784094215321,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515086
+        "updatedAt": 1784125501796
       },
       "0x8bae3527e5a33fa0cf184f37bc112d071463ab6d:SKHX:long": {
         "openedAt": 1784094215321,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515086
+        "updatedAt": 1784125501796
       },
       "0x8bae3527e5a33fa0cf184f37bc112d071463ab6d:CXMT:short": {
         "openedAt": 1784094215321,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515086
+        "updatedAt": 1784125501796
       },
       "0x8bae3527e5a33fa0cf184f37bc112d071463ab6d:KIOXIA:long": {
         "openedAt": 1783918083098,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515086
+        "updatedAt": 1784125501796
+      },
+      "0xcb58b8f5ec6d47985f0728465c25a08ef9ad2c7b:BTC:long": {
+        "openedAt": 1783677818861,
+        "lastAddAt": 0,
+        "lastAddPrice": 0.0,
+        "updatedAt": 1784125501796
+      },
+      "0xcb58b8f5ec6d47985f0728465c25a08ef9ad2c7b:NVDA:long": {
+        "openedAt": 1783677818861,
+        "lastAddAt": 0,
+        "lastAddPrice": 0.0,
+        "updatedAt": 1784125501796
+      },
+      "0xcb58b8f5ec6d47985f0728465c25a08ef9ad2c7b:AR:long": {
+        "openedAt": 1783677818861,
+        "lastAddAt": 0,
+        "lastAddPrice": 0.0,
+        "updatedAt": 1784125501796
       },
       "0xf97ad6704baec104d00b88e0c157e2b7b3a1ddd1:IBM:long": {
         "openedAt": 1784055277191,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515086
+        "updatedAt": 1784125501796
       },
       "0x1f67d79afc8d0e7609ddba6c9b657cc635f69981:KIOXIA:short": {
         "openedAt": 1783677818862,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515087
+        "updatedAt": 1784125501796
       },
       "0x1f67d79afc8d0e7609ddba6c9b657cc635f69981:SNDK:short": {
         "openedAt": 1783999566625,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515087
+        "updatedAt": 1784125501796
       },
       "0x1f67d79afc8d0e7609ddba6c9b657cc635f69981:SPCX:short": {
         "openedAt": 1781190979661,
         "lastAddAt": 1781796989901,
         "lastAddPrice": 177.0,
-        "updatedAt": 1784124515087
+        "updatedAt": 1784125501796
       },
       "0x1f67d79afc8d0e7609ddba6c9b657cc635f69981:HYPE:long": {
         "openedAt": 1781272430195,
         "lastAddAt": 1781621177777,
         "lastAddPrice": 74.43549163,
-        "updatedAt": 1784124515087
+        "updatedAt": 1784125501796
       },
       "0x1f67d79afc8d0e7609ddba6c9b657cc635f69981:SKHX:short": {
         "openedAt": 1783893715600,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515087
+        "updatedAt": 1784125501796
       },
       "0x1f67d79afc8d0e7609ddba6c9b657cc635f69981:BTC:long": {
         "openedAt": 1781131454742,
         "lastAddAt": 1781131454742,
         "lastAddPrice": 61537.58192,
-        "updatedAt": 1784124515087
+        "updatedAt": 1784125501796
       },
       "0x1f67d79afc8d0e7609ddba6c9b657cc635f69981:SP500:long": {
         "openedAt": 1783677818862,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515087
+        "updatedAt": 1784125501796
       },
       "0x1f67d79afc8d0e7609ddba6c9b657cc635f69981:MU:short": {
         "openedAt": 1784007870814,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515087
+        "updatedAt": 1784125501796
       },
       "0x1f67d79afc8d0e7609ddba6c9b657cc635f69981:SOFTBANK:long": {
         "openedAt": 1783677818862,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515087
+        "updatedAt": 1784125501796
       },
       "0x1f67d79afc8d0e7609ddba6c9b657cc635f69981:DRAM:long": {
         "openedAt": 1781338991057,
         "lastAddAt": 1781339017225,
         "lastAddPrice": 64.611,
-        "updatedAt": 1784124515087
+        "updatedAt": 1784125501796
       },
       "0x7d5c17cddaabc227c7d1a34ac7f6cdfda6985d48:WLFI:short": {
         "openedAt": 1783677818862,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515087
+        "updatedAt": 1784125501796
       },
       "0x7d5c17cddaabc227c7d1a34ac7f6cdfda6985d48:XLM:short": {
         "openedAt": 1781536261525,
         "lastAddAt": 1781536332483,
         "lastAddPrice": 0.2181,
-        "updatedAt": 1784124515087
+        "updatedAt": 1784125501796
       },
       "0x54a7240cea67b8c41b7c7f2b485360f37331aef4:BTC:long": {
         "openedAt": 1782129880240,
         "lastAddAt": 1782129960492,
         "lastAddPrice": 64740.0,
-        "updatedAt": 1784124515087
+        "updatedAt": 1784125501797
       },
       "0x54a7240cea67b8c41b7c7f2b485360f37331aef4:ETH:long": {
         "openedAt": 1784038377020,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515087
+        "updatedAt": 1784125501797
       },
       "0x54a7240cea67b8c41b7c7f2b485360f37331aef4:SOL:long": {
         "openedAt": 1781964708345,
         "lastAddAt": 1781964708345,
         "lastAddPrice": 70.5,
-        "updatedAt": 1784124515087
+        "updatedAt": 1784125501797
       },
       "0x54a7240cea67b8c41b7c7f2b485360f37331aef4:ZEC:long": {
         "openedAt": 1783677818862,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515087
+        "updatedAt": 1784125501797
       },
       "0x95fde6cf0d305078b7eeac44182a931c169dd947:ETH:short": {
         "openedAt": 1783677818862,
         "lastAddAt": 1784121405829,
         "lastAddPrice": 1939.34166367,
-        "updatedAt": 1784124515087
+        "updatedAt": 1784125501797
       },
       "0x95fde6cf0d305078b7eeac44182a931c169dd947:LIT:short": {
         "openedAt": 1784121647504,
         "lastAddAt": 1784121647504,
         "lastAddPrice": 2.54324455,
-        "updatedAt": 1784124515087
+        "updatedAt": 1784125501797
       },
       "0x95fde6cf0d305078b7eeac44182a931c169dd947:ZEC:short": {
         "openedAt": 1784072541329,
         "lastAddAt": 1784121432486,
         "lastAddPrice": 582.17,
-        "updatedAt": 1784124515087
+        "updatedAt": 1784125501797
       },
       "0x1337c163a5d5b60618ffceaf3a7f2130e607f39b:NVDA:short": {
         "openedAt": 1781215182017,
         "lastAddAt": 1781664424060,
         "lastAddPrice": 208.63,
-        "updatedAt": 1784124515087
+        "updatedAt": 1784125501797
       },
       "0x1337c163a5d5b60618ffceaf3a7f2130e607f39b:TSLA:short": {
         "openedAt": 1781098321068,
         "lastAddAt": 1781665477727,
         "lastAddPrice": 404.24805128,
-        "updatedAt": 1784124515087
+        "updatedAt": 1784125501797
       },
       "0x1337c163a5d5b60618ffceaf3a7f2130e607f39b:MSTR:long": {
         "openedAt": 1783677818862,
         "lastAddAt": 0,
         "lastAddPrice": 0.0,
-        "updatedAt": 1784124515087
+        "updatedAt": 1784125501797
       },
       "0x1337c163a5d5b60618ffceaf3a7f2130e607f39b:XYZ100:short": {
         "openedAt": 1781371531318,
         "lastAddAt": 1781371532457,
         "lastAddPrice": 29595.0,
-        "updatedAt": 1784124515087
+        "updatedAt": 1784125501797
       }
     },
     "signalOutcomes": {}
