@@ -82,6 +82,26 @@ TELEGRAM_CHAT_ID=301411846
 
 Then enable Actions in GitHub and run the `Sentiment Alerts` workflow once.
 
+## EC2 Sentiment Alerts
+
+For reliable five-minute checks, install the units in [`deploy/ec2`](deploy/ec2) on an
+Ubuntu EC2 instance. The service keeps mutable alert state outside the Git checkout
+in `/home/ubuntu/hyper-state`, loads secrets from
+`/home/ubuntu/.config/hyper/sentiment-alerts.env`, and updates the checkout from
+`main` before each run. Install the example environment file with mode `600`, replace
+its placeholder values, then enable the timer:
+
+```bash
+sudo install -m 0644 deploy/ec2/hyper-sentiment.service /etc/systemd/system/
+sudo install -m 0644 deploy/ec2/hyper-sentiment.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now hyper-sentiment.timer
+```
+
+The GitHub `Sentiment Alerts` workflow remains available for manual recovery runs,
+but has no schedule once the EC2 timer is active. Do not schedule both runners at the
+same time because they keep separate alert baselines and can send duplicate alerts.
+
 If you want to verify Telegram delivery without waiting for a real sentiment change, run [`.github/workflows/telegram-test.yml`](/Users/alexozga/Documents/New%20project%204/.github/workflows/telegram-test.yml). It sends a one-off test message and does not touch the saved alert baseline.
 
 If you want on-demand bot replies, enable [`.github/workflows/telegram-commands.yml`](.github/workflows/telegram-commands.yml).

@@ -1,0 +1,20 @@
+[Unit]
+Description=Hyper wallet sentiment alert check
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/hyper-alerts
+EnvironmentFile=/home/ubuntu/.config/hyper/sentiment-alerts.env
+Environment=DATA_DIR=/home/ubuntu/hyper-state
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=-/usr/bin/git -C /home/ubuntu/hyper-alerts pull --ff-only --quiet
+ExecStart=/usr/bin/flock -n -E 0 /home/ubuntu/hyper-state/sentiment-alert.lock /usr/bin/python3 scripts/run_alert_check.py
+TimeoutStartSec=4min
+
+[Install]
+WantedBy=multi-user.target

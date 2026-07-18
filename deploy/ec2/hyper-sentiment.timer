@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Hyper wallet sentiment alerts every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=10s
+Persistent=true
+Unit=hyper-sentiment.service
+
+[Install]
+WantedBy=timers.target
