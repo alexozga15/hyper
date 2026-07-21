@@ -31,6 +31,7 @@ DATA_DIR = Path(os.environ.get("DATA_DIR", str(ROOT / "data"))).resolve()
 WALLETS_FILE = DATA_DIR / "tracked_wallets.json"
 ALERTS_FILE = DATA_DIR / "alerts.json"
 TELEGRAM_STATE_FILE = DATA_DIR / "telegram_bot_state.json"
+WALLET_QUALITY_CACHE_FILE = DATA_DIR / "wallet_quality_cache.json"
 HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
 HYPERLIQUID_WS_URLS = (
     "wss://api-ui.hyperliquid.xyz/ws",
@@ -123,6 +124,37 @@ HYPERLIQUID_DASHBOARD_WORKERS = 3
 HYPERLIQUID_SNAPSHOT_WORKERS = 3
 HYPERLIQUID_API_RETRY_ATTEMPTS = 3
 HYPERLIQUID_API_RETRY_DELAY_SECONDS = 0.25
+WALLET_QUALITY_REFRESH_BATCH_SIZE = 3
+WALLET_LIVE_FILL_LOOKBACK_MS = 2 * 60 * 60 * 1000
+WALLET_RECENT_FILL_CACHE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
+WALLET_RECENT_FILL_CACHE_LIMIT = 200
+WALLET_CACHED_QUALITY_FIELDS = (
+    "role",
+    "realizedPnl",
+    "recentRealizedPnl",
+    "realizedPnl30d",
+    "recentWins",
+    "recentLosses",
+    "recentClosedTrades",
+    "closedTrades30d",
+    "grossProfit30d",
+    "grossLoss30d",
+    "qualityClosedEvents30d",
+    "qualityNetPnl30d",
+    "qualityProfitFactor30d",
+    "qualityTopWinConcentrationPct",
+    "qualityHoldout6dEvents",
+    "qualityHoldout6dNetPnl",
+    "fills30d",
+    "daysSinceLastFill",
+    "holdingOnly30d",
+    "recentWinRateRank",
+    "assetQuality",
+    "performance",
+    "hitRate",
+    "openOrderCount",
+    "openOrders",
+)
 LORACLE_WALLET_ADDRESS = "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae"
 EXCLUDED_COUNTED_POSITIONS = {
     (LORACLE_WALLET_ADDRESS, "HYPE"),
@@ -1021,6 +1053,7 @@ class WalletTrackerService:
         self.store = store
         self.client = client
         self.alerts_path = ALERTS_FILE
+        self.wallet_quality_cache_path = WALLET_QUALITY_CACHE_FILE
         self.cmm_client = CoinMarketManClient()
 
     def fetch_wallet_role(self, address: str) -> str:
@@ -1086,11 +1119,18 @@ class WalletTrackerService:
             }
         return periods
 
-    def fetch_wallet_snapshot(self, wallet: TrackedWallet) -> dict[str, Any]:
+    def fetch_wallet_snapshot(
+        self,
+        wallet: TrackedWallet,
+        *,
+        full_quality_refresh: bool = True,
+        cached_snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         now_ms = current_time_ms()
         cutoff_7d_ms = now_ms - RANKING_WINDOW_MS
         cutoff_30d_ms = now_ms - HOLDING_ONLY_WINDOW_MS
         cutoff_holdout_ms = now_ms - MONTHLY_QUALITY_HOLDOUT_MS
+        fills_start_ms = cutoff_30d_ms if full_quality_refresh else now_ms - WALLET_LIVE_FILL_LOOKBACK_MS
         with ThreadPoolExecutor(max_workers=HYPERLIQUID_SNAPSHOT_WORKERS) as executor:
             futures = {
                 "state": executor.submit(
@@ -1105,17 +1145,27 @@ class WalletTrackerService:
                         "time": None,
                     },
                 ),
-                "orders": executor.submit(self.fetch_open_orders_result, wallet.address),
-                "fills": executor.submit(self.fetch_fills_result, wallet.address, cutoff_30d_ms),
-                "role": executor.submit(self.fetch_wallet_role, wallet.address),
-                "portfolio": executor.submit(self.fetch_portfolio_result, wallet.address),
+                "fills": executor.submit(self.fetch_fills_result, wallet.address, fills_start_ms),
             }
+            if full_quality_refresh:
+                futures["orders"] = executor.submit(self.fetch_open_orders_result, wallet.address)
+                futures["role"] = executor.submit(self.fetch_wallet_role, wallet.address)
+                futures["portfolio"] = executor.submit(self.fetch_portfolio_result, wallet.address)
 
         state = futures["state"].result()
-        orders_result = futures["orders"].result()
         fills_result = futures["fills"].result()
-        role = futures["role"].result()
-        portfolio_result = futures["portfolio"].result()
+        cached = cached_snapshot if isinstance(cached_snapshot, dict) else {}
+        orders_result = (
+            futures["orders"].result()
+            if "orders" in futures
+            else {"ok": True, "data": cached.get("openOrders", []), "error": ""}
+        )
+        role = futures["role"].result() if "role" in futures else str(cached.get("role") or "unknown")
+        portfolio_result = (
+            futures["portfolio"].result()
+            if "portfolio" in futures
+            else {"ok": True, "data": cached.get("portfolio", {}), "error": ""}
+        )
         open_orders = orders_result.get("data", []) if isinstance(orders_result, dict) else []
         fills = fills_result.get("data", []) if isinstance(fills_result, dict) else []
         portfolio = portfolio_result.get("data", {}) if isinstance(portfolio_result, dict) else {}
@@ -1303,7 +1353,7 @@ class WalletTrackerService:
             for coin, item in asset_trade_stats.items()
         }
 
-        return {
+        snapshot = {
             "address": wallet.address,
             "alias": wallet.alias,
             "notes": wallet.notes,
@@ -1365,6 +1415,71 @@ class WalletTrackerService:
             "hitRate": hit_rate,
         }
 
+        cached_recent_fills = cached.get("recentFills", []) if isinstance(cached.get("recentFills"), list) else []
+        merged_recent_fills: dict[tuple[Any, ...], dict[str, Any]] = {}
+        for fill in [*cached_recent_fills, *recent_fills]:
+            fill_time = int(to_float(fill.get("time")))
+            if fill_time < now_ms - WALLET_RECENT_FILL_CACHE_RETENTION_MS:
+                continue
+            key = (
+                normalize_position_coin(fill.get("coin")),
+                str(fill.get("direction") or ""),
+                fill_time,
+                to_float(fill.get("price")),
+                to_float(fill.get("size")),
+            )
+            merged_recent_fills[key] = fill
+        snapshot["recentFills"] = sorted(
+            merged_recent_fills.values(),
+            key=lambda fill: int(to_float(fill.get("time"))),
+            reverse=True,
+        )[:WALLET_RECENT_FILL_CACHE_LIMIT]
+
+        quality_refresh_succeeded = full_quality_refresh and fills_ok and portfolio_ok
+        use_cached_quality = bool(cached) and not quality_refresh_succeeded
+        if use_cached_quality:
+            for field in WALLET_CACHED_QUALITY_FIELDS:
+                if field in cached:
+                    snapshot[field] = cached[field]
+        if recent_fills:
+            latest_live_fill_ms = max(int(to_float(fill.get("time"))) for fill in recent_fills)
+            snapshot["holdingOnly30d"] = False
+            snapshot["daysSinceLastFill"] = round(max(0, now_ms - latest_live_fill_ms) / (24 * 60 * 60 * 1000), 1)
+        snapshot["dataQuality"].update(
+            {
+                "qualityRefreshAttempted": full_quality_refresh,
+                "qualityRefreshSucceeded": quality_refresh_succeeded,
+                "qualityCacheHit": use_cached_quality,
+                "qualityRefreshedAt": cached.get("qualityRefreshedAt", "") if use_cached_quality else snapshot["fetchedAt"],
+            }
+        )
+        return snapshot
+
+    def cached_wallet_quality_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+        return {
+            **{field: snapshot.get(field) for field in WALLET_CACHED_QUALITY_FIELDS if field in snapshot},
+            "recentFills": snapshot.get("recentFills", []),
+            "qualityRefreshedAt": snapshot.get("fetchedAt", now_iso()),
+            "refreshedAtMs": current_time_ms(),
+        }
+
+    def wallet_quality_refresh_addresses(
+        self,
+        wallets: list[TrackedWallet],
+        cached_wallets: dict[str, Any],
+    ) -> set[str]:
+        addresses = [wallet.address.lower() for wallet in wallets]
+        if not cached_wallets:
+            return set(addresses)
+        ordered = sorted(
+            addresses,
+            key=lambda address: (
+                address in cached_wallets,
+                int(to_float(cached_wallets.get(address, {}).get("refreshedAtMs"))),
+            ),
+        )
+        return set(ordered[:WALLET_QUALITY_REFRESH_BATCH_SIZE])
+
     def build_holding_only_wallets(self, snapshots: list[dict[str, Any]], *, limit: int = 20) -> list[dict[str, Any]]:
         holders = []
         for wallet in snapshots:
@@ -1393,8 +1508,48 @@ class WalletTrackerService:
 
     def dashboard(self) -> dict[str, Any]:
         wallets = self.store.list_wallets()
+        raw_quality_cache = load_json_file(self.wallet_quality_cache_path, {})
+        cached_wallets = (
+            raw_quality_cache.get("wallets", {})
+            if isinstance(raw_quality_cache, dict) and isinstance(raw_quality_cache.get("wallets"), dict)
+            else {}
+        )
+        refresh_addresses = self.wallet_quality_refresh_addresses(wallets, cached_wallets)
+
+        def fetch_snapshot(wallet: TrackedWallet) -> dict[str, Any]:
+            address = wallet.address.lower()
+            return self.fetch_wallet_snapshot(
+                wallet,
+                full_quality_refresh=address in refresh_addresses,
+                cached_snapshot=cached_wallets.get(address),
+            )
+
         with ThreadPoolExecutor(max_workers=min(max(len(wallets), 1), HYPERLIQUID_DASHBOARD_WORKERS)) as executor:
-            snapshots = list(executor.map(self.fetch_wallet_snapshot, wallets)) if wallets else []
+            snapshots = list(executor.map(fetch_snapshot, wallets)) if wallets else []
+        cache_changed = False
+        for snapshot in snapshots:
+            address = str(snapshot.get("address") or "").lower()
+            quality = snapshot.get("dataQuality", {}) if isinstance(snapshot.get("dataQuality"), dict) else {}
+            if address and quality.get("qualityRefreshSucceeded"):
+                cached_wallets[address] = self.cached_wallet_quality_snapshot(snapshot)
+                cache_changed = True
+            elif address in cached_wallets and snapshot.get("recentFills"):
+                cached_wallets[address]["recentFills"] = snapshot.get("recentFills", [])
+                cache_changed = True
+        if cache_changed:
+            tracked_addresses = {wallet.address.lower() for wallet in wallets}
+            save_json_file(
+                self.wallet_quality_cache_path,
+                {
+                    "version": 1,
+                    "updatedAt": now_iso(),
+                    "wallets": {
+                        address: item
+                        for address, item in cached_wallets.items()
+                        if address in tracked_addresses and isinstance(item, dict)
+                    },
+                },
+            )
         fill_ok_count = sum(1 for item in snapshots if item.get("dataQuality", {}).get("fillsOk"))
         wallets_with_recent_fills = sum(1 for item in snapshots if item.get("recentFills"))
         total_recent_fills = sum(len(item.get("recentFills", [])) for item in snapshots)

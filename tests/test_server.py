@@ -1240,6 +1240,105 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(dashboard["totals"]["holdingOnly30dWallets"], 0)
         self.assertTrue(all(wallet["dataQuality"]["fillsDegraded"] for wallet in dashboard["wallets"]))
 
+    def test_quality_refresh_rotation_prioritizes_missing_then_oldest_wallets(self) -> None:
+        wallets = [
+            TrackedWallet(address=f"0x{index:040x}", alias="", notes="", created_at="")
+            for index in range(1, 6)
+        ]
+        cached = {
+            wallets[0].address: {"refreshedAtMs": 400},
+            wallets[1].address: {"refreshedAtMs": 100},
+            wallets[2].address: {"refreshedAtMs": 300},
+            wallets[3].address: {"refreshedAtMs": 200},
+        }
+
+        selected = self.service.wallet_quality_refresh_addresses(wallets, cached)
+
+        self.assertEqual(selected, {wallets[1].address, wallets[3].address, wallets[4].address})
+
+    def test_failed_full_quality_refresh_preserves_last_good_metrics(self) -> None:
+        wallet = TrackedWallet(address="0x1111111111111111111111111111111111111111", alias="", notes="", created_at="")
+        cached = {
+            "realizedPnl30d": 123_456.0,
+            "recentWinRateRank": {"label": "Elite", "score": 81.0},
+            "performance": {"month": {"pnl": 123_456.0}},
+            "recentFills": [],
+            "qualityRefreshedAt": "2026-07-21T10:00:00Z",
+        }
+        state = {
+            "marginSummary": {"accountValue": "1000000", "totalNtlPos": "0", "totalMarginUsed": "0"},
+            "withdrawable": "1000000",
+            "assetPositions": [],
+        }
+
+        with patch.object(
+            self.service.client, "safe_subscribe_all_dexs_clearinghouse_state", return_value=state
+        ), patch.object(
+            self.service, "fetch_fills_result", return_value={"ok": False, "data": [], "error": "HTTP 429"}
+        ), patch.object(
+            self.service, "fetch_open_orders_result", return_value={"ok": True, "data": [], "error": ""}
+        ), patch.object(
+            self.service, "fetch_portfolio_result", return_value={"ok": False, "data": {}, "error": "HTTP 429"}
+        ), patch.object(self.service, "fetch_wallet_role", return_value="user"):
+            snapshot = self.service.fetch_wallet_snapshot(wallet, cached_snapshot=cached)
+
+        self.assertEqual(snapshot["realizedPnl30d"], 123_456.0)
+        self.assertEqual(snapshot["recentWinRateRank"]["label"], "Elite")
+        self.assertTrue(snapshot["dataQuality"]["qualityCacheHit"])
+        self.assertFalse(snapshot["dataQuality"]["qualityRefreshSucceeded"])
+
+    def test_incremental_snapshot_skips_expensive_quality_endpoints(self) -> None:
+        wallet = TrackedWallet(address="0x1111111111111111111111111111111111111111", alias="", notes="", created_at="")
+        cached = {
+            "realizedPnl30d": 50_000.0,
+            "recentWinRateRank": {"label": "Balanced", "score": 60.0},
+            "performance": {},
+            "recentFills": [],
+            "qualityRefreshedAt": "2026-07-21T10:00:00Z",
+        }
+        state = {
+            "marginSummary": {"accountValue": "1000000", "totalNtlPos": "0", "totalMarginUsed": "0"},
+            "withdrawable": "1000000",
+            "assetPositions": [],
+        }
+
+        with patch.object(
+            self.service.client, "safe_subscribe_all_dexs_clearinghouse_state", return_value=state
+        ), patch.object(
+            self.service,
+            "fetch_fills_result",
+            return_value={
+                "ok": True,
+                "data": [
+                    {
+                        "coin": "BTC",
+                        "dir": "Open Long",
+                        "px": "70000",
+                        "sz": "1",
+                        "closedPnl": "0",
+                        "fee": "1",
+                        "time": 1_700_000_000_000,
+                    }
+                ],
+                "error": "",
+            },
+        ), patch.object(self.service, "fetch_open_orders_result") as orders, patch.object(
+            self.service, "fetch_portfolio_result"
+        ) as portfolio, patch.object(self.service, "fetch_wallet_role") as role:
+            snapshot = self.service.fetch_wallet_snapshot(
+                wallet,
+                full_quality_refresh=False,
+                cached_snapshot=cached,
+            )
+
+        orders.assert_not_called()
+        portfolio.assert_not_called()
+        role.assert_not_called()
+        self.assertEqual(snapshot["realizedPnl30d"], 50_000.0)
+        self.assertTrue(snapshot["dataQuality"]["fillsOk"])
+        self.assertTrue(snapshot["dataQuality"]["qualityCacheHit"])
+        self.assertFalse(snapshot["holdingOnly30d"])
+
     def test_summarize_changes_detects_signal_changes(self) -> None:
         previous = {
             "overallBias": "mixed",
