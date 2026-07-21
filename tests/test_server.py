@@ -3053,7 +3053,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(len(result["changes"]["newLargePositions"]), 1)
         self.assertEqual(result["changes"]["newLargePositions"][0]["coin"], "BTC")
         sent_message = send_telegram_message.call_args.args[2]
-        self.assertIn("Open >$500K", sent_message)
+        self.assertIn("Open >$700K", sent_message)
         self.assertIn("Trader One: BTC long $1.2M sz 12 open VWAP $100,000", sent_message)
 
     def test_check_alerts_notifies_on_closed_large_positions(self) -> None:
@@ -3090,7 +3090,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertTrue(result["sent"])
         self.assertEqual(len(result["changes"]["closedLargePositions"]), 1)
         sent_message = send_telegram_message.call_args.args[2]
-        self.assertIn("Closed >$500K", sent_message)
+        self.assertIn("Closed >$700K", sent_message)
         self.assertIn("Trader One: ETH short $1.2M sz 400 last ~$3,000", sent_message)
 
     def test_check_alerts_ignores_closed_positions_for_untracked_wallets(self) -> None:
@@ -3502,7 +3502,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertNotIn("Wallet ranks by 7D hit rate + PnL", hourly_message)
         self.assertNotIn("High-conviction signals", hourly_message)
         alert_message = send_telegram_message.call_args_list[1].args[2]
-        self.assertIn("Open >$500K", alert_message)
+        self.assertIn("Open >$700K", alert_message)
         self.assertIn("Trader One: BTC long $1.2M", alert_message)
         saved_state = save_json_file.call_args.args[1]["state"]
         self.assertEqual(saved_state["summary"]["consensus"][0]["walletCount"], 8)
@@ -3602,7 +3602,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertTrue(result["sent"])
         self.assertEqual(len(result["changes"]["increasedLargePositions"]), 1)
         sent_message = send_telegram_message.call_args.args[2]
-        self.assertIn("Added >$500K", sent_message)
+        self.assertIn("Added >$700K", sent_message)
         self.assertIn("Trader One: BTC long $1.2M->$2.4M (+$1.2M +10 estimated add $120,000)", sent_message)
         self.assertNotIn("@$78,000", sent_message)
 
@@ -3624,6 +3624,38 @@ class AlertSummaryTests(unittest.TestCase):
 
         self.assertIn("0x1111111111111111111111111111111111111111:BTC:long", snapshot)
         self.assertEqual(snapshot["0x1111111111111111111111111111111111111111:BTC:long"]["totalValue"], 1_100_000.0)
+
+    def test_large_position_snapshot_uses_700k_alert_threshold(self) -> None:
+        dashboard = {
+            "wallets": [
+                {
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "positions": [
+                        {"coin": "BTC", "side": "Long", "positionValue": 699_999.0},
+                        {"coin": "ETH", "side": "Short", "positionValue": 700_000.0},
+                    ],
+                }
+            ]
+        }
+
+        snapshot = self.service.build_large_position_snapshot(dashboard)
+
+        self.assertNotIn("0x1111111111111111111111111111111111111111:BTC:long", snapshot)
+        self.assertIn("0x1111111111111111111111111111111111111111:ETH:short", snapshot)
+
+    def test_threshold_migration_does_not_report_sub_700k_position_as_closed(self) -> None:
+        previous = {
+            "wallet:BTC:long": {
+                "address": "wallet",
+                "coin": "BTC",
+                "side": "long",
+                "totalValue": 600_000.0,
+            }
+        }
+
+        changes = self.service.build_large_position_alert_changes(previous, {})
+
+        self.assertEqual(changes["closedLargePositions"], [])
 
     def test_large_position_snapshot_excludes_large_losing_positions(self) -> None:
         dashboard = {

@@ -103,7 +103,8 @@ CMM_SIGNAL_SEGMENT_WEIGHTS = {
 }
 POSITION_GROUP_DISPLAY_MIN_VALUE = 1_000_000
 MIN_POSITION_MESSAGE_WALLETS = 3
-LARGE_POSITION_ALERT_MIN_VALUE = 500_000
+FRESH_WALLET_FLOW_MIN_VALUE = 500_000
+LARGE_POSITION_ALERT_MIN_VALUE = 700_000
 MIN_POSITION_MESSAGE_VALUE = POSITION_GROUP_DISPLAY_MIN_VALUE
 NEW_POSITION_ALERT_MIN_VALUE = LARGE_POSITION_ALERT_MIN_VALUE
 POSITION_INCREASE_ALERT_MIN_DELTA = LARGE_POSITION_ALERT_MIN_VALUE
@@ -2237,7 +2238,7 @@ class WalletTrackerService:
                     )
                     if (
                         self.wallet_fill_data_reliable(snapshot)
-                        and to_float(fresh_add.get("value")) >= NEW_POSITION_ALERT_MIN_VALUE
+                        and to_float(fresh_add.get("value")) >= FRESH_WALLET_FLOW_MIN_VALUE
                     ):
                         bucket["verifiedFreshWalletAddresses"].add(address)
                         bucket["verifiedFreshWalletGroups"].add(correlation_group)
@@ -2548,7 +2549,7 @@ class WalletTrackerService:
                 current_item = current_map.get(position_key)
                 if not isinstance(current_item, dict):
                     continue
-                if to_float(current_item.get("totalValue")) < NEW_POSITION_ALERT_MIN_VALUE:
+                if to_float(current_item.get("totalValue")) < FRESH_WALLET_FLOW_MIN_VALUE:
                     continue
                 fill_price = to_float(fill.get("price"))
                 fill_size = abs(to_float(fill.get("size")))
@@ -2746,7 +2747,11 @@ class WalletTrackerService:
         return {
             key: item
             for key, item in position_map.items()
-            if isinstance(item, dict) and should_count_position(item.get("address"), item.get("coin"))
+            if (
+                isinstance(item, dict)
+                and should_count_position(item.get("address"), item.get("coin"))
+                and to_float(item.get("totalValue")) >= LARGE_POSITION_ALERT_MIN_VALUE
+            )
         }
 
     def filter_positions_to_tracked_wallets(
@@ -3154,7 +3159,7 @@ class WalletTrackerService:
         if changes.get("clusteredOpenPositions"):
             lines.append("")
             lines.append(
-                f"{CLUSTERED_OPEN_ALERT_MIN_WALLETS}+ opens >{format_money_compact(NEW_POSITION_ALERT_MIN_VALUE)} in 5m"
+                f"{CLUSTERED_OPEN_ALERT_MIN_WALLETS}+ opens >{format_money_compact(FRESH_WALLET_FLOW_MIN_VALUE)} in 5m"
             )
             for item in changes["clusteredOpenPositions"][:10]:
                 size_note = ""
@@ -5032,9 +5037,13 @@ class WalletTrackerService:
             fill_prices,
             now_ms=dedupe_now_ms,
         )
+        fresh_flow_positions = self.build_large_position_snapshot(
+            dashboard,
+            min_value=FRESH_WALLET_FLOW_MIN_VALUE,
+        )
         clustered_open_positions = self.build_clustered_open_position_alerts(
             dashboard,
-            current_positions,
+            fresh_flow_positions,
             now_ms=dedupe_now_ms,
         )
         changes["clusteredOpenPositions"] = clustered_open_positions
@@ -5179,9 +5188,13 @@ class WalletTrackerService:
             fill_prices,
             now_ms=dedupe_now_ms,
         )
+        fresh_flow_positions = self.build_large_position_snapshot(
+            dashboard,
+            min_value=FRESH_WALLET_FLOW_MIN_VALUE,
+        )
         position_changes["clusteredOpenPositions"] = self.build_clustered_open_position_alerts(
             dashboard,
-            current_positions,
+            fresh_flow_positions,
             now_ms=dedupe_now_ms,
         )
         position_changes, suppressed_alert_keys = self.filter_deduped_alert_changes(
