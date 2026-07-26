@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import os
+import random
 import re
 import socket
 import ssl
@@ -32,6 +33,8 @@ WALLETS_FILE = DATA_DIR / "tracked_wallets.json"
 ALERTS_FILE = DATA_DIR / "alerts.json"
 TELEGRAM_STATE_FILE = DATA_DIR / "telegram_bot_state.json"
 WALLET_QUALITY_CACHE_FILE = DATA_DIR / "wallet_quality_cache.json"
+WALLET_REVIEW_FILE = DATA_DIR / "wallet_review.json"
+RUNTIME_HEALTH_FILE = DATA_DIR / "runtime_health.json"
 HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
 HYPERLIQUID_WS_URLS = (
     "wss://api-ui.hyperliquid.xyz/ws",
@@ -124,7 +127,13 @@ HYPERLIQUID_DASHBOARD_WORKERS = 3
 HYPERLIQUID_SNAPSHOT_WORKERS = 3
 HYPERLIQUID_API_RETRY_ATTEMPTS = 3
 HYPERLIQUID_API_RETRY_DELAY_SECONDS = 0.25
+HYPERLIQUID_REQUESTS_PER_SECOND = max(
+    0.5,
+    float(os.environ.get("HYPERLIQUID_REQUESTS_PER_SECOND", "6")),
+)
 WALLET_QUALITY_REFRESH_BATCH_SIZE = 3
+WALLET_QUALITY_SOFT_TTL_MS = 2 * 60 * 60 * 1000
+WALLET_QUALITY_HARD_TTL_MS = 6 * 60 * 60 * 1000
 WALLET_LIVE_FILL_LOOKBACK_MS = 2 * 60 * 60 * 1000
 WALLET_RECENT_FILL_CACHE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 WALLET_RECENT_FILL_CACHE_LIMIT = 200
@@ -746,8 +755,34 @@ class WalletStore:
         return True
 
 
+class RequestRateLimiter:
+    def __init__(self, requests_per_second: float = HYPERLIQUID_REQUESTS_PER_SECOND) -> None:
+        self.interval = 1.0 / max(0.5, requests_per_second)
+        self.next_request_at = 0.0
+        self.lock = threading.Lock()
+
+    def wait(self) -> None:
+        with self.lock:
+            now = time.monotonic()
+            delay = max(0.0, self.next_request_at - now)
+            self.next_request_at = max(now, self.next_request_at) + self.interval
+        if delay > 0:
+            time.sleep(delay)
+
+    def penalize(self, seconds: float) -> None:
+        with self.lock:
+            self.next_request_at = max(self.next_request_at, time.monotonic() + max(0.0, seconds))
+
+
+GLOBAL_HYPERLIQUID_RATE_LIMITER = RequestRateLimiter()
+
+
 class HyperliquidClient:
+    def __init__(self, rate_limiter: RequestRateLimiter | None = None) -> None:
+        self.rate_limiter = rate_limiter or GLOBAL_HYPERLIQUID_RATE_LIMITER
+
     def post(self, payload: dict[str, Any], url: str = HYPERLIQUID_INFO_URL) -> Any:
+        self.rate_limiter.wait()
         request = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
@@ -776,6 +811,14 @@ class HyperliquidClient:
                 return {"ok": True, "data": self.post(payload), "error": ""}
             except urllib.error.HTTPError as exc:
                 last_error = f"HTTP {exc.code}: {exc.reason}"
+                if exc.code == HTTPStatus.TOO_MANY_REQUESTS:
+                    retry_after = 0.0
+                    try:
+                        retry_after = float(exc.headers.get("Retry-After", "0"))
+                    except (AttributeError, TypeError, ValueError):
+                        retry_after = 0.0
+                    backoff = retry_after or retry_delay * (2 ** attempt) + random.uniform(0.05, 0.25)
+                    self.rate_limiter.penalize(backoff)
             except (urllib.error.URLError, TimeoutError, ValueError) as exc:
                 last_error = str(exc)
             if attempt < max(1, attempts) - 1 and retry_delay > 0:
@@ -1508,6 +1551,12 @@ class WalletTrackerService:
 
     def dashboard(self) -> dict[str, Any]:
         wallets = self.store.list_wallets()
+        wallet_review = load_json_file(WALLET_REVIEW_FILE, {})
+        review_entries = (
+            wallet_review.get("wallets", {})
+            if isinstance(wallet_review, dict) and isinstance(wallet_review.get("wallets"), dict)
+            else {}
+        )
         raw_quality_cache = load_json_file(self.wallet_quality_cache_path, {})
         cached_wallets = (
             raw_quality_cache.get("wallets", {})
@@ -1526,6 +1575,11 @@ class WalletTrackerService:
 
         with ThreadPoolExecutor(max_workers=min(max(len(wallets), 1), HYPERLIQUID_DASHBOARD_WORKERS)) as executor:
             snapshots = list(executor.map(fetch_snapshot, wallets)) if wallets else []
+        for snapshot in snapshots:
+            review = review_entries.get(str(snapshot.get("address") or "").lower(), {})
+            if isinstance(review, dict):
+                snapshot["reviewWeightMultiplier"] = max(0.0, min(to_float(review.get("weight", 1.0)), 1.0))
+                snapshot["reviewReasons"] = list(review.get("reasons", []))
         cache_changed = False
         for snapshot in snapshots:
             address = str(snapshot.get("address") or "").lower()
@@ -1620,6 +1674,30 @@ class WalletTrackerService:
 
         sentiment = self.build_sentiment_summary(snapshots, DEFAULT_CONSENSUS_THRESHOLD)
         holding_only_wallets = self.build_holding_only_wallets(snapshots)
+        cache_coverage = len(
+            {
+                str(wallet.get("address") or "").lower()
+                for wallet in snapshots
+                if wallet.get("dataQuality", {}).get("qualityRefreshedAt")
+            }
+        ) / max(len(snapshots), 1)
+        rate_limited_wallets = sum(
+            1
+            for wallet in snapshots
+            if "HTTP 429" in str(wallet.get("dataQuality", {}).get("fillsError", ""))
+            or "HTTP 429" in str(wallet.get("dataQuality", {}).get("portfolioError", ""))
+        )
+        save_json_file(
+            RUNTIME_HEALTH_FILE,
+            {
+                "checkedAt": now_iso(),
+                "walletsTracked": len(snapshots),
+                "fillsOkWallets": fill_ok_count,
+                "cacheCoverage": round(cache_coverage, 4),
+                "rateLimitedWallets": rate_limited_wallets,
+                "fillsGloballyDegraded": fills_globally_degraded,
+            },
+        )
 
         return {
             "generatedAt": now_iso(),
@@ -1940,8 +2018,23 @@ class WalletTrackerService:
                 multiplier *= max(0.75, min(1.25, asset_win_rate / 60.0))
         if self.is_wallet_quarantined(wallet):
             multiplier *= 0.5
+        multiplier *= max(0.0, min(to_float(wallet.get("reviewWeightMultiplier", 1.0)), 1.0))
+        quality_age_ms = self.wallet_quality_age_ms(wallet)
+        if quality_age_ms is not None and quality_age_ms > WALLET_QUALITY_HARD_TTL_MS:
+            return 0.0
+        if quality_age_ms is not None and quality_age_ms > WALLET_QUALITY_SOFT_TTL_MS:
+            multiplier *= 0.75
         weight = base_weight * multiplier
         return round(max(CONVICTION_WALLET_WEIGHT_MIN, min(weight, CONVICTION_WALLET_WEIGHT_MAX)), 3)
+
+    def wallet_quality_age_ms(self, wallet: dict[str, Any], *, now_ms: int | None = None) -> int | None:
+        quality = wallet.get("dataQuality", {})
+        if not isinstance(quality, dict):
+            return None
+        refreshed_at = iso_to_ms(quality.get("qualityRefreshedAt"))
+        if refreshed_at <= 0:
+            return None
+        return max(0, (now_ms if now_ms is not None else current_time_ms()) - refreshed_at)
 
     def is_wallet_quarantined(self, wallet: dict[str, Any]) -> bool:
         rank = wallet.get("recentWinRateRank", {})
@@ -1960,6 +2053,9 @@ class WalletTrackerService:
         return bool(quality.get("fillsOk", True)) and not bool(quality.get("fillsDegraded"))
 
     def should_count_wallet_for_conviction(self, wallet: dict[str, Any]) -> bool:
+        quality_age_ms = self.wallet_quality_age_ms(wallet)
+        if quality_age_ms is not None and quality_age_ms > WALLET_QUALITY_HARD_TTL_MS:
+            return False
         if not self.wallet_fill_data_reliable(wallet):
             return True
         if wallet.get("recentFills"):
@@ -4614,6 +4710,9 @@ class WalletTrackerService:
                     "startedAt": started_at,
                     "entryPrice": round(entry_price, 8),
                     "probabilityScore": round(to_float(signal.get("probabilityScore")), 1),
+                    "rawProbabilityScore": round(
+                        to_float(signal.get("rawProbabilityScore", signal.get("probabilityScore"))), 1
+                    ),
                     "freshWalletCount": int(to_float(signal.get("verifiedFreshIndependentWalletCount"))),
                     "outcomes": {},
                 },
@@ -4636,6 +4735,73 @@ class WalletTrackerService:
                     "measuredAt": now_ms,
                 }
         return records
+
+    def signal_calibration_group(self, coin: Any) -> str:
+        normalized = normalize_position_coin(coin)
+        return "hip3" if is_stock_like_position(normalized) or is_commodity_like_position(normalized) else "crypto"
+
+    def build_signal_calibration(self, records: dict[str, Any], *, horizon: str = "4h") -> dict[str, Any]:
+        buckets: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        for record in records.values() if isinstance(records, dict) else []:
+            if not isinstance(record, dict):
+                continue
+            outcome = record.get("outcomes", {}).get(horizon)
+            if not isinstance(outcome, dict):
+                continue
+            probability = to_float(record.get("rawProbabilityScore", record.get("probabilityScore")))
+            if probability <= 0:
+                continue
+            group = self.signal_calibration_group(record.get("coin"))
+            bucket = f"{int(probability // 10) * 10}"
+            buckets.setdefault(group, {}).setdefault(bucket, []).append(outcome)
+
+        result: dict[str, Any] = {"horizon": horizon, "groups": {}}
+        for group, group_buckets in buckets.items():
+            result["groups"][group] = {}
+            for bucket, outcomes in group_buckets.items():
+                sample = len(outcomes)
+                wins = sum(1 for item in outcomes if to_float(item.get("returnPct")) > 0)
+                empirical = wins / sample * 100.0
+                prior = min(95.0, int(bucket) + 5.0)
+                calibrated = (empirical * sample + prior * 12) / (sample + 12)
+                result["groups"][group][bucket] = {
+                    "sample": sample,
+                    "wins": wins,
+                    "calibratedProbability": round(calibrated, 1),
+                }
+        return result
+
+    def apply_signal_calibration(
+        self,
+        summary: dict[str, Any],
+        calibration: dict[str, Any],
+        *,
+        min_sample: int = 8,
+    ) -> dict[str, Any]:
+        adjusted = []
+        groups = calibration.get("groups", {}) if isinstance(calibration, dict) else {}
+        if not groups:
+            return summary
+        for signal in summary.get("signals", []):
+            if not isinstance(signal, dict):
+                continue
+            raw = to_float(signal.get("rawProbabilityScore", signal.get("probabilityScore")))
+            group = self.signal_calibration_group(signal.get("coin"))
+            bucket = f"{int(raw // 10) * 10}"
+            stats = groups.get(group, {}).get(bucket, {}) if isinstance(groups.get(group, {}), dict) else {}
+            calibrated = raw
+            if int(to_float(stats.get("sample"))) >= min_sample:
+                target = to_float(stats.get("calibratedProbability"))
+                calibrated = max(raw - 10.0, min(raw + 10.0, target))
+            item = {
+                **signal,
+                "rawProbabilityScore": round(raw, 1),
+                "probabilityScore": round(calibrated, 1),
+                "calibrationSample": int(to_float(stats.get("sample"))),
+            }
+            if calibrated >= ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD:
+                adjusted.append(item)
+        return {**summary, "signals": adjusted, "signalCount": len(adjusted), "calibration": calibration}
 
     def cmm_asset_group(self, coin: Any) -> str:
         normalized_coin = normalize_cmm_coin(coin)
@@ -5157,6 +5323,8 @@ class WalletTrackerService:
             state,
             position_lifecycle=position_lifecycle,
         )
+        calibration = self.build_signal_calibration(state.get("signalOutcomes", {}))
+        summary = self.apply_signal_calibration(summary, calibration)
         cmm_summary = self.build_cached_cmm_signal_summary(state)
         previous_summary = state.get("summary", {}) if isinstance(state, dict) else {}
         alert_summary = self.apply_cmm_confirmation_to_summary(
@@ -5310,6 +5478,8 @@ class WalletTrackerService:
             state,
             position_lifecycle=position_lifecycle,
         )
+        calibration = self.build_signal_calibration(state.get("signalOutcomes", {}))
+        summary = self.apply_signal_calibration(summary, calibration)
         cmm_summary = self.build_cached_cmm_signal_summary(state)
         previous_summary = state.get("summary", {}) if isinstance(state, dict) else {}
         alert_summary = self.apply_cmm_confirmation_to_summary(

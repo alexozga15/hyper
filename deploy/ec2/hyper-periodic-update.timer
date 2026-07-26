@@ -1,0 +1,11 @@
+[Unit]
+Description=Send Hyper wallet update every four hours during daytime
+
+[Timer]
+OnCalendar=*-*-* 07,11,15,19:17:00 Europe/Warsaw
+AccuracySec=30s
+Persistent=true
+Unit=hyper-periodic-update.service
+
+[Install]
+WantedBy=timers.target

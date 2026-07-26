@@ -1,0 +1,19 @@
+[Unit]
+Description=Hyper runtime health monitor
+After=hyper-sentiment.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/hyper-alerts
+EnvironmentFile=/home/ubuntu/.config/hyper/sentiment-alerts.env
+Environment=DATA_DIR=/home/ubuntu/hyper-state
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 scripts/run_health_monitor.py
+StandardOutput=null
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

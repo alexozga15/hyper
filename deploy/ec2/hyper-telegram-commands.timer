@@ -1,0 +1,12 @@
+[Unit]
+Description=Poll Hyper Telegram commands every 20 seconds
+
+[Timer]
+OnBootSec=10s
+OnUnitActiveSec=20s
+AccuracySec=1s
+Persistent=true
+Unit=hyper-telegram-commands.service
+
+[Install]
+WantedBy=timers.target

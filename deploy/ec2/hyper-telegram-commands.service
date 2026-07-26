@@ -1,0 +1,22 @@
+[Unit]
+Description=Hyper Telegram command polling
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/hyper-alerts
+EnvironmentFile=/home/ubuntu/.config/hyper/sentiment-alerts.env
+Environment=DATA_DIR=/home/ubuntu/hyper-state
+Environment=TELEGRAM_POLLING_BACKUP=true
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/flock -n -E 0 /home/ubuntu/hyper-state/sentiment-alert.lock /usr/bin/python3 scripts/process_telegram_commands.py
+TimeoutStartSec=4min
+StandardOutput=null
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

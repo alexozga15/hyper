@@ -1,0 +1,12 @@
+[Unit]
+Description=Check Hyper runtime health every ten minutes
+
+[Timer]
+OnBootSec=7min
+OnUnitActiveSec=10min
+AccuracySec=30s
+Persistent=true
+Unit=hyper-health-monitor.service
+
+[Install]
+WantedBy=timers.target
