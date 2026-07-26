@@ -102,6 +102,12 @@ The GitHub `Sentiment Alerts` workflow remains available for manual recovery run
 but has no schedule once the EC2 timer is active. Do not schedule both runners at the
 same time because they keep separate alert baselines and can send duplicate alerts.
 
+Automatic Telegram updates observe quiet hours from `23:00` to `07:00` in
+`Europe/Warsaw`. Checks continue during that window and acknowledge state changes
+without sending, so stale overnight alerts are not delivered in the morning. Telegram
+commands remain available at all times. Configure the window with
+`QUIET_HOURS_TIMEZONE`, `QUIET_HOURS_START`, and `QUIET_HOURS_END`.
+
 If you want to verify Telegram delivery without waiting for a real sentiment change, run [`.github/workflows/telegram-test.yml`](/Users/alexozga/Documents/New%20project%204/.github/workflows/telegram-test.yml). It sends a one-off test message and does not touch the saved alert baseline.
 
 If you want on-demand bot replies, enable [`.github/workflows/telegram-commands.yml`](.github/workflows/telegram-commands.yml).

@@ -3271,6 +3271,53 @@ class AlertSummaryTests(unittest.TestCase):
         save_json_file.assert_not_called()
         send_telegram_message.assert_not_called()
 
+    def test_check_alerts_acknowledges_quiet_hour_changes_without_sending(self) -> None:
+        now_ms = 1_700_000_000_000
+        previous_summary = {"overallBias": "mixed", "consensus": [], "hip3Consensus": []}
+        current_summary = {"overallBias": "mixed", "consensus": [], "hip3Consensus": []}
+        address = "0x1111111111111111111111111111111111111111"
+        dashboard = {
+            "wallets": [
+                {
+                    "address": address,
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_200_000.0}],
+                    "recentFills": [
+                        {
+                            "coin": "BTC",
+                            "direction": "Open Long",
+                            "price": 100_000.0,
+                            "size": 12.0,
+                            "time": now_ms - 60_000,
+                        }
+                    ],
+                }
+            ]
+        }
+
+        with patch(
+            "server.load_json_file",
+            return_value={
+                "config": {"enabled": True, "botToken": "token", "chatId": "chat"},
+                "state": {"summary": previous_summary, "largePositions": {}, "alertDedupe": {}},
+            },
+        ), patch("server.save_json_file") as save_json_file, patch(
+            "server.current_time_ms", return_value=now_ms
+        ), patch.object(self.service, "dashboard", return_value=dashboard), patch.object(
+            self.service, "build_sentiment_summary", return_value=current_summary
+        ), patch.object(self.service, "send_telegram_message") as send_telegram_message:
+            result = self.service.check_alerts(
+                send_notification=False,
+                acknowledge_suppressed=True,
+            )
+
+        self.assertTrue(result["shouldNotify"])
+        self.assertTrue(result["suppressed"])
+        self.assertFalse(result["sent"])
+        send_telegram_message.assert_not_called()
+        saved_state = save_json_file.call_args.args[1]["state"]
+        self.assertIn(f"{address}:BTC:long", saved_state["largePositions"])
+        self.assertTrue(saved_state["alertDedupe"])
+
     def test_check_alerts_suppresses_recent_duplicate_position_alert(self) -> None:
         now_ms = 1_700_000_000_000
         previous_summary = {

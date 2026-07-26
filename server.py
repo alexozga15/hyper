@@ -5137,7 +5137,12 @@ class WalletTrackerService:
         result = payload.get("result", [])
         return result if isinstance(result, list) else []
 
-    def check_alerts(self, send_notification: bool = True) -> dict[str, Any]:
+    def check_alerts(
+        self,
+        send_notification: bool = True,
+        *,
+        acknowledge_suppressed: bool = False,
+    ) -> dict[str, Any]:
         raw = load_json_file(self.alerts_path, {})
         stored_config = raw.get("config", {}) if isinstance(raw, dict) else {}
         config = self.resolve_alert_config(stored_config)
@@ -5242,12 +5247,13 @@ class WalletTrackerService:
                 except (urllib.error.URLError, TimeoutError, ValueError) as exc:
                     error_message = str(exc)
 
-        if not send_notification:
+        if not send_notification and not acknowledge_suppressed:
             return {
                 "enabled": bool(config.get("enabled")),
                 "hasBotToken": bool(config.get("botToken")),
                 "chatId": config.get("chatId", ""),
                 "sent": sent,
+                "suppressed": False,
                 "shouldNotify": should_notify,
                 "error": error_message,
                 "suppressedAlertCount": len(suppressed_alert_keys),
@@ -5265,11 +5271,11 @@ class WalletTrackerService:
             "walletPositionLifecycle": position_lifecycle,
             "signalOutcomes": signal_outcomes,
         }
-        if not should_notify or sent or not config.get("enabled"):
+        if not should_notify or sent or not config.get("enabled") or acknowledge_suppressed:
             new_state["summary"] = alert_summary
             new_state["largePositions"] = current_positions
             new_state["cmmSignals"] = cmm_summary
-        if sent:
+        if sent or acknowledge_suppressed:
             new_state["alertDedupe"] = self.update_alert_dedupe(
                 previous_dedupe,
                 alert_event_keys,
@@ -5282,6 +5288,7 @@ class WalletTrackerService:
             "hasBotToken": bool(config.get("botToken")),
             "chatId": config.get("chatId", ""),
             "sent": sent,
+            "suppressed": bool(acknowledge_suppressed and should_notify),
             "shouldNotify": should_notify,
             "error": error_message,
             "suppressedAlertCount": len(suppressed_alert_keys),

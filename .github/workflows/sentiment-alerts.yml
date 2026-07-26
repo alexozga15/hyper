@@ -37,6 +37,10 @@ jobs:
           CMM_SIGNAL_CACHE_TTL_MINUTES: "60"
           MIN_CONSENSUS_WALLETS: "4"
           TRACK_HIP3: "true"
+          QUIET_HOURS_ENABLED: "true"
+          QUIET_HOURS_TIMEZONE: "Europe/Warsaw"
+          QUIET_HOURS_START: "23"
+          QUIET_HOURS_END: "7"
         run: python3 scripts/run_alert_check.py
 
       - name: Persist alert state
