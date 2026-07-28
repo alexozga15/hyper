@@ -54,6 +54,37 @@ class OperationalControlTests(unittest.TestCase):
         self.assertEqual(reviews["0xweak"]["weight"], 0.5)
         self.assertIn("negative_30d_pnl", reviews["0xweak"]["reasons"])
 
+    def test_wallet_review_uses_matching_quality_event_sample(self) -> None:
+        reviews = evaluate_wallets(
+            [
+                {
+                    "address": "0xthin",
+                    "closedTrades30d": 20,
+                    "qualityClosedEvents30d": 3,
+                    "qualityNetPnl30d": -100,
+                    "qualityProfitFactor30d": 0.8,
+                    "positions": [],
+                }
+            ]
+        )
+        self.assertNotIn("0xthin", reviews)
+
+    def test_wallet_review_weight_reduces_non_top_conviction(self) -> None:
+        wallet = {
+            "address": "0xweak",
+            "recentWinRateRank": {"convictionWeightScore": 40, "label": "Cold"},
+            "reviewWeightMultiplier": 0.5,
+        }
+        self.assertEqual(self.service.wallet_conviction_weight(wallet, {"0xother"}), 0.25)
+
+    def test_manual_zero_review_weight_excludes_wallet(self) -> None:
+        wallet = {
+            "address": "0xexcluded",
+            "recentWinRateRank": {"convictionWeightScore": 90, "label": "Strong"},
+            "reviewWeightMultiplier": 0,
+        }
+        self.assertEqual(self.service.wallet_conviction_weight(wallet), 0.0)
+
     def test_health_monitor_detects_stale_and_low_cache(self) -> None:
         issues = detect_health_issues(
             {"state": {"lastCheckedAt": "2020-01-01T00:00:00Z"}},

@@ -182,7 +182,7 @@ ELITE_WALLET_OVERRIDES = {"0xc9e839a529d1a3a46e2b48d20c461d4afecb72e4"}
 TOP_CONVICTION_WALLET_COUNT = 10
 TOP_CONVICTION_WALLET_MULTIPLIER = 1.5
 NON_TOP_CONVICTION_WALLET_MULTIPLIER = 0.5
-CONVICTION_WALLET_WEIGHT_MIN = 0.5
+CONVICTION_WALLET_WEIGHT_MIN = 0.25
 CONVICTION_WALLET_WEIGHT_MAX = 1.5
 MONTHLY_QUALITY_MIN_CLOSED_EVENTS = 5
 MONTHLY_QUALITY_MIN_PROFIT_FACTOR = 1.2
@@ -2018,7 +2018,10 @@ class WalletTrackerService:
                 multiplier *= max(0.75, min(1.25, asset_win_rate / 60.0))
         if self.is_wallet_quarantined(wallet):
             multiplier *= 0.5
-        multiplier *= max(0.0, min(to_float(wallet.get("reviewWeightMultiplier", 1.0)), 1.0))
+        review_multiplier = max(0.0, min(to_float(wallet.get("reviewWeightMultiplier", 1.0)), 1.0))
+        if review_multiplier == 0:
+            return 0.0
+        multiplier *= review_multiplier
         quality_age_ms = self.wallet_quality_age_ms(wallet)
         if quality_age_ms is not None and quality_age_ms > WALLET_QUALITY_HARD_TTL_MS:
             return 0.0

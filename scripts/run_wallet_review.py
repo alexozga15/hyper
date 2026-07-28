@@ -39,7 +39,14 @@ def evaluate_wallets(wallets: list[dict[str, Any]]) -> dict[str, dict[str, Any]]
     for wallet in wallets:
         address = str(wallet.get("address") or "").lower()
         reasons: list[str] = []
-        closed = int(to_float(wallet.get("closedTrades30d")))
+        closed = int(
+            to_float(
+                wallet.get(
+                    "qualityClosedEvents30d",
+                    wallet.get("closedTrades30d"),
+                )
+            )
+        )
         pnl = to_float(wallet.get("qualityNetPnl30d", wallet.get("realizedPnl30d")))
         profit_factor = to_float(wallet.get("qualityProfitFactor30d"))
         if closed >= 5 and pnl < 0:
