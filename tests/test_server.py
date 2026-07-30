@@ -1407,6 +1407,24 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("1. BUY BTC long (3 wallets, p94/100)", message)
         self.assertNotIn("$1.2M", message)
 
+    def test_build_signals_message_formats_moni_social_context(self) -> None:
+        summary = {
+            "generatedAt": "2026-07-30T00:00:00Z",
+            "signals": [
+                {
+                    "coin": "SOL",
+                    "side": "short",
+                    "action": "sell",
+                    "walletCount": 4,
+                    "probabilityScore": 82,
+                    "moniSocialTrend": "rising",
+                    "moniSocialPaceRatio": 2.1,
+                }
+            ],
+        }
+        message = self.service.build_signals_message(summary)
+        self.assertIn("social rising 2.10x", message)
+
     def test_build_cmm_signal_summary_scores_cohort_bias(self) -> None:
         class FakeCmmClient:
             token = "token"

@@ -211,6 +211,23 @@ class DispatchUpdateTests(unittest.TestCase):
 
         self.assertEqual(reply, "BTC:long:now")
 
+    def test_build_reply_routes_moni_without_refreshing_api(self) -> None:
+        class FakeService:
+            def build_moni_social_message(self, summary: dict) -> str:
+                return f"moni:{summary['monthPointsUsage']}"
+
+        reply = commands.build_reply(
+            FakeService(),
+            "/moni",
+            None,
+            None,
+            None,
+            None,
+            4,
+            moni_cache={"monthPointsUsage": 18},
+        )
+        self.assertEqual(reply, "moni:18")
+
     def test_main_persists_successful_update_before_later_send_failure(self) -> None:
         class FakeService:
             def __init__(self) -> None:

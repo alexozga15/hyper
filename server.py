@@ -24,6 +24,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from coinmarketman import CoinMarketManApiError, CoinMarketManClient
+from moni import MoniApiError, MoniClient
 
 
 ROOT = Path(__file__).resolve().parent
@@ -104,6 +105,30 @@ CMM_SIGNAL_SEGMENT_WEIGHTS = {
     7: 0.85,
     8: 1.0,
     9: 0.7,
+}
+MONI_SOCIAL_CACHE_TTL_HOURS = 24
+MONI_SOCIAL_ERROR_BACKOFF_HOURS = 6
+MONI_SOCIAL_POINTS_PER_REFRESH = 8
+MONI_SOCIAL_MIN_REMAINING_POINTS = 16
+MONI_SOCIAL_PROJECT_HANDLES = {
+    "AAVE": "aave",
+    "BNB": "BNBCHAIN",
+    "DOGE": "dogecoin",
+    "ENA": "ethena_labs",
+    "ETH": "ethereum",
+    "HYPE": "HyperliquidX",
+    "LINK": "chainlink",
+    "LTC": "litecoin",
+    "NEAR": "NEARProtocol",
+    "PENDLE": "pendle_fi",
+    "SOL": "solana",
+    "SUI": "SuiNetwork",
+    "TAO": "opentensor",
+    "UNI": "Uniswap",
+    "VIRTUAL": "virtuals_io",
+    "WLFI": "worldlibertyfi",
+    "XRP": "Ripple",
+    "ZRO": "LayerZero_Core",
 }
 POSITION_GROUP_DISPLAY_MIN_VALUE = 1_000_000
 MIN_POSITION_MESSAGE_WALLETS = 3
@@ -1098,6 +1123,7 @@ class WalletTrackerService:
         self.alerts_path = ALERTS_FILE
         self.wallet_quality_cache_path = WALLET_QUALITY_CACHE_FILE
         self.cmm_client = CoinMarketManClient()
+        self.moni_client = MoniClient()
 
     def fetch_wallet_role(self, address: str) -> str:
         result = self.client.safe_post({"type": "userRole", "user": address}, {})
@@ -3360,6 +3386,12 @@ class WalletTrackerService:
                         f', CMM p{to_float(item.get("cmmProbabilityScore")):.0f}'
                         f'/trend {to_float(item.get("cmmTrendScore")):.0f}'
                     )
+                moni_note = ""
+                if item.get("moniSocialTrend"):
+                    moni_note = (
+                        f', social {item.get("moniSocialTrend")}'
+                        f' {to_float(item.get("moniSocialPaceRatio")):.2f}x'
+                    )
                 fresh_note = ""
                 if "netFreshIndependentWalletCount" in item:
                     fresh_note = (
@@ -3381,7 +3413,7 @@ class WalletTrackerService:
                     f'net +{int(to_float(item.get("netIndependentWalletCount", item.get("netWalletCount"))))}, '
                     f'qnet +{to_float(item.get("netIndependentWeightedWalletCount", item.get("netWeightedWalletCount"))):.1f}, '
                     f'{format_money_compact(item.get("totalValue"))}{fresh_note}'
-                    f'{activity_note}{price_note}{cmm_note}'
+                    f'{activity_note}{price_note}{cmm_note}{moni_note}'
                 )
 
         if changes.get("removedSignals"):
@@ -4426,6 +4458,229 @@ class WalletTrackerService:
             }
         return summary
 
+    def moni_project_handles(self) -> dict[str, str]:
+        handles = dict(MONI_SOCIAL_PROJECT_HANDLES)
+        raw = os.environ.get("MONI_PROJECT_HANDLES_JSON", "").strip()
+        if not raw:
+            return handles
+        try:
+            overrides = json.loads(raw)
+        except ValueError:
+            return handles
+        if isinstance(overrides, dict):
+            for coin, handle in overrides.items():
+                normalized_coin = normalize_position_coin(coin)
+                normalized_handle = str(handle or "").strip().lstrip("@")
+                if normalized_coin and normalized_handle:
+                    handles[normalized_coin] = normalized_handle
+        return handles
+
+    def moni_cache_ttl_ms(self) -> int:
+        return max(1, env_int("MONI_SOCIAL_CACHE_TTL_HOURS", MONI_SOCIAL_CACHE_TTL_HOURS)) * 60 * 60 * 1000
+
+    def moni_error_backoff_ms(self) -> int:
+        return max(1, env_int("MONI_SOCIAL_ERROR_BACKOFF_HOURS", MONI_SOCIAL_ERROR_BACKOFF_HOURS)) * 60 * 60 * 1000
+
+    @staticmethod
+    def moni_social_trend(h24_mentions: float, d7_mentions: float) -> tuple[str, float]:
+        daily_baseline = max(d7_mentions / 7.0, 0.0)
+        if daily_baseline <= 0:
+            return ("rising", 3.0) if h24_mentions > 0 else ("fading", 0.0)
+        pace_ratio = h24_mentions / daily_baseline
+        if h24_mentions >= 2 and pace_ratio >= 1.5:
+            return "rising", pace_ratio
+        if h24_mentions > 0 and pace_ratio >= 0.5:
+            return "steady", pace_ratio
+        return "fading", pace_ratio
+
+    def build_cached_moni_social_summary(
+        self,
+        state: dict[str, Any] | None,
+        signals: list[dict[str, Any]] | None = None,
+        *,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        cached = state.get("moniSocial", {}) if isinstance(state, dict) else {}
+        cached = cached if isinstance(cached, dict) else {}
+        projects = {
+            str(coin): item
+            for coin, item in (cached.get("projects", {}) if isinstance(cached.get("projects"), dict) else {}).items()
+            if isinstance(item, dict)
+        }
+        checked_at = now_iso()
+        if not self.moni_client.enabled:
+            return {
+                **cached,
+                "enabled": False,
+                "error": "Missing MONI_API_KEY",
+                "projects": projects,
+                "checkedAt": checked_at,
+            }
+
+        now_ms = current_time_ms()
+        next_fetch_ms = iso_to_ms(cached.get("nextFetchAt"))
+        if not force and next_fetch_ms > now_ms:
+            return {**cached, "enabled": True, "projects": projects, "cacheHit": True, "checkedAt": checked_at}
+
+        handles = self.moni_project_handles()
+        candidates = sorted(
+            [
+                signal
+                for signal in (signals or [])
+                if isinstance(signal, dict)
+                and normalize_position_coin(signal.get("coin")) in handles
+                and to_float(signal.get("probabilityScore", signal.get("convictionScore")))
+                >= ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD
+            ],
+            key=lambda item: to_float(item.get("probabilityScore", item.get("convictionScore"))),
+            reverse=True,
+        )
+        if not candidates:
+            return {**cached, "enabled": True, "projects": projects, "cacheHit": True, "checkedAt": checked_at}
+
+        coin = normalize_position_coin(candidates[0].get("coin"))
+        existing = projects.get(coin, {})
+        existing_ms = iso_to_ms(existing.get("generatedAt")) if isinstance(existing, dict) else 0
+        if not force and existing_ms > 0 and now_ms - existing_ms < self.moni_cache_ttl_ms():
+            next_fetch_at = datetime.fromtimestamp(
+                (existing_ms + self.moni_cache_ttl_ms()) / 1000,
+                timezone.utc,
+            ).isoformat().replace("+00:00", "Z")
+            return {
+                **cached,
+                "enabled": True,
+                "projects": projects,
+                "nextFetchAt": next_fetch_at,
+                "cacheHit": True,
+                "checkedAt": checked_at,
+            }
+
+        try:
+            usage = self.moni_client.api_key_status()
+            limit = int(to_float(usage.get("monthPointsLimit")))
+            used = int(to_float(usage.get("monthPointsUsage")))
+            remaining = max(0, limit - used)
+            if limit > 0 and remaining < MONI_SOCIAL_MIN_REMAINING_POINTS:
+                return {
+                    **cached,
+                    "enabled": True,
+                    "projects": projects,
+                    "monthPointsLimit": limit,
+                    "monthPointsUsage": used,
+                    "quotaLow": True,
+                    "cacheHit": True,
+                    "checkedAt": checked_at,
+                }
+            handle = handles[coin]
+            h24 = self.moni_client.smart_mentions_history(handle, "H24")
+            d7 = self.moni_client.smart_mentions_history(handle, "D7")
+            h24_mentions = max(0.0, to_float(h24.get("timeframeChange")))
+            d7_mentions = max(0.0, to_float(d7.get("timeframeChange")))
+            trend, pace_ratio = self.moni_social_trend(h24_mentions, d7_mentions)
+            generated_at = now_iso()
+            projects[coin] = {
+                "coin": coin,
+                "handle": handle,
+                "trend": trend,
+                "h24SmartMentions": round(h24_mentions, 1),
+                "d7SmartMentions": round(d7_mentions, 1),
+                "paceRatio": round(pace_ratio, 2),
+                "generatedAt": generated_at,
+            }
+            next_fetch_at = datetime.fromtimestamp(
+                (current_time_ms() + self.moni_cache_ttl_ms()) / 1000,
+                timezone.utc,
+            ).isoformat().replace("+00:00", "Z")
+            return {
+                "enabled": True,
+                "generatedAt": generated_at,
+                "checkedAt": generated_at,
+                "lastFetchAt": generated_at,
+                "nextFetchAt": next_fetch_at,
+                "monthPointsLimit": limit,
+                "monthPointsUsage": used + MONI_SOCIAL_POINTS_PER_REFRESH,
+                "projects": projects,
+                "cacheHit": False,
+            }
+        except MoniApiError as exc:
+            retry_at = datetime.fromtimestamp(
+                (current_time_ms() + self.moni_error_backoff_ms()) / 1000,
+                timezone.utc,
+            ).isoformat().replace("+00:00", "Z")
+            return {
+                **cached,
+                "enabled": True,
+                "projects": projects,
+                "error": str(exc),
+                "nextFetchAt": retry_at,
+                "checkedAt": checked_at,
+            }
+
+    def apply_moni_social_context(
+        self,
+        summary: dict[str, Any],
+        moni_summary: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if not isinstance(moni_summary, dict) or not moni_summary.get("enabled"):
+            return summary
+        projects = moni_summary.get("projects", {})
+        if not isinstance(projects, dict):
+            return summary
+        enriched = []
+        for signal in summary.get("signals", []):
+            if not isinstance(signal, dict):
+                continue
+            coin = normalize_position_coin(signal.get("coin"))
+            social = projects.get(coin)
+            if not isinstance(social, dict):
+                enriched.append(signal)
+                continue
+            generated_ms = iso_to_ms(social.get("generatedAt"))
+            if generated_ms <= 0 or current_time_ms() - generated_ms > self.moni_cache_ttl_ms() * 2:
+                enriched.append(signal)
+                continue
+            enriched.append(
+                {
+                    **signal,
+                    "moniSocialTrend": str(social.get("trend") or "unknown"),
+                    "moniH24SmartMentions": to_float(social.get("h24SmartMentions")),
+                    "moniD7SmartMentions": to_float(social.get("d7SmartMentions")),
+                    "moniSocialPaceRatio": to_float(social.get("paceRatio")),
+                    "moniSocialHandle": str(social.get("handle") or ""),
+                }
+            )
+        return {**summary, "signals": enriched, "signalCount": len(enriched)}
+
+    def build_moni_social_message(self, summary: dict[str, Any] | None) -> str:
+        summary = summary if isinstance(summary, dict) else {}
+        lines = ["Moni social context", "Refresh: max 1 signal asset / 24h"]
+        if not summary.get("enabled"):
+            lines.append(f'- Disabled: {summary.get("error", "Missing MONI_API_KEY")}')
+        projects = summary.get("projects", {})
+        if isinstance(projects, dict) and projects:
+            for coin, item in sorted(projects.items()):
+                if not isinstance(item, dict):
+                    continue
+                lines.append(
+                    f'- {coin}: {item.get("trend", "unknown")}, '
+                    f'H24 {to_float(item.get("h24SmartMentions")):.0f}, '
+                    f'D7 {to_float(item.get("d7SmartMentions")):.0f}, '
+                    f'pace {to_float(item.get("paceRatio")):.2f}x'
+                )
+        elif summary.get("enabled"):
+            lines.append("- Waiting for a mapped actionable wallet signal")
+        if int(to_float(summary.get("monthPointsLimit"))) > 0:
+            lines.append(
+                f'Quota: {int(to_float(summary.get("monthPointsUsage")))}/'
+                f'{int(to_float(summary.get("monthPointsLimit")))} points'
+            )
+        if summary.get("error") and summary.get("enabled"):
+            lines.append(f'Error: {summary.get("error")}')
+        if summary.get("nextFetchAt"):
+            lines.append(f'Next refresh: {summary.get("nextFetchAt")}')
+        lines.append(f'Checked at: {summary.get("checkedAt", now_iso())}')
+        return "\n".join(lines)
+
     def cmm_signal_key(self, signal: dict[str, Any]) -> str:
         return f'cmm:{signal.get("coin", "Unknown")}:{signal.get("side", "")}'
 
@@ -4980,6 +5235,12 @@ class WalletTrackerService:
                     cmm_note = f', CMM conflict p{to_float(item.get("cmmConflictProbabilityScore")):.0f}'
                 elif item.get("cmmConfirmation") == "unconfirmed":
                     cmm_note = ", CMM unconfirmed"
+                moni_note = ""
+                if item.get("moniSocialTrend"):
+                    moni_note = (
+                        f', social {item.get("moniSocialTrend")}'
+                        f' {to_float(item.get("moniSocialPaceRatio")):.2f}x'
+                    )
                 price_note = ""
                 if to_float(item.get("freshAddVwap")) > 0:
                     price_note = (
@@ -4997,7 +5258,7 @@ class WalletTrackerService:
                     f'{index}. {str(item.get("status") or item.get("action", "watch")).upper()} '
                     f'{item["coin"]} {item["side"]} '
                     f'({item["walletCount"]} wallets{net_note}{fresh_note}, '
-                    f'p{probability:.0f}/100{activity_note}{price_note}{cmm_note})'
+                    f'p{probability:.0f}/100{activity_note}{price_note}{cmm_note}{moni_note})'
                 )
         else:
             lines.append("- No actionable signals right now")
@@ -5335,6 +5596,8 @@ class WalletTrackerService:
             cmm_summary,
             require_confirmation=True,
         )
+        moni_summary = self.build_cached_moni_social_summary(state, alert_summary.get("signals", []))
+        alert_summary = self.apply_moni_social_context(alert_summary, moni_summary)
         dedupe_now_ms = current_time_ms()
         alert_summary = self.apply_signal_lifecycle(
             alert_summary,
@@ -5431,6 +5694,7 @@ class WalletTrackerService:
                 "changes": changes,
                 "summary": alert_summary,
                 "cmmSignals": cmm_summary,
+                "moniSocial": moni_summary,
             }
 
         checked_at = now_iso()
@@ -5441,6 +5705,7 @@ class WalletTrackerService:
             "topConvictionWallets": top_cohort,
             "walletPositionLifecycle": position_lifecycle,
             "signalOutcomes": signal_outcomes,
+            "moniSocial": moni_summary,
         }
         if not should_notify or sent or not config.get("enabled") or acknowledge_suppressed:
             new_state["summary"] = alert_summary
@@ -5466,6 +5731,7 @@ class WalletTrackerService:
             "changes": changes,
             "summary": alert_summary,
             "cmmSignals": cmm_summary,
+            "moniSocial": moni_summary,
         }
 
     def send_hourly_update(self, min_wallets: int, bot_token: str, chat_id: str) -> dict[str, Any]:
@@ -5490,6 +5756,8 @@ class WalletTrackerService:
             cmm_summary,
             require_confirmation=True,
         )
+        moni_summary = self.build_cached_moni_social_summary(state, alert_summary.get("signals", []))
+        alert_summary = self.apply_moni_social_context(alert_summary, moni_summary)
         lifecycle_now_ms = current_time_ms()
         alert_summary = self.apply_signal_lifecycle(
             alert_summary,
@@ -5569,6 +5837,7 @@ class WalletTrackerService:
             "walletPositionLifecycle": position_lifecycle,
             "signalOutcomes": signal_outcomes,
             "cmmSignals": cmm_summary,
+            "moniSocial": moni_summary,
         }
         if not should_send_position_alert or position_alert_sent or not config.get("enabled"):
             new_state["largePositions"] = current_positions
@@ -5586,6 +5855,7 @@ class WalletTrackerService:
             "positionAlertError": position_alert_error,
             "suppressedAlertCount": len(suppressed_alert_keys),
             "summary": alert_summary,
+            "moniSocial": moni_summary,
         }
 
 

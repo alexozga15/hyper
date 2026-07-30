@@ -26,6 +26,7 @@ from server import (
 LIVE_COMMANDS = {"/update", "/sentiment", "/consensus", "/signals", "/cmm", "/hip3", "/positions", "/ranks", "/elite"}
 SUMMARY_COMMANDS = {"/update", "/sentiment", "/consensus", "/signals", "/hip3"}
 CMM_COMMANDS = {"/signals", "/cmm"}
+MONI_COMMANDS = {"/signals", "/moni"}
 
 
 def normalize_command(text: str) -> str:
@@ -65,6 +66,7 @@ def build_help_message() -> str:
             "/consensus - current consensus only",
             "/signals - high-conviction trade signals",
             "/cmm - CoinMarketMan cohort API signals",
+            "/moni - cached Moni social context and quota",
             "/hip3 - current HIP-3 consensus only",
             "/positions - all open positions now",
             "/ranks - tracked wallets ranked by 7D hit rate plus 7D PnL",
@@ -167,6 +169,7 @@ def build_reply(
     dashboard_cache: dict[str, Any] | None,
     cmm_cache: dict[str, Any] | None,
     min_wallets: int,
+    moni_cache: dict[str, Any] | None = None,
 ) -> str:
     if command == "/update":
         return "\n\n".join(
@@ -180,6 +183,8 @@ def build_reply(
     if command == "/signals":
         if cmm_cache is not None and summary_cache is not None:
             summary_cache = service.apply_cmm_confirmation_to_summary(summary_cache, cmm_cache)
+        if moni_cache is not None and summary_cache is not None:
+            summary_cache = service.apply_moni_social_context(summary_cache, moni_cache)
         if summary_cache is not None and hasattr(service, "apply_signal_lifecycle") and hasattr(service, "alerts_path"):
             raw = load_json_file(service.alerts_path, {})
             alert_state = raw.get("state", {}) if isinstance(raw, dict) else {}
@@ -192,6 +197,8 @@ def build_reply(
         return service.build_signals_message(summary_cache, cmm_summary=cmm_cache)
     if command == "/cmm":
         return service.build_cmm_signals_message(cmm_cache, wallet_summary=summary_cache)
+    if command == "/moni":
+        return service.build_moni_social_message(moni_cache)
     if command == "/consensus":
         return service.build_summary_message(
             summary_cache,
@@ -251,6 +258,13 @@ def build_cmm_cache(service: WalletTrackerService, *, include_position_entries: 
     return summary
 
 
+def build_moni_cache(service: WalletTrackerService) -> dict[str, Any]:
+    raw = load_json_file(service.alerts_path, {}) if hasattr(service, "alerts_path") else {}
+    state = raw.get("state", {}) if isinstance(raw, dict) else {}
+    summary = state.get("moniSocial", {}) if isinstance(state, dict) else {}
+    return summary if isinstance(summary, dict) else {}
+
+
 def main() -> int:
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     allowed_chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
@@ -299,7 +313,17 @@ def main() -> int:
         if command in CMM_COMMANDS:
             cmm_cache = build_cmm_cache(service, include_position_entries=command == "/cmm")
 
-        reply = build_reply(service, command, position_query, summary_cache, dashboard_cache, cmm_cache, min_wallets)
+        moni_cache = build_moni_cache(service) if command in MONI_COMMANDS else None
+        reply = build_reply(
+            service,
+            command,
+            position_query,
+            summary_cache,
+            dashboard_cache,
+            cmm_cache,
+            min_wallets,
+            moni_cache=moni_cache,
+        )
 
         service.send_telegram_message(bot_token, chat_id, reply)
         latest_seen = max(latest_seen, update_id)
