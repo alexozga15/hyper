@@ -71,6 +71,24 @@ class MoniSignalContextTests(unittest.TestCase):
         )
         self.assertTrue(summary["cacheHit"])
 
+    def test_empty_signal_set_seeds_free_quota_status(self) -> None:
+        class FakeMoniClient:
+            enabled = True
+
+            def api_key_status(self) -> dict:
+                return {
+                    "isActive": True,
+                    "monthPointsLimit": 300,
+                    "monthPointsUsage": 10,
+                    "expiresAt": 1_900_000_000,
+                }
+
+        self.service.moni_client = FakeMoniClient()
+        summary = self.service.build_cached_moni_social_summary({}, [])
+        self.assertEqual(summary["monthPointsUsage"], 10)
+        self.assertEqual(summary["monthPointsLimit"], 300)
+        self.assertEqual(summary["projects"], {})
+
     def test_social_context_does_not_change_probability(self) -> None:
         summary = {
             "signals": [{"coin": "SOL", "side": "short", "probabilityScore": 82}],

@@ -4521,6 +4521,24 @@ class WalletTrackerService:
         next_fetch_ms = iso_to_ms(cached.get("nextFetchAt"))
         if not force and next_fetch_ms > now_ms:
             return {**cached, "enabled": True, "projects": projects, "cacheHit": True, "checkedAt": checked_at}
+        if int(to_float(cached.get("monthPointsLimit"))) <= 0:
+            try:
+                usage = self.moni_client.api_key_status()
+                cached = {
+                    **cached,
+                    "enabled": True,
+                    "monthPointsLimit": int(to_float(usage.get("monthPointsLimit"))),
+                    "monthPointsUsage": int(to_float(usage.get("monthPointsUsage"))),
+                    "expiresAt": usage.get("expiresAt"),
+                }
+            except MoniApiError as exc:
+                return {
+                    **cached,
+                    "enabled": True,
+                    "projects": projects,
+                    "error": str(exc),
+                    "checkedAt": checked_at,
+                }
 
         handles = self.moni_project_handles()
         candidates = sorted(
