@@ -1383,8 +1383,14 @@ class AlertSummaryTests(unittest.TestCase):
             "0xdbcc96bcada067864902aad14e029fe7c422f147",
         }
         addresses = {wallet.address.lower() for wallet in WalletStore(Path(WALLETS_FILE)).list_wallets()}
+        additions = {
+            "0x1ce8ed87b7b4cb60f0cc3664bf1fe216163ff55a",
+            "0x215b369a532dc84654c244449cb119986ceaf603",
+            "0x1e771e1b95c86491299d6e2a5c3b3842d03b552e",
+        }
 
-        self.assertEqual(len(addresses), 28)
+        self.assertEqual(len(addresses), 31)
+        self.assertTrue(additions.issubset(addresses))
         self.assertTrue(removed.isdisjoint(addresses))
 
     def test_dashboard_marks_globally_empty_fills_as_degraded(self) -> None:
