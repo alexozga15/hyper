@@ -1387,9 +1387,11 @@ class AlertSummaryTests(unittest.TestCase):
             "0x1ce8ed87b7b4cb60f0cc3664bf1fe216163ff55a",
             "0x215b369a532dc84654c244449cb119986ceaf603",
             "0x1e771e1b95c86491299d6e2a5c3b3842d03b552e",
+            "0xd487e26c62ed8c28ce3cc70b5791e501c2934982",
+            "0xfc98b6ec7f59ea13354bae6171a9120692fb8777",
         }
 
-        self.assertEqual(len(addresses), 31)
+        self.assertEqual(len(addresses), 33)
         self.assertTrue(additions.issubset(addresses))
         self.assertTrue(removed.isdisjoint(addresses))
 
