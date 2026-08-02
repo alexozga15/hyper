@@ -2411,7 +2411,7 @@ class WalletTrackerService:
                     "threshold": round(to_float(threshold), 1),
                     "wallets": item.get("wallets", [])[:5],
                     "rationale": (
-                        f'{int(to_float(item.get("independentWalletCount")))} independent wallets are {side} '
+                        f'{int(to_float(item.get("independentWalletCount")))} wallets are {side} '
                         f'against {int(to_float(item.get("oppositeIndependentWalletCount")))} opposite wallets, '
                         f'net +{int(to_float(item.get("netIndependentWalletCount")))}, '
                         f'qnet +{to_float(item.get("netIndependentWeightedWalletCount")):.1f}.'
@@ -3608,8 +3608,7 @@ class WalletTrackerService:
                         f'({str(item.get("side") or "").upper()}) - {status}',
                         f'   {confidence_note}',
                         (
-                            f'   Support: {int(to_float(item.get("walletCount")))} wallets, '
-                            f'{int(to_float(item.get("independentWalletCount", item.get("walletCount"))))} independent | '
+                            f'   Support: {int(to_float(item.get("independentWalletCount", item.get("walletCount"))))} wallets | '
                             f'Net support: +{int(to_float(item.get("netIndependentWalletCount", item.get("netWalletCount"))))} | '
                             f'Quality-adjusted: '
                             f'{to_float(item.get("netIndependentWeightedWalletCount", item.get("netWeightedWalletCount"))):.1f}'
@@ -3649,7 +3648,7 @@ class WalletTrackerService:
                         f'{index}. {str(item.get("action") or "watch").upper()} '
                         f'{item.get("coin", "Unknown")} ({str(item.get("side") or "").upper()})',
                         (
-                            f'   {int(to_float(item.get("independentWalletCount")))} independent wallets '
+                            f'   {int(to_float(item.get("independentWalletCount")))} wallets '
                             f'added {format_money_compact(item.get("freshNotional"))} within 15 minutes.'
                         ),
                         f'   Why it matters: {evidence}.',
@@ -3715,7 +3714,7 @@ class WalletTrackerService:
 
         if changes.get("newLargePositions"):
             lines.append("")
-            lines.append(f"New large positions ({format_money_compact(NEW_POSITION_ALERT_MIN_VALUE)}+)")
+            lines.append(f"New large pos ({format_money_compact(NEW_POSITION_ALERT_MIN_VALUE)}+)")
             for item in changes["newLargePositions"][:10]:
                 size_note = ""
                 if to_float(item.get("totalSize")) > 0:
@@ -3732,7 +3731,7 @@ class WalletTrackerService:
 
         if changes.get("closedLargePositions"):
             lines.append("")
-            lines.append(f"Closed large positions ({format_money_compact(NEW_POSITION_ALERT_MIN_VALUE)}+)")
+            lines.append(f"Closed large pos ({format_money_compact(NEW_POSITION_ALERT_MIN_VALUE)}+)")
             for item in changes["closedLargePositions"][:10]:
                 size_note = ""
                 if to_float(item.get("totalSize")) > 0:
@@ -3752,7 +3751,7 @@ class WalletTrackerService:
 
         if changes.get("increasedLargePositions"):
             lines.append("")
-            lines.append(f"Large position additions ({format_money_compact(POSITION_INCREASE_ALERT_MIN_DELTA)}+)")
+            lines.append(f"Large pos additions ({format_money_compact(POSITION_INCREASE_ALERT_MIN_DELTA)}+)")
             for item in changes["increasedLargePositions"][:10]:
                 size_note = ""
                 if to_float(item.get("sizeIncrease")) > 0:
@@ -3808,8 +3807,7 @@ class WalletTrackerService:
                             f'{item["coin"]} ({str(item.get("side") or "").upper()}) - '
                             f'{probability:.0f}/100 confidence',
                             (
-                                f'   {int(to_float(item.get("walletCount")))} wallets, '
-                                f'{int(to_float(item.get("independentWalletCount", item.get("walletCount"))))} independent | '
+                                f'   {int(to_float(item.get("independentWalletCount", item.get("walletCount"))))} wallets | '
                                 f'Net support: +{int(to_float(item.get("netIndependentWalletCount", item.get("netWalletCount"))))} | '
                                 f'Quality-adjusted: '
                                 f'{to_float(item.get("netIndependentWeightedWalletCount", item.get("netWeightedWalletCount"))):.1f}'
@@ -3837,8 +3835,7 @@ class WalletTrackerService:
                 for item in items[:10]:
                     lines.append(
                         f'- {item["coin"]} {str(item.get("side") or "").upper()}: '
-                        f'{int(to_float(item.get("walletCount")))} wallets '
-                        f'({int(to_float(item.get("independentWalletCount", item.get("walletCount"))))} independent) | '
+                        f'{int(to_float(item.get("independentWalletCount", item.get("walletCount"))))} wallets | '
                         f'Confidence {to_float(item.get("convictionScore")):.0f}/100'
                     )
                     if "netWalletCount" in item:
@@ -5625,7 +5622,7 @@ class WalletTrackerService:
         summary = cmm_summary or self.build_cmm_signal_summary()
         lines = [
             "CMM market signals",
-            f'Based on: {summary.get("timeframe", os.environ.get("CMM_SIGNAL_POSITION_RECENCY", "7d"))} positions',
+            f'Based on: {summary.get("timeframe", os.environ.get("CMM_SIGNAL_POSITION_RECENCY", "7d"))} pos',
             (
                 f"Confidence levels: Watch {CMM_WATCH_PROBABILITY_THRESHOLD:.0f} | "
                 f"Action {CMM_SIGNAL_PROBABILITY_THRESHOLD:.0f} | "
@@ -5809,7 +5806,7 @@ class WalletTrackerService:
                     f'{item.get("coin", "Unknown")} ({str(item.get("side") or "").upper()})'
                 )
                 lines.append(
-                    f'  {int(to_float(item.get("independentWalletCount")))} independent wallets added '
+                    f'  {int(to_float(item.get("independentWalletCount")))} wallets added '
                     f'{format_money_compact(item.get("freshNotional"))}; '
                     f'{top_count} {top_verb} top-10.'
                 )
@@ -5827,7 +5824,7 @@ class WalletTrackerService:
         lines.append(f'Updated: {format_update_time(summary.get("generatedAt", now_iso()))}')
         return "\n".join(lines)
 
-    def build_positions_message(self, dashboard: dict[str, Any], *, title: str = "Open positions now") -> str:
+    def build_positions_message(self, dashboard: dict[str, Any], *, title: str = "Open pos now") -> str:
         lines = [title]
         position_groups = self.build_position_groups(
             dashboard,
@@ -5846,7 +5843,7 @@ class WalletTrackerService:
 
         if not position_groups and not commodity_groups and not stock_groups:
             lines.append("")
-            lines.append("- No open positions")
+            lines.append("- No open pos")
         else:
             sections = [
                 (
@@ -5874,7 +5871,7 @@ class WalletTrackerService:
                             )
                         lines.append(
                             f'- {item["coin"]} {str(item.get("side") or "").upper()}: '
-                            f'{item["walletCount"]} wallets, {item["positionCount"]} positions | '
+                            f'{item["walletCount"]} wallets, {item["positionCount"]} pos | '
                             f'{format_money_compact(to_float(item.get("totalValue")))} open'
                             f'{entry_note}{recent_add_note}'
                         )
@@ -5884,7 +5881,7 @@ class WalletTrackerService:
         lines.append("")
         lines.append(
             f"Summary: {len(position_groups) + len(commodity_groups) + len(stock_groups)} groups, "
-            f"{total_positions} positions"
+            f"{total_positions} pos"
         )
         lines.append(f'Updated: {format_update_time(dashboard.get("generatedAt", now_iso()))}')
         return "\n".join(lines)
@@ -5940,7 +5937,7 @@ class WalletTrackerService:
             reverse=True,
         )
 
-        lines = ["Elite wallet positions"]
+        lines = ["Elite wallet pos"]
         if not elite_wallets:
             lines.append("- No Elite-ranked wallets right now")
             lines.append("")
@@ -5966,7 +5963,7 @@ class WalletTrackerService:
                 f'DD {to_float(rank.get("maxDrawdownPct")):.1f}%)'
             )
             if not positions:
-                lines.append("- No open positions")
+                lines.append("- No open pos")
                 continue
             for position in positions:
                 size_note = ""
@@ -6046,11 +6043,11 @@ class WalletTrackerService:
 
         lines = [
             f"{normalized_coin} {normalized_side} wallets",
-            f"Wallets: {len(rows)} | Positions: {position_count} | Total: {format_money_thousands(total_value)}{entry_note}",
+            f"Wallets: {len(rows)} | Pos: {position_count} | Total: {format_money_thousands(total_value)}{entry_note}",
         ]
 
         if not rows:
-            lines.append(f"- No {normalized_coin} {normalized_side} positions")
+            lines.append(f"- No {normalized_coin} {normalized_side} pos")
         else:
             for index, item in enumerate(rows[:50], start=1):
                 size_note = ""

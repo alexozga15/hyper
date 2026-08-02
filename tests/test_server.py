@@ -380,11 +380,11 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_summary_message(summary, min_wallets=3)
         self.assertIn("Current wallet sentiment", message)
-        self.assertIn("BTC LONG: 3 wallets (3 independent) | Confidence 84/100", message)
+        self.assertIn("BTC LONG: 3 wallets | Confidence 84/100", message)
         self.assertIn("Commodities", message)
-        self.assertIn("OIL SHORT: 3 wallets (3 independent) | Confidence 72/100", message)
+        self.assertIn("OIL SHORT: 3 wallets | Confidence 72/100", message)
         self.assertIn("Stocks and indices", message)
-        self.assertIn("EWY LONG: 3 wallets (3 independent) | Confidence 68/100", message)
+        self.assertIn("EWY LONG: 3 wallets | Confidence 68/100", message)
         self.assertNotIn("$12,345", message)
         self.assertNotIn("HIP-3 consensus:", message)
         self.assertNotIn("@PUMP-1 short (3 wallets, $456)", message)
@@ -902,7 +902,7 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_positions_message(dashboard)
 
-        self.assertIn("BTC LONG: 3 wallets, 3 positions | $2.4M open", message)
+        self.assertIn("BTC LONG: 3 wallets, 3 pos | $2.4M open", message)
 
     def test_build_sentiment_summary_emits_high_conviction_signals(self) -> None:
         now_ms = 1_700_000_000_000
@@ -1625,7 +1625,7 @@ class AlertSummaryTests(unittest.TestCase):
 
         self.assertIn("Fresh candidates from the last 15 minutes", message)
         self.assertIn("WATCH BUY ETH (LONG)", message)
-        self.assertIn("3 independent wallets added $650K", message)
+        self.assertIn("3 wallets added $650K", message)
 
     def test_build_cmm_signal_summary_scores_cohort_bias(self) -> None:
         class FakeCmmClient:
@@ -2718,7 +2718,7 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_elite_wallet_positions_message(dashboard)
 
-        self.assertIn("Elite wallet positions", message)
+        self.assertIn("Elite wallet pos", message)
         self.assertIn("Elite Trader (87.6/100", message)
         self.assertIn("30D closes, PF 6.0, DD 5.0%", message)
         self.assertIn("- BTC long $1,000K, size 10, entry $100,000, uPnL $12,345", message)
@@ -2751,11 +2751,11 @@ class AlertSummaryTests(unittest.TestCase):
         }
 
         message = self.service.build_positions_message(dashboard)
-        self.assertIn("Open positions now", message)
+        self.assertIn("Open pos now", message)
         self.assertIn("Crypto (3+ wallets, $1.0M+ combined)", message)
-        self.assertIn("BTC LONG: 3 wallets, 3 positions | $1.4M open | weighted entry: $78,000", message)
+        self.assertIn("BTC LONG: 3 wallets, 3 pos | $1.4M open | weighted entry: $78,000", message)
         self.assertNotIn("ETH short", message)
-        self.assertIn("Summary: 1 groups, 3 positions", message)
+        self.assertIn("Summary: 1 groups, 3 pos", message)
 
     def test_build_positions_message_labels_simple_entry_average_when_size_missing(self) -> None:
         dashboard = {
@@ -2781,7 +2781,7 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_positions_message(dashboard)
 
-        self.assertIn("BTC LONG: 3 wallets, 3 positions | $1.2M open | average entry: $77,667", message)
+        self.assertIn("BTC LONG: 3 wallets, 3 pos | $1.2M open | average entry: $77,667", message)
         self.assertNotIn("weighted entry", message)
 
     def test_build_positions_message_filters_groups_below_value_threshold(self) -> None:
@@ -2807,9 +2807,9 @@ class AlertSummaryTests(unittest.TestCase):
         }
 
         message = self.service.build_positions_message(dashboard)
-        self.assertIn("- No open positions", message)
+        self.assertIn("- No open pos", message)
         self.assertNotIn("CHIP short", message)
-        self.assertIn("Summary: 0 groups, 0 positions", message)
+        self.assertIn("Summary: 0 groups, 0 pos", message)
 
     def test_build_positions_message_excludes_loracle_hype_positions(self) -> None:
         dashboard = {
@@ -2835,9 +2835,9 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_positions_message(dashboard)
 
-        self.assertIn("- No open positions", message)
+        self.assertIn("- No open pos", message)
         self.assertNotIn("HYPE short", message)
-        self.assertIn("Summary: 0 groups, 0 positions", message)
+        self.assertIn("Summary: 0 groups, 0 pos", message)
 
     def test_build_positions_message_excludes_large_losing_positions(self) -> None:
         dashboard = {
@@ -2869,9 +2869,9 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_positions_message(dashboard)
 
-        self.assertIn("- No open positions", message)
+        self.assertIn("- No open pos", message)
         self.assertNotIn("BTC long", message)
-        self.assertIn("Summary: 0 groups, 0 positions", message)
+        self.assertIn("Summary: 0 groups, 0 pos", message)
 
     def test_build_positions_message_includes_recent_add_vwap(self) -> None:
         now_ms = 1_700_000_000_000
@@ -2939,7 +2939,7 @@ class AlertSummaryTests(unittest.TestCase):
         message = self.service.build_position_wallets_message(dashboard, "btc", "long")
 
         self.assertIn("BTC long wallets", message)
-        self.assertIn("Wallets: 2 | Positions: 2 | Total: $1,200K, weighted entry $77,333", message)
+        self.assertIn("Wallets: 2 | Pos: 2 | Total: $1,200K, weighted entry $77,333", message)
         self.assertIn(
             "1. 0x1111111111111111111111111111111111111111: $800K, size 10, entry $78,000, uPnL $12,345",
             message,
@@ -2970,7 +2970,7 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_position_wallets_message(dashboard, "hype", "short")
 
-        self.assertIn("Wallets: 1 | Positions: 1 | Total: $1,000K", message)
+        self.assertIn("Wallets: 1 | Pos: 1 | Total: $1,000K", message)
         self.assertIn("0x2222222222222222222222222222222222222222: $1,000K", message)
         self.assertNotIn("Loracle", message)
 
@@ -3028,7 +3028,7 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_position_wallets_message(dashboard, "btc", "long")
 
-        self.assertIn("Wallets: 1 | Positions: 1 | Total: $800K", message)
+        self.assertIn("Wallets: 1 | Pos: 1 | Total: $800K", message)
         self.assertNotIn("0x1111111111111111111111111111111111111111", message)
         self.assertIn("0x2222222222222222222222222222222222222222", message)
 
@@ -3053,10 +3053,10 @@ class AlertSummaryTests(unittest.TestCase):
         }
 
         message = self.service.build_positions_message(dashboard)
-        self.assertIn("- No open positions", message)
+        self.assertIn("- No open pos", message)
         self.assertNotIn("@MOON-1 long", message)
         self.assertNotIn("BTC long (1 wallets, 1 positions", message)
-        self.assertIn("Summary: 0 groups, 0 positions", message)
+        self.assertIn("Summary: 0 groups, 0 pos", message)
 
     def test_build_positions_message_groups_oil_aliases_under_oil(self) -> None:
         dashboard = {
@@ -3086,7 +3086,7 @@ class AlertSummaryTests(unittest.TestCase):
         }
 
         message = self.service.build_positions_message(dashboard)
-        self.assertIn("OIL LONG: 3 wallets, 3 positions | $2.6M open", message)
+        self.assertIn("OIL LONG: 3 wallets, 3 pos | $2.6M open", message)
         self.assertNotIn("OIL short", message)
 
     def test_build_positions_message_groups_commodities_by_wallet_count(self) -> None:
@@ -3116,7 +3116,7 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_positions_message(dashboard)
         self.assertIn("Commodities", message)
-        self.assertIn("GOLD LONG: 3 wallets, 3 positions | $1.1M open", message)
+        self.assertIn("GOLD LONG: 3 wallets, 3 pos | $1.1M open", message)
         self.assertNotIn("SILVER short", message)
         self.assertNotIn("xyz:GOLD", message)
         self.assertNotIn("xyz:SILVER", message)
@@ -3155,8 +3155,8 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_positions_message(dashboard)
         self.assertIn("Stocks and indices", message)
-        self.assertIn("EWY LONG: 3 wallets, 3 positions | $1.1M open", message)
-        self.assertIn("NVDA LONG: 3 wallets, 3 positions | $1.1M open", message)
+        self.assertIn("EWY LONG: 3 wallets, 3 pos | $1.1M open", message)
+        self.assertIn("NVDA LONG: 3 wallets, 3 pos | $1.1M open", message)
         self.assertNotIn("SPACEX short", message)
         self.assertNotIn("xyz:NVDA", message)
 
@@ -3222,11 +3222,11 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_positions_message(dashboard)
         self.assertIn("Commodities", message)
-        self.assertIn("OIL LONG: 3 wallets, 3 positions | $1.1M open", message)
+        self.assertIn("OIL LONG: 3 wallets, 3 pos | $1.1M open", message)
         self.assertNotIn("SILVER short", message)
         self.assertIn("Stocks and indices", message)
         self.assertNotIn("XYZ100 long", message)
-        self.assertIn("SP500 LONG: 3 wallets, 3 positions | $1.1M open", message)
+        self.assertIn("SP500 LONG: 3 wallets, 3 pos | $1.1M open", message)
 
     def test_check_alerts_ignores_hip3_only_changes(self) -> None:
         previous_summary = {
@@ -3373,7 +3373,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(len(result["changes"]["newLargePositions"]), 1)
         self.assertEqual(result["changes"]["newLargePositions"][0]["coin"], "BTC")
         sent_message = send_telegram_message.call_args.args[2]
-        self.assertIn("New large positions ($700K+)", sent_message)
+        self.assertIn("New large pos ($700K+)", sent_message)
         self.assertIn("Trader One opened BTC LONG: $1.2M sz 12 open VWAP $100,000", sent_message)
 
     def test_check_alerts_notifies_on_closed_large_positions(self) -> None:
@@ -3410,7 +3410,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertTrue(result["sent"])
         self.assertEqual(len(result["changes"]["closedLargePositions"]), 1)
         sent_message = send_telegram_message.call_args.args[2]
-        self.assertIn("Closed large positions ($700K+)", sent_message)
+        self.assertIn("Closed large pos ($700K+)", sent_message)
         self.assertIn("Trader One closed ETH SHORT: $1.2M sz 400 last ~$3,000", sent_message)
 
     def test_check_alerts_ignores_closed_positions_for_untracked_wallets(self) -> None:
@@ -3869,7 +3869,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertNotIn("Wallet ranks by 7D hit rate + PnL", hourly_message)
         self.assertNotIn("High-conviction signals", hourly_message)
         alert_message = send_telegram_message.call_args_list[1].args[2]
-        self.assertIn("New large positions ($700K+)", alert_message)
+        self.assertIn("New large pos ($700K+)", alert_message)
         self.assertIn("Trader One opened BTC LONG: $1.2M", alert_message)
         saved_state = save_json_file.call_args.args[1]["state"]
         self.assertEqual(saved_state["summary"]["consensus"][0]["walletCount"], 8)
@@ -3969,7 +3969,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertTrue(result["sent"])
         self.assertEqual(len(result["changes"]["increasedLargePositions"]), 1)
         sent_message = send_telegram_message.call_args.args[2]
-        self.assertIn("Large position additions ($700K+)", sent_message)
+        self.assertIn("Large pos additions ($700K+)", sent_message)
         self.assertIn("Trader One added $1.2M to BTC LONG at estimated price $120,000", sent_message)
         self.assertIn("Position: $1.2M -> $2.4M +10", sent_message)
         self.assertNotIn("@$78,000", sent_message)
