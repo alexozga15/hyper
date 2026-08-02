@@ -460,6 +460,19 @@ def format_money_compact(value: float) -> str:
     return f"{sign}${absolute:,.0f}"
 
 
+def format_update_time(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "unknown"
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return raw
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).strftime("%d %b %Y, %H:%M UTC")
+
+
 def classify_wallet_size(account_value: float) -> str:
     for label, floor in WALLET_SIZE_BANDS:
         if account_value >= floor:
@@ -3560,90 +3573,106 @@ class WalletTrackerService:
 
     def build_telegram_message(self, changes: dict[str, Any], summary: dict[str, Any], min_wallets: int) -> str:
         lines = [
-            f"Wallet signal | Bias: {summary.get('overallBias', 'mixed')} | Min: {min_wallets}",
+            "Wallet activity update",
+            (
+                f"Market view: {str(summary.get('overallBias', 'mixed')).title()} | "
+                f"Tracking: {int(to_float(summary.get('walletCount')))} wallets | "
+                f"Agreement required: {min_wallets}"
+            ),
         ]
 
         actionable_signals = changes.get("addedSignals", []) + changes.get("changedSignals", [])
         if actionable_signals:
             lines.append("")
-            lines.append(f"Actionable signals >={ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD:.0f}/100")
-            for item in actionable_signals[:8]:
-                move_note = ""
+            lines.append("High-confidence signals")
+            for index, item in enumerate(actionable_signals[:8], start=1):
+                action = str(item.get("action") or signal_action_from_side(item.get("side"))).upper()
+                status = str(item.get("status") or "NEW").upper()
+                probability = to_float(item.get("probabilityScore"))
+                confidence_note = f"Confidence: {probability:.0f}/100"
                 if "fromProbabilityScore" in item:
-                    move_note = f' ({to_float(item.get("fromProbabilityScore")):.0f}->{to_float(item.get("toProbabilityScore")):.0f})'
-                activity_bits = []
-                if int(to_float(item.get("freshActivityWalletCount"))):
-                    activity_bits.append(f'{int(to_float(item.get("freshActivityWalletCount")))} 5m activity')
-                if int(to_float(item.get("recentAddWalletCount"))):
-                    activity_bits.append(f'{int(to_float(item.get("recentAddWalletCount")))} adds')
-                if int(to_float(item.get("verifiedFreshIndependentWalletCount"))):
-                    activity_bits.append(
-                        f'{int(to_float(item.get("verifiedFreshIndependentWalletCount")))} verified 15m'
+                    confidence_note += (
+                        f' (was {to_float(item.get("fromProbabilityScore")):.0f})'
                     )
-                activity_note = f', {"/".join(activity_bits)}' if activity_bits else ""
-                cmm_note = ""
-                if item.get("cmmConfirmation") == "confirmed":
-                    cmm_note = (
-                        f', CMM p{to_float(item.get("cmmProbabilityScore")):.0f}'
-                        f'/trend {to_float(item.get("cmmTrendScore")):.0f}'
-                    )
-                moni_note = ""
-                if item.get("moniSocialTrend"):
-                    moni_note = (
-                        f', social {item.get("moniSocialTrend")}'
-                        f' {to_float(item.get("moniSocialPaceRatio")):.2f}x'
-                    )
-                fresh_note = ""
-                if "netFreshIndependentWalletCount" in item:
-                    fresh_note = (
-                        f', fresh +{int(to_float(item.get("netFreshIndependentWalletCount")))}'
-                        f'/-{int(to_float(item.get("oppositeVerifiedFreshIndependentWalletCount")))}'
-                    )
-                price_note = ""
                 if to_float(item.get("freshAddVwap")) > 0:
                     price_note = (
-                        f', VWAP ${format_price(to_float(item.get("freshAddVwap")))}'
-                        f' live ~${format_price(to_float(item.get("markPrice")))}'
-                        f' dist {to_float(item.get("entryDistancePct")):+.2f}%'
+                        f'Wallet add price: ${format_price(to_float(item.get("freshAddVwap")))} | '
+                        f'Current: ~${format_price(to_float(item.get("markPrice")))} '
+                        f'({to_float(item.get("entryDistancePct")):+.2f}%)'
                     )
-                lines.append(
-                    f'- {str(item.get("status") or item.get("action", "watch")).upper()} '
-                    f'{item["coin"]} {item["side"]}: '
-                    f'p{to_float(item.get("probabilityScore")):.0f}{move_note}, '
-                    f'{item["walletCount"]}w/{int(to_float(item.get("independentWalletCount", item["walletCount"])))}i '
-                    f'net +{int(to_float(item.get("netIndependentWalletCount", item.get("netWalletCount"))))}, '
-                    f'qnet +{to_float(item.get("netIndependentWeightedWalletCount", item.get("netWeightedWalletCount"))):.1f}, '
-                    f'{format_money_compact(item.get("totalValue"))}{fresh_note}'
-                    f'{activity_note}{price_note}{cmm_note}{moni_note}'
+                else:
+                    price_note = "Price data unavailable"
+                lines.extend(
+                    [
+                        f'{index}. {action} {item.get("coin", "Unknown")} '
+                        f'({str(item.get("side") or "").upper()}) - {status}',
+                        f'   {confidence_note}',
+                        (
+                            f'   Support: {int(to_float(item.get("walletCount")))} wallets, '
+                            f'{int(to_float(item.get("independentWalletCount", item.get("walletCount"))))} independent | '
+                            f'Net support: +{int(to_float(item.get("netIndependentWalletCount", item.get("netWalletCount"))))} | '
+                            f'Quality-adjusted: '
+                            f'{to_float(item.get("netIndependentWeightedWalletCount", item.get("netWeightedWalletCount"))):.1f}'
+                        ),
+                    ]
                 )
+                if "netFreshIndependentWalletCount" in item:
+                    lines.append(
+                        f'   Fresh flow: {int(to_float(item.get("netFreshIndependentWalletCount")))} with signal, '
+                        f'{int(to_float(item.get("oppositeVerifiedFreshIndependentWalletCount")))} opposite'
+                    )
+                if to_float(item.get("totalValue")) > 0:
+                    lines.append(f'   Open value: {format_money_compact(item.get("totalValue"))}')
+                lines.append(f'   {price_note}')
+                if item.get("cmmConfirmation") == "confirmed":
+                    lines.append(
+                        f'   CMM confirms: {to_float(item.get("cmmProbabilityScore")):.0f}/100'
+                    )
+                if item.get("moniSocialTrend"):
+                    lines.append(
+                        f'   Social activity: {item.get("moniSocialTrend")} '
+                        f'({to_float(item.get("moniSocialPaceRatio")):.2f}x normal pace)'
+                    )
 
         candidate_signals = changes.get("addedCandidateSignals", [])
         if candidate_signals:
             lines.append("")
-            lines.append("Fresh candidate signals | 3 independent / 15m")
-            for item in candidate_signals[:5]:
-                evidence = "CMM confirmed"
+            lines.append("Fresh coordinated move")
+            for index, item in enumerate(candidate_signals[:5], start=1):
+                evidence = f'CMM confirmation: {to_float(item.get("cmmProbabilityScore")):.0f}/100'
                 if item.get("candidateReason") == "two_top_wallets":
-                    evidence = f'{int(to_float(item.get("independentTopWalletCount")))} top-10'
-                cmm_note = ""
-                if item.get("cmmConfirmation") == "confirmed":
-                    cmm_note = f', CMM p{to_float(item.get("cmmProbabilityScore")):.0f}'
-                lines.append(
-                    f'- {str(item.get("action") or "watch").upper()} {item.get("coin", "Unknown")} '
-                    f'{item.get("side", "")}: '
-                    f'{int(to_float(item.get("independentWalletCount")))} independent, '
-                    f'{format_money_compact(item.get("freshNotional"))} fresh, '
-                    f'{evidence}, VWAP ${format_price(to_float(item.get("freshAddVwap")))} '
-                    f'live ~${format_price(to_float(item.get("markPrice")))}{cmm_note}'
+                    evidence = (
+                        f'{int(to_float(item.get("independentTopWalletCount")))} top-10 wallets confirm'
+                    )
+                lines.extend(
+                    [
+                        f'{index}. {str(item.get("action") or "watch").upper()} '
+                        f'{item.get("coin", "Unknown")} ({str(item.get("side") or "").upper()})',
+                        (
+                            f'   {int(to_float(item.get("independentWalletCount")))} independent wallets '
+                            f'added {format_money_compact(item.get("freshNotional"))} within 15 minutes.'
+                        ),
+                        f'   Why it matters: {evidence}.',
+                        (
+                            f'   Wallet add price: ${format_price(to_float(item.get("freshAddVwap")))} | '
+                            f'Current: ~${format_price(to_float(item.get("markPrice")))}'
+                        ),
+                    ]
                 )
 
         if changes.get("removedSignals"):
             lines.append("")
-            lines.append("Invalidated signals")
+            lines.append("Signals no longer active")
+            reason_labels = {
+                "cmm_conflict": "CMM now points the other way",
+                "opposite_fresh_flow": "opposite wallet flow appeared",
+                "consensus_lost": "wallet agreement fell below the requirement",
+                "expired": "no fresh additions within the signal lifetime",
+            }
             for item in changes["removedSignals"][:8]:
                 lines.append(
-                    f'- INVALIDATED {item.get("coin", "Unknown")} {item.get("side", "")}: '
-                    f'{str(item.get("invalidationReason") or "ended").replace("_", " ")}'
+                    f'- {item.get("coin", "Unknown")} {str(item.get("side") or "").upper()}: '
+                    f'{reason_labels.get(str(item.get("invalidationReason")), "signal ended")}'
                 )
 
         cmm_signals = changes.get("addedCmmSignals", []) + changes.get("changedCmmSignals", [])
@@ -3665,9 +3694,7 @@ class WalletTrackerService:
 
         if changes.get("clusteredOpenPositions"):
             lines.append("")
-            lines.append(
-                f"{CLUSTERED_OPEN_ALERT_MIN_WALLETS}+ opens >{format_money_compact(FRESH_WALLET_FLOW_MIN_VALUE)} in 5m"
-            )
+            lines.append("Coordinated openings in the last 5 minutes")
             for item in changes["clusteredOpenPositions"][:10]:
                 size_note = ""
                 if to_float(item.get("totalSize")) > 0:
@@ -3676,8 +3703,9 @@ class WalletTrackerService:
                 if to_float(item.get("entryPx")) > 0:
                     entry_note = f' VWAP ${format_price(to_float(item.get("entryPx")))}'
                 lines.append(
-                    f'- {item["coin"]} {item["side"]}: {int(item.get("walletCount") or 0)} wallets, '
-                    f'{format_money_compact(item["totalValue"])}{size_note}{entry_note}'
+                    f'- {item["coin"]} {str(item.get("side") or "").upper()}: '
+                    f'{int(item.get("walletCount") or 0)} wallets opened '
+                    f'{format_money_compact(item["totalValue"])} total{size_note}{entry_note}'
                 )
                 for wallet in item.get("wallets", [])[:5]:
                     lines.append(
@@ -3685,9 +3713,9 @@ class WalletTrackerService:
                         f'{format_money_compact(wallet.get("totalValue"))}'
                     )
 
-        if changes["newLargePositions"]:
+        if changes.get("newLargePositions"):
             lines.append("")
-            lines.append(f"Open >{format_money_compact(NEW_POSITION_ALERT_MIN_VALUE)}")
+            lines.append(f"New large positions ({format_money_compact(NEW_POSITION_ALERT_MIN_VALUE)}+)")
             for item in changes["newLargePositions"][:10]:
                 size_note = ""
                 if to_float(item.get("totalSize")) > 0:
@@ -3697,12 +3725,14 @@ class WalletTrackerService:
                     entry_label = "open VWAP" if item.get("entryPriceSource") == "fill" else "entry"
                     entry_note = f' {entry_label} ${format_price(to_float(item.get("entryPx")))}'
                 lines.append(
-                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} {format_money_compact(item["totalValue"])}{size_note}{entry_note}'
+                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))} opened '
+                    f'{item["coin"]} {str(item.get("side") or "").upper()}: '
+                    f'{format_money_compact(item["totalValue"])}{size_note}{entry_note}'
                 )
 
-        if changes["closedLargePositions"]:
+        if changes.get("closedLargePositions"):
             lines.append("")
-            lines.append(f"Closed >{format_money_compact(NEW_POSITION_ALERT_MIN_VALUE)}")
+            lines.append(f"Closed large positions ({format_money_compact(NEW_POSITION_ALERT_MIN_VALUE)}+)")
             for item in changes["closedLargePositions"][:10]:
                 size_note = ""
                 if to_float(item.get("totalSize")) > 0:
@@ -3715,23 +3745,31 @@ class WalletTrackerService:
                     else:
                         close_note = f' last ~${format_price(to_float(item.get("closePrice")))}'
                 lines.append(
-                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} {format_money_compact(item["totalValue"])}{size_note}{close_note}'
+                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))} closed '
+                    f'{item["coin"]} {str(item.get("side") or "").upper()}: '
+                    f'{format_money_compact(item["totalValue"])}{size_note}{close_note}'
                 )
 
-        if changes["increasedLargePositions"]:
+        if changes.get("increasedLargePositions"):
             lines.append("")
-            lines.append(f"Added >{format_money_compact(POSITION_INCREASE_ALERT_MIN_DELTA)}")
+            lines.append(f"Large position additions ({format_money_compact(POSITION_INCREASE_ALERT_MIN_DELTA)}+)")
             for item in changes["increasedLargePositions"][:10]:
                 size_note = ""
                 if to_float(item.get("sizeIncrease")) > 0:
                     size_note = f' +{format_position_size(to_float(item.get("sizeIncrease")))}'
                 add_price_note = ""
                 if to_float(item.get("addPrice")) > 0:
-                    add_label = "recent add VWAP" if item.get("addPriceSource") == "fill" else "estimated add"
-                    add_price_note = f' {add_label} ${format_price(to_float(item.get("addPrice")))}'
+                    add_label = "add price" if item.get("addPriceSource") == "fill" else "estimated price"
+                    add_price_note = f' at {add_label} ${format_price(to_float(item.get("addPrice")))}'
                 add_value = to_float(item.get("addValue", item.get("increaseValue")))
                 lines.append(
-                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))}: {item["coin"]} {item["side"]} {format_money_compact(item["previousValue"])}->{format_money_compact(item["totalValue"])} (+{format_money_compact(add_value)}{size_note}{add_price_note})'
+                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))} added '
+                    f'{format_money_compact(add_value)} to {item["coin"]} '
+                    f'{str(item.get("side") or "").upper()}{add_price_note}'
+                )
+                lines.append(
+                    f'   Position: {format_money_compact(item.get("previousValue"))} -> '
+                    f'{format_money_compact(item.get("totalValue"))}{size_note}'
                 )
 
         return "\n".join(lines)
@@ -3748,44 +3786,43 @@ class WalletTrackerService:
     ) -> str:
         lines = [
             title,
-            f"Bias: {summary.get('overallBias', 'mixed')}",
-            f"Consensus threshold: {min_wallets} wallets",
-            f'Wallets tracked: {summary.get("walletCount", 0)}',
+            f"Market view: {str(summary.get('overallBias', 'mixed')).title()}",
+            f'Tracking: {summary.get("walletCount", 0)} wallets',
+            f"Agreement required: {min_wallets} wallets",
         ]
         if include_signals:
-            lines.append(f'Actionable signals: {summary.get("signalCount", len(summary.get("signals", [])))}')
+            lines.append(
+                f'Signals ready to act on: {summary.get("signalCount", len(summary.get("signals", [])))}'
+            )
 
         if include_signals:
             signals = summary.get("signals", [])
             lines.append("")
-            lines.append("Signals:")
+            lines.append("Signals ready to act on")
             if signals:
-                for item in signals[:10]:
+                for index, item in enumerate(signals[:10], start=1):
                     probability = to_float(item.get("probabilityScore", item.get("convictionScore")))
-                    net_note = f', net +{int(to_float(item.get("netIndependentWalletCount", item.get("netWalletCount"))))}' if "netWalletCount" in item else ""
-                    if "netWeightedWalletCount" in item:
-                        net_note += f', qnet +{to_float(item.get("netIndependentWeightedWalletCount", item.get("netWeightedWalletCount"))):.1f}'
-                    activity_bits = []
-                    if int(to_float(item.get("freshActivityWalletCount"))):
-                        activity_bits.append(f'{int(to_float(item.get("freshActivityWalletCount")))} 5m activity')
-                    if int(to_float(item.get("recentAddWalletCount"))):
-                        activity_bits.append(f'{int(to_float(item.get("recentAddWalletCount")))} adds')
-                    if int(to_float(item.get("verifiedFreshIndependentWalletCount"))):
-                        activity_bits.append(
-                            f'{int(to_float(item.get("verifiedFreshIndependentWalletCount")))} verified 15m'
-                        )
-                    activity_note = f', {"/".join(activity_bits)}' if activity_bits else ""
-                    lines.append(
-                        f'- {str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]} '
-                        f'({item["walletCount"]} wallets/{int(to_float(item.get("independentWalletCount", item["walletCount"])))} independent{net_note}, p{probability:.0f}/100{activity_note})'
+                    lines.extend(
+                        [
+                            f'{index}. {str(item.get("action", "watch")).upper()} '
+                            f'{item["coin"]} ({str(item.get("side") or "").upper()}) - '
+                            f'{probability:.0f}/100 confidence',
+                            (
+                                f'   {int(to_float(item.get("walletCount")))} wallets, '
+                                f'{int(to_float(item.get("independentWalletCount", item.get("walletCount"))))} independent | '
+                                f'Net support: +{int(to_float(item.get("netIndependentWalletCount", item.get("netWalletCount"))))} | '
+                                f'Quality-adjusted: '
+                                f'{to_float(item.get("netIndependentWeightedWalletCount", item.get("netWeightedWalletCount"))):.1f}'
+                            ),
+                        ]
                     )
             else:
-                lines.append(f'- None at {ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD:.0f}+ probability')
+                lines.append("- None right now")
 
         if include_consensus:
             consensus = summary.get("consensus", [])
             lines.append("")
-            lines.append("Consensus:")
+            lines.append("Strongest wallet agreement")
             main_consensus = [
                 item
                 for item in consensus
@@ -3798,12 +3835,18 @@ class WalletTrackerService:
 
             def append_consensus_items(items: list[dict[str, Any]]) -> None:
                 for item in items[:10]:
-                    net_note = f', net +{int(to_float(item.get("netIndependentWalletCount", item.get("netWalletCount"))))}' if "netWalletCount" in item else ""
-                    if "netWeightedWalletCount" in item:
-                        net_note += f', qnet +{to_float(item.get("netIndependentWeightedWalletCount", item.get("netWeightedWalletCount"))):.1f}'
                     lines.append(
-                        f'- {item["coin"]} {item["side"]} ({item["walletCount"]} wallets/{int(to_float(item.get("independentWalletCount", item["walletCount"])))} independent{net_note}, conviction {item.get("convictionScore", 0):.0f}/100)'
+                        f'- {item["coin"]} {str(item.get("side") or "").upper()}: '
+                        f'{int(to_float(item.get("walletCount")))} wallets '
+                        f'({int(to_float(item.get("independentWalletCount", item.get("walletCount"))))} independent) | '
+                        f'Confidence {to_float(item.get("convictionScore")):.0f}/100'
                     )
+                    if "netWalletCount" in item:
+                        lines.append(
+                            f'  Net support: +{int(to_float(item.get("netIndependentWalletCount", item.get("netWalletCount"))))} | '
+                            f'Quality-adjusted support: '
+                            f'{to_float(item.get("netIndependentWeightedWalletCount", item.get("netWeightedWalletCount"))):.1f}'
+                        )
 
             if main_consensus:
                 append_consensus_items(main_consensus)
@@ -3811,11 +3854,11 @@ class WalletTrackerService:
                 lines.append("- None")
             if commodity_consensus:
                 lines.append("")
-                lines.append("Commodities consensus:")
+                lines.append("Commodities")
                 append_consensus_items(commodity_consensus)
             if stock_consensus:
                 lines.append("")
-                lines.append("Stocks / indices consensus:")
+                lines.append("Stocks and indices")
                 append_consensus_items(stock_consensus)
 
         if include_hip3:
@@ -3831,7 +3874,7 @@ class WalletTrackerService:
                 lines.append("- None")
 
         lines.append("")
-        lines.append(f'Checked at: {summary.get("generatedAt", now_iso())}')
+        lines.append(f'Updated: {format_update_time(summary.get("generatedAt", now_iso()))}')
         return "\n".join(lines)
 
     def live_sentiment_summary(self, min_wallets: int) -> dict[str, Any]:
@@ -5565,8 +5608,11 @@ class WalletTrackerService:
                     continue
                 qnet = to_float(wallet_item.get("netWeightedWalletCount"))
                 if qnet > 0:
-                    return f", tracked {wallet_count}w qnet {qnet:.1f}"
-                return f", tracked {wallet_count}w"
+                    return (
+                        f"Tracked wallets: {wallet_count} | "
+                        f"Quality-adjusted support: {qnet:.1f}"
+                    )
+                return f"Tracked wallets: {wallet_count}"
         return ""
 
     def build_cmm_signals_message(
@@ -5578,15 +5624,16 @@ class WalletTrackerService:
     ) -> str:
         summary = cmm_summary or self.build_cmm_signal_summary()
         lines = [
-            "CMM cohort signals",
-            f'Timeframe: {summary.get("timeframe", os.environ.get("CMM_SIGNAL_POSITION_RECENCY", "7d"))}',
+            "CMM market signals",
+            f'Based on: {summary.get("timeframe", os.environ.get("CMM_SIGNAL_POSITION_RECENCY", "7d"))} positions',
             (
-                f"Watch/action/alert: {CMM_WATCH_PROBABILITY_THRESHOLD:.0f}/"
-                f"{CMM_SIGNAL_PROBABILITY_THRESHOLD:.0f}/{CMM_ALERT_PROBABILITY_THRESHOLD:.0f}"
+                f"Confidence levels: Watch {CMM_WATCH_PROBABILITY_THRESHOLD:.0f} | "
+                f"Action {CMM_SIGNAL_PROBABILITY_THRESHOLD:.0f} | "
+                f"Strong {CMM_ALERT_PROBABILITY_THRESHOLD:.0f}"
             ),
             (
-                f"Min gross cohort exposure: watch {format_money_compact(CMM_SIGNAL_MIN_TOTAL_VALUE)}, "
-                f"action {format_money_compact(CMM_ACTIONABLE_MIN_TOTAL_VALUE)}"
+                f"Minimum cohort exposure: {format_money_compact(CMM_SIGNAL_MIN_TOTAL_VALUE)} to watch | "
+                f"{format_money_compact(CMM_ACTIONABLE_MIN_TOTAL_VALUE)} to act"
             ),
         ]
         if not summary.get("enabled"):
@@ -5606,13 +5653,16 @@ class WalletTrackerService:
                 if not group_items:
                     continue
                 lines.append("")
-                lines.append(f"{group}:")
+                lines.append(group)
                 for item in group_items:
                     cohorts = "/".join(str(component.get("segment")) for component in item.get("components", [])[:3])
                     bias_pct = abs(to_float(item.get("valueBias"))) * 100
                     freshness_note = ""
                     if item.get("dataFreshness"):
-                        freshness_note = f', {item.get("dataFreshness")} {to_float(item.get("metricLagMinutes")):.0f}m'
+                        freshness_note = (
+                            f'Data: {item.get("dataFreshness")} '
+                            f'({to_float(item.get("metricLagMinutes")):.0f} min old)'
+                        )
                     tracked_note = self.cmm_tracked_confirmation_note(item, wallet_summary)
                     price_note = ""
                     if to_float(item.get("price")) > 0:
@@ -5621,23 +5671,40 @@ class WalletTrackerService:
                         )
                         coverage = to_float(item.get("entryCoveragePct"))
                         coverage_note = f' ({coverage:.0f}% size)' if 0 < coverage < 99.5 else ""
-                        price_note = f', {source} ${format_price(to_float(item.get("price")))}{coverage_note}'
+                        price_note = f'{source.title()}: ${format_price(to_float(item.get("price")))}{coverage_note}'
                     trend_note = (
-                        f'trend {to_float(item.get("trendScore")):.0f}'
+                        f'{to_float(item.get("trendScore")):.0f}/100'
                         if item.get("trendAvailable", item.get("trendScore") is not None)
-                        else "trend n/a"
+                        else "not available"
                     )
-                    lines.append(
-                        f'{index}. {str(item.get("signalTier", "watch")).upper()} '
-                        f'{str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]} '
-                        f'(p{to_float(item.get("probabilityScore")):.0f}/100, {item.get("cohortCount", 0)} cohorts, '
-                        f'bias {bias_pct:.0f}%, {trend_note}, '
-                        f'contra {to_float(item.get("contrarianScore")):.0f}, '
-                        f'gross {format_money_compact(item.get("totalValue"))}{price_note}, {cohorts}{tracked_note}{freshness_note})'
+                    lines.extend(
+                        [
+                            f'{index}. {str(item.get("signalTier", "watch")).upper()} '
+                            f'{str(item.get("action", "watch")).upper()} {item["coin"]} '
+                            f'({str(item.get("side") or "").upper()}) - '
+                            f'{to_float(item.get("probabilityScore")):.0f}/100 confidence',
+                            (
+                                f'   Cohort agreement: {bias_pct:.0f}% toward '
+                                f'{str(item.get("side") or "").upper()} | '
+                                f'{int(to_float(item.get("cohortCount")))} cohorts | '
+                                f'Exposure: {format_money_compact(item.get("totalValue"))}'
+                            ),
+                            (
+                                f'   Trend confirmation: {trend_note} | '
+                                f'Contrarian support: {to_float(item.get("contrarianScore")):.0f}/100'
+                            ),
+                            f'   Cohorts: {cohorts}',
+                        ]
                     )
+                    if price_note:
+                        lines.append(f'   {price_note}')
+                    if tracked_note:
+                        lines.append(f'   {tracked_note}')
+                    if freshness_note:
+                        lines.append(f'   {freshness_note}')
                     index += 1
         elif summary.get("enabled"):
-            lines.append("- No CMM watch candidates above threshold")
+            lines.append("- No CMM signals currently meet the Watch level")
             below_threshold = summary.get("belowThresholdSignals", [])
             if below_threshold:
                 lines.append("")
@@ -5650,17 +5717,19 @@ class WalletTrackerService:
                         )
                         coverage = to_float(item.get("entryCoveragePct"))
                         coverage_note = f' ({coverage:.0f}% size)' if 0 < coverage < 99.5 else ""
-                        price_note = f', {source} ${format_price(to_float(item.get("price")))}{coverage_note}'
+                        price_note = f' | {source}: ${format_price(to_float(item.get("price")))}{coverage_note}'
                     trend_note = (
-                        f'trend {to_float(item.get("trendScore")):.0f}'
+                        f'trend {to_float(item.get("trendScore")):.0f}/100'
                         if item.get("trendAvailable", item.get("trendScore") is not None)
-                        else "trend n/a"
+                        else "trend unavailable"
                     )
                     lines.append(
-                        f'- {str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]} '
-                        f'p{to_float(item.get("probabilityScore")):.0f}, '
-                        f'bias {abs(to_float(item.get("valueBias"))) * 100:.0f}%, '
-                        f'{trend_note}, gross {format_money_compact(item.get("totalValue"))}{price_note}'
+                        f'- {str(item.get("action", "watch")).upper()} {item["coin"]} '
+                        f'({str(item.get("side") or "").upper()}): '
+                        f'{to_float(item.get("probabilityScore")):.0f}/100 confidence | '
+                        f'{abs(to_float(item.get("valueBias"))) * 100:.0f}% cohort agreement | '
+                        f'{trend_note} | {format_money_compact(item.get("totalValue"))} exposure'
+                        f'{price_note}'
                     )
             diagnostics = summary.get("diagnostics", {})
             if diagnostics:
@@ -5678,7 +5747,7 @@ class WalletTrackerService:
         if summary.get("entryEnrichmentError"):
             lines.append(f'Entry enrichment unavailable: {summary.get("entryEnrichmentError")}')
         lines.append("")
-        lines.append(f'Checked at: {summary.get("generatedAt", now_iso())}')
+        lines.append(f'Updated: {format_update_time(summary.get("generatedAt", now_iso()))}')
         return "\n".join(lines)
 
     def build_signals_message(
@@ -5689,55 +5758,38 @@ class WalletTrackerService:
         cmm_summary: dict[str, Any] | None = None,
     ) -> str:
         signals = summary.get("signals", [])
-        lines = [title, f'Threshold: {ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD:.0f}/100 probability']
+        lines = [title, f'Minimum confidence: {ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD:.0f}/100']
         if signals:
             for index, item in enumerate(signals[:20], start=1):
                 probability = to_float(item.get("probabilityScore", item.get("convictionScore")))
-                net_note = f', net +{int(to_float(item.get("netWalletCount")))}' if "netWalletCount" in item else ""
-                if "netWeightedWalletCount" in item:
-                    net_note += f', qnet +{to_float(item.get("netWeightedWalletCount")):.1f}'
-                activity_bits = []
-                if int(to_float(item.get("freshActivityWalletCount"))):
-                    activity_bits.append(f'{int(to_float(item.get("freshActivityWalletCount")))} 5m activity')
-                if int(to_float(item.get("recentAddWalletCount"))):
-                    activity_bits.append(f'{int(to_float(item.get("recentAddWalletCount")))} adds')
-                if int(to_float(item.get("verifiedFreshIndependentWalletCount"))):
-                    activity_bits.append(
-                        f'{int(to_float(item.get("verifiedFreshIndependentWalletCount")))} verified 15m'
-                    )
-                activity_note = f', {"/".join(activity_bits)}' if activity_bits else ""
-                cmm_note = ""
-                if item.get("cmmConfirmation") == "confirmed":
-                    cmm_note = f', CMM p{to_float(item.get("cmmProbabilityScore")):.0f}'
-                elif item.get("cmmConfirmation") == "conflict":
-                    cmm_note = f', CMM conflict p{to_float(item.get("cmmConflictProbabilityScore")):.0f}'
-                elif item.get("cmmConfirmation") == "unconfirmed":
-                    cmm_note = ", CMM unconfirmed"
-                moni_note = ""
-                if item.get("moniSocialTrend"):
-                    moni_note = (
-                        f', social {item.get("moniSocialTrend")}'
-                        f' {to_float(item.get("moniSocialPaceRatio")):.2f}x'
-                    )
-                price_note = ""
-                if to_float(item.get("freshAddVwap")) > 0:
-                    price_note = (
-                        f', fresh VWAP ${format_price(to_float(item.get("freshAddVwap")))} '
-                        f'live ~${format_price(to_float(item.get("markPrice")))} '
-                        f'dist {to_float(item.get("entryDistancePct")):+.2f}%'
-                    )
-                fresh_note = ""
-                if "netFreshIndependentWalletCount" in item:
-                    fresh_note = (
-                        f', fresh +{int(to_float(item.get("netFreshIndependentWalletCount")))}'
-                        f'/-{int(to_float(item.get("oppositeVerifiedFreshIndependentWalletCount")))}'
-                    )
                 lines.append(
-                    f'{index}. {str(item.get("status") or item.get("action", "watch")).upper()} '
-                    f'{item["coin"]} {item["side"]} '
-                    f'({item["walletCount"]} wallets{net_note}{fresh_note}, '
-                    f'p{probability:.0f}/100{activity_note}{price_note}{cmm_note}{moni_note})'
+                    f'{index}. {str(item.get("action", "watch")).upper()} '
+                    f'{item["coin"]} ({str(item.get("side") or "").upper()}) - '
+                    f'{probability:.0f}/100 confidence'
                 )
+                lines.append(
+                    f'   Support: {int(to_float(item.get("walletCount")))} wallets | '
+                    f'Net: +{int(to_float(item.get("netIndependentWalletCount", item.get("netWalletCount"))))} | '
+                    f'Quality-adjusted: '
+                    f'{to_float(item.get("netIndependentWeightedWalletCount", item.get("netWeightedWalletCount"))):.1f}'
+                )
+                if to_float(item.get("freshAddVwap")) > 0:
+                    lines.append(
+                        f'   Wallet add price: ${format_price(to_float(item.get("freshAddVwap")))} | '
+                        f'Current: ~${format_price(to_float(item.get("markPrice")))} '
+                        f'({to_float(item.get("entryDistancePct")):+.2f}%)'
+                    )
+                if item.get("cmmConfirmation") == "confirmed":
+                    lines.append(
+                        f'   CMM confirms: {to_float(item.get("cmmProbabilityScore")):.0f}/100'
+                    )
+                elif item.get("cmmConfirmation") == "unconfirmed":
+                    lines.append("   CMM: no confirmation")
+                if item.get("moniSocialTrend"):
+                    lines.append(
+                        f'   Social activity: {item.get("moniSocialTrend")} '
+                        f'({to_float(item.get("moniSocialPaceRatio")):.2f}x normal pace)'
+                    )
         else:
             lines.append("- No actionable signals right now")
         candidates = [
@@ -5747,25 +5799,32 @@ class WalletTrackerService:
         ]
         if candidates:
             lines.append("")
-            lines.append("Fresh 15m candidates")
+            lines.append("Fresh candidates from the last 15 minutes")
             for item in candidates[:10]:
-                cmm_note = ""
-                if item.get("cmmConfirmation") == "confirmed":
-                    cmm_note = f', CMM p{to_float(item.get("cmmProbabilityScore")):.0f}'
+                top_count = int(to_float(item.get("independentTopWalletCount")))
+                top_verb = "is" if top_count == 1 else "are"
                 lines.append(
                     f'- {str(item.get("candidateTier") or "watch").upper()} '
                     f'{str(item.get("action") or "watch").upper()} '
-                    f'{item.get("coin", "Unknown")} {item.get("side", "")}: '
-                    f'{int(to_float(item.get("independentWalletCount")))} independent, '
-                    f'{int(to_float(item.get("independentTopWalletCount")))} top-10, '
-                    f'{format_money_compact(item.get("freshNotional"))} fresh, '
-                    f'VWAP ${format_price(to_float(item.get("freshAddVwap")))}{cmm_note}'
+                    f'{item.get("coin", "Unknown")} ({str(item.get("side") or "").upper()})'
                 )
+                lines.append(
+                    f'  {int(to_float(item.get("independentWalletCount")))} independent wallets added '
+                    f'{format_money_compact(item.get("freshNotional"))}; '
+                    f'{top_count} {top_verb} top-10.'
+                )
+                lines.append(
+                    f'  Wallet add price: ${format_price(to_float(item.get("freshAddVwap")))}'
+                )
+                if item.get("cmmConfirmation") == "confirmed":
+                    lines.append(
+                        f'  CMM confirms: {to_float(item.get("cmmProbabilityScore")):.0f}/100'
+                    )
         if cmm_summary is not None:
             lines.append("")
             lines.append(self.build_cmm_signals_message(cmm_summary, wallet_summary=summary))
         lines.append("")
-        lines.append(f'Checked at: {summary.get("generatedAt", now_iso())}')
+        lines.append(f'Updated: {format_update_time(summary.get("generatedAt", now_iso()))}')
         return "\n".join(lines)
 
     def build_positions_message(self, dashboard: dict[str, Any], *, title: str = "Open positions now") -> str:
@@ -5791,12 +5850,12 @@ class WalletTrackerService:
         else:
             sections = [
                 (
-                    f"By wallet count ({MIN_POSITION_MESSAGE_WALLETS}+ wallets, "
-                    f"{format_money_compact(MIN_POSITION_MESSAGE_VALUE)}+):",
+                    f"Crypto ({MIN_POSITION_MESSAGE_WALLETS}+ wallets, "
+                    f"{format_money_compact(MIN_POSITION_MESSAGE_VALUE)}+ combined)",
                     position_groups,
                 ),
-                ("Commodities:", commodity_groups),
-                ("Stocks / indices:", stock_groups),
+                ("Commodities", commodity_groups),
+                ("Stocks and indices", stock_groups),
             ]
             for heading, groups in sections:
                 lines.append("")
@@ -5805,26 +5864,29 @@ class WalletTrackerService:
                     for item in groups[:50]:
                         entry_note = ""
                         if to_float(item.get("entryPx")) > 0:
-                            entry_label = "size-w entry" if item.get("entryType") == "size_weighted" else "avg entry"
-                            entry_note = f', {entry_label} ${format_price(to_float(item.get("entryPx")))}'
+                            entry_label = "weighted entry" if item.get("entryType") == "size_weighted" else "average entry"
+                            entry_note = f' | {entry_label}: ${format_price(to_float(item.get("entryPx")))}'
                         recent_add_note = ""
                         if to_float(item.get("recentAddPx")) > 0:
                             recent_add_note = (
-                                f', recent add VWAP ${format_price(to_float(item.get("recentAddPx")))} '
-                                f'({int(to_float(item.get("recentAddWalletCount")))}w/7d)'
+                                f' | 7d add VWAP: ${format_price(to_float(item.get("recentAddPx")))} '
+                                f'({int(to_float(item.get("recentAddWalletCount")))} wallets)'
                             )
-                        value_note = f', {format_money_thousands(to_float(item.get("totalValue")))}'
                         lines.append(
-                            f'- {item["coin"]} {item["side"]} '
-                            f'({item["walletCount"]} wallets, {item["positionCount"]} positions{value_note}{entry_note}{recent_add_note})'
+                            f'- {item["coin"]} {str(item.get("side") or "").upper()}: '
+                            f'{item["walletCount"]} wallets, {item["positionCount"]} positions | '
+                            f'{format_money_compact(to_float(item.get("totalValue")))} open'
+                            f'{entry_note}{recent_add_note}'
                         )
                 else:
                     lines.append("- None")
 
         lines.append("")
-        lines.append(f"Position groups: {len(position_groups) + len(commodity_groups) + len(stock_groups)}")
-        lines.append(f"Open positions: {total_positions}")
-        lines.append(f'Checked at: {dashboard.get("generatedAt", now_iso())}')
+        lines.append(
+            f"Summary: {len(position_groups) + len(commodity_groups) + len(stock_groups)} groups, "
+            f"{total_positions} positions"
+        )
+        lines.append(f'Updated: {format_update_time(dashboard.get("generatedAt", now_iso()))}')
         return "\n".join(lines)
 
     def build_wallet_rankings_message(self, dashboard: dict[str, Any], *, limit: int = 10) -> str:
@@ -5978,7 +6040,7 @@ class WalletTrackerService:
 
         entry_note = ""
         if total_size > 0:
-            entry_note = f", size-w entry ${format_price(entry_value / total_size)}"
+            entry_note = f", weighted entry ${format_price(entry_value / total_size)}"
         elif entry_count > 0:
             entry_note = f", avg entry ${format_price(entry_sum / entry_count)}"
 
