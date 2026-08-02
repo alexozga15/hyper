@@ -1043,6 +1043,183 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(summary["consensus"][0]["verifiedFreshIndependentWalletCount"], 2)
         self.assertEqual(summary["signals"], [])
 
+    def test_candidate_uses_aggregate_500k_flow_and_one_top_wallet_is_watch(self) -> None:
+        now_ms = 1_700_000_000_000
+        addresses = [f"0x{index:040x}" for index in range(1, 4)]
+        snapshots = []
+        for index, address in enumerate(addresses):
+            value = 200_000.0 + index * 10_000.0
+            size = value / 50_000.0
+            snapshots.append(
+                {
+                    "address": address,
+                    "positions": [
+                        {"coin": "BTC", "side": "Long", "positionValue": value, "size": size}
+                    ],
+                    "recentFills": [
+                        {
+                            "coin": "BTC",
+                            "direction": "Increase Long",
+                            "price": 50_000.0,
+                            "size": size,
+                            "time": now_ms - (index + 1) * 60_000,
+                        }
+                    ],
+                }
+            )
+
+        with patch("server.current_time_ms", return_value=now_ms):
+            summary = self.service.build_sentiment_summary(
+                snapshots,
+                min_wallets=4,
+                top_wallet_addresses={addresses[0]},
+            )
+
+        self.assertEqual(summary["consensus"], [])
+        self.assertEqual(summary["candidateSignalCount"], 1)
+        candidate = summary["candidateSignals"][0]
+        self.assertEqual(candidate["candidateTier"], "watch")
+        self.assertEqual(candidate["independentWalletCount"], 3)
+        self.assertEqual(candidate["independentTopWalletCount"], 1)
+        self.assertEqual(candidate["freshNotional"], 630_000.0)
+        self.assertEqual(candidate["freshAddVwap"], 50_000.0)
+
+    def test_candidate_two_top_wallets_or_cmm_promotes_actionable(self) -> None:
+        base = {
+            "coin": "BTC",
+            "side": "long",
+            "candidateTier": "watch",
+            "candidateReason": "one_top_wallet",
+            "independentTopWalletCount": 1,
+            "freshNotional": 600_000.0,
+        }
+        cmm_promoted = self.service.apply_cmm_confirmation_to_summary(
+            {"signals": [], "candidateSignals": [base]},
+            {
+                "enabled": True,
+                "generatedAt": "2026-08-02T00:00:00Z",
+                "signals": [
+                    {"coin": "BTC", "side": "long", "probabilityScore": 70.0, "cohortCount": 3}
+                ],
+            },
+        )["candidateSignals"][0]
+        top_promoted = self.service.apply_cmm_confirmation_to_summary(
+            {
+                "signals": [],
+                "candidateSignals": [
+                    {
+                        **base,
+                        "candidateTier": "actionable",
+                        "candidateReason": "two_top_wallets",
+                        "independentTopWalletCount": 2,
+                    }
+                ],
+            },
+            {"enabled": True, "signals": []},
+        )["candidateSignals"][0]
+
+        self.assertEqual(cmm_promoted["candidateTier"], "actionable")
+        self.assertEqual(cmm_promoted["candidateReason"], "cmm_confirmed")
+        self.assertEqual(cmm_promoted["cmmSnapshotGeneratedAt"], "2026-08-02T00:00:00Z")
+        self.assertEqual(top_promoted["candidateTier"], "actionable")
+        self.assertEqual(top_promoted["candidateReason"], "two_top_wallets")
+
+    def test_candidate_opposite_fresh_flow_is_blocked(self) -> None:
+        now_ms = 1_700_000_000_000
+        snapshots = []
+        for index in range(1, 4):
+            snapshots.append(
+                {
+                    "address": f"0x{index:040x}",
+                    "positions": [
+                        {"coin": "ETH", "side": "Long", "positionValue": 200_000.0, "size": 100.0}
+                    ],
+                    "recentFills": [
+                        {
+                            "coin": "ETH",
+                            "direction": "Increase Long",
+                            "price": 2_000.0,
+                            "size": 100.0,
+                            "time": now_ms - 60_000,
+                        }
+                    ],
+                }
+            )
+        snapshots.append(
+            {
+                "address": "0x9999999999999999999999999999999999999999",
+                "positions": [
+                    {"coin": "ETH", "side": "Short", "positionValue": 100_000.0, "size": 50.0}
+                ],
+                "recentFills": [
+                    {
+                        "coin": "ETH",
+                        "direction": "Increase Short",
+                        "price": 2_000.0,
+                        "size": 50.0,
+                        "time": now_ms - 60_000,
+                    }
+                ],
+            }
+        )
+
+        with patch("server.current_time_ms", return_value=now_ms):
+            summary = self.service.build_sentiment_summary(
+                snapshots,
+                min_wallets=4,
+                top_wallet_addresses={snapshots[0]["address"], snapshots[1]["address"]},
+            )
+
+        candidate = summary["candidateSignals"][0]
+        self.assertEqual(candidate["candidateTier"], "blocked")
+        self.assertEqual(candidate["candidateReason"], "opposite_fresh_flow")
+        self.assertEqual(candidate["oppositeFreshIndependentWalletCount"], 1)
+
+    def test_candidate_outcomes_snapshot_evidence_and_measure_4h_net_return(self) -> None:
+        started_at = 1_700_000_000_000
+        candidate = {
+            "coin": "BTC",
+            "marketCoin": "BTC",
+            "side": "long",
+            "status": "NEW",
+            "firstSeenAt": started_at,
+            "markPrice": 100.0,
+            "freshAddVwap": 99.0,
+            "freshNotional": 600_000.0,
+            "freshWalletAddresses": ["0x1", "0x2", "0x3"],
+            "topWalletAddresses": ["0x1"],
+            "independentWalletCount": 3,
+            "independentTopWalletCount": 1,
+            "candidateTier": "watch",
+            "topConvictionMonth": "2026-08",
+            "cmmConfirmation": "unconfirmed",
+            "cmmProbabilityScore": 0.0,
+            "cmmSnapshotGeneratedAt": "2026-08-02T00:00:00Z",
+        }
+        records = self.service.update_candidate_signal_outcomes(
+            {},
+            {
+                "candidateSignals": [candidate],
+                "positionMarks": [{"coin": "BTC", "side": "long", "markPrice": 100.0}],
+            },
+            now_ms=started_at,
+        )
+        measured = self.service.update_candidate_signal_outcomes(
+            records,
+            {
+                "candidateSignals": [],
+                "positionMarks": [{"coin": "BTC", "side": "long", "markPrice": 110.0}],
+            },
+            now_ms=started_at + 4 * 60 * 60 * 1000,
+        )
+
+        record = next(iter(measured.values()))
+        self.assertEqual(record["topConvictionMonth"], "2026-08")
+        self.assertEqual(record["cmmSnapshotGeneratedAt"], "2026-08-02T00:00:00Z")
+        self.assertEqual(record["outcomes"]["4h"]["grossReturnPct"], 10.0)
+        self.assertEqual(record["outcomes"]["4h"]["netReturnPct"], 9.8)
+        self.assertNotIn("12h", record["outcomes"])
+
     def test_build_sentiment_summary_requires_recent_activity_for_signals(self) -> None:
         snapshots = [
             {
@@ -1424,6 +1601,30 @@ class AlertSummaryTests(unittest.TestCase):
         }
         message = self.service.build_signals_message(summary)
         self.assertIn("social rising 2.10x", message)
+
+    def test_build_signals_message_shows_watch_candidate_on_explicit_command(self) -> None:
+        summary = {
+            "generatedAt": "2026-08-02T00:00:00Z",
+            "signals": [],
+            "candidateSignals": [
+                {
+                    "coin": "ETH",
+                    "side": "long",
+                    "action": "buy",
+                    "candidateTier": "watch",
+                    "independentWalletCount": 3,
+                    "independentTopWalletCount": 1,
+                    "freshNotional": 650_000.0,
+                    "freshAddVwap": 1_850.0,
+                }
+            ],
+        }
+
+        message = self.service.build_signals_message(summary)
+
+        self.assertIn("Fresh 15m candidates", message)
+        self.assertIn("WATCH BUY ETH long", message)
+        self.assertIn("$650K fresh", message)
 
     def test_build_cmm_signal_summary_scores_cohort_bias(self) -> None:
         class FakeCmmClient:

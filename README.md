@@ -16,7 +16,13 @@ Wallet alerts require four independent wallets in the current position consensus
 adding at least $500K each in the same direction during a 15-minute window. Opposite fresh flow from two wallets or a
 70+ CoinMarketMan signal in the opposite direction vetoes the alert. Signals use the recent-add VWAP, expire after two
 hours without another add, and move through `NEW`, `CONFIRMED`, and `INVALIDATED` states. Alert outcomes are retained
-for 30 days at 15-minute, 1-hour, 4-hour, and 24-hour horizons.
+for 30 days at 15-minute, 1-hour, 4-hour, 12-hour, and 24-hour horizons.
+
+A separate candidate layer watches for three independent wallets adding the same side within 15 minutes with at
+least $500K of aggregate fresh notional and no opposite fresh wallet. One current top-10 wallet makes it a `WATCH`;
+two top-10 wallets or a same-direction CMM score of 70+ promotes it to `ACTIONABLE`. Only actionable candidates send
+automatic Telegram alerts. Every candidate, including shadow and blocked cases, snapshots its wallets, top-10 cohort,
+CMM context, and signal-time market price for 180-day forward evaluation at 4-hour, 12-hour, and 24-hour horizons.
 
 ## Run
 

@@ -53,6 +53,7 @@ SIGNAL_OUTCOME_HORIZONS_MS = {
     "15m": 15 * 60 * 1000,
     "1h": 60 * 60 * 1000,
     "4h": 4 * 60 * 60 * 1000,
+    "12h": 12 * 60 * 60 * 1000,
     "24h": 24 * 60 * 60 * 1000,
 }
 ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD = 70.0
@@ -67,6 +68,18 @@ ACTIONABLE_SIGNAL_MIN_FRESH_NET_WALLETS = 3
 ACTIONABLE_SIGNAL_MAX_OPPOSITE_FRESH_WALLETS = 1
 ACTIONABLE_SIGNAL_MIN_TOP_WALLETS = 2
 WALLET_SIGNAL_ACTIVITY_WINDOW_MS = 15 * 60 * 1000
+CANDIDATE_SIGNAL_MIN_INDEPENDENT_WALLETS = 3
+CANDIDATE_SIGNAL_MIN_FRESH_NOTIONAL = 500_000
+CANDIDATE_SIGNAL_MIN_WATCH_TOP_WALLETS = 1
+CANDIDATE_SIGNAL_MIN_ACTION_TOP_WALLETS = 2
+CANDIDATE_SIGNAL_MAX_OPPOSITE_FRESH_WALLETS = 0
+CANDIDATE_SIGNAL_OUTCOME_RETENTION_MS = 180 * 24 * 60 * 60 * 1000
+CANDIDATE_SIGNAL_OUTCOME_HORIZONS_MS = {
+    "4h": 4 * 60 * 60 * 1000,
+    "12h": 12 * 60 * 60 * 1000,
+    "24h": 24 * 60 * 60 * 1000,
+}
+CANDIDATE_SIGNAL_ROUND_TRIP_COST_PCT = 0.20
 WALLET_SIGNAL_MAX_ENTRY_DISTANCE_PCT = 4.0
 WALLET_SIGNAL_MAJOR_ASSET_MAX_ENTRY_DISTANCE_PCT = 1.5
 WALLET_SIGNAL_HIGH_BETA_MAX_ENTRY_DISTANCE_PCT = 2.5
@@ -1996,6 +2009,11 @@ class WalletTrackerService:
             position_lifecycle=position_lifecycle or state.get("walletPositionLifecycle", {}),
         )
         summary["topConvictionWallets"] = cohort
+        for candidate in summary.get("candidateSignals", []):
+            if not isinstance(candidate, dict):
+                continue
+            candidate["topConvictionMonth"] = cohort.get("month", "")
+            candidate["topConvictionUpdatedAt"] = cohort.get("updatedAt", "")
         if persist and isinstance(state, dict) and state.get("topConvictionWallets") != cohort:
             save_json_file(
                 self.alerts_path,
@@ -2455,6 +2473,7 @@ class WalletTrackerService:
                     key,
                     {
                         "coin": coin,
+                        "marketCoin": str(position.get("coin") or coin),
                         "side": side,
                         "walletCount": 0,
                         "totalValue": 0.0,
@@ -2471,6 +2490,13 @@ class WalletTrackerService:
                         "freshAddValue": 0.0,
                         "freshAddSize": 0.0,
                         "freshAddLatestTime": 0,
+                        "candidateFreshWalletAddresses": set(),
+                        "candidateFreshWalletGroups": set(),
+                        "candidateFreshTopWalletAddresses": set(),
+                        "candidateFreshTopWalletGroups": set(),
+                        "candidateFreshAddValue": 0.0,
+                        "candidateFreshAddSize": 0.0,
+                        "candidateFreshAddLatestTime": 0,
                         "topWalletAddresses": set(),
                         "topWalletGroups": set(),
                         "fillQualityUnknownWalletAddresses": set(),
@@ -2516,6 +2542,22 @@ class WalletTrackerService:
                         now_ms=now_ms,
                         window_ms=WALLET_SIGNAL_ACTIVITY_WINDOW_MS,
                     )
+                    if (
+                        self.wallet_fill_data_reliable(snapshot)
+                        and to_float(fresh_add.get("value")) > 0
+                        and to_float(fresh_add.get("size")) > 0
+                    ):
+                        bucket["candidateFreshWalletAddresses"].add(address)
+                        bucket["candidateFreshWalletGroups"].add(correlation_group)
+                        if address.lower() in active_top_wallet_addresses:
+                            bucket["candidateFreshTopWalletAddresses"].add(address)
+                            bucket["candidateFreshTopWalletGroups"].add(correlation_group)
+                        bucket["candidateFreshAddValue"] += to_float(fresh_add.get("value"))
+                        bucket["candidateFreshAddSize"] += to_float(fresh_add.get("size"))
+                        bucket["candidateFreshAddLatestTime"] = max(
+                            int(bucket["candidateFreshAddLatestTime"]),
+                            int(to_float(fresh_add.get("latestTime"))),
+                        )
                     if (
                         self.wallet_fill_data_reliable(snapshot)
                         and to_float(fresh_add.get("value")) >= FRESH_WALLET_FLOW_MIN_VALUE
@@ -2581,6 +2623,7 @@ class WalletTrackerService:
         coin_side_independent_counts: dict[str, dict[str, int]] = {}
         coin_side_independent_weights: dict[str, dict[str, float]] = {}
         coin_side_fresh_independent_counts: dict[str, dict[str, int]] = {}
+        coin_side_candidate_fresh_groups: dict[str, dict[str, set[str]]] = {}
         for bucket in aggregate.values():
             side_counts = coin_side_counts.setdefault(str(bucket["coin"]), {"long": 0.0, "short": 0.0})
             side_counts[str(bucket["side"])] = to_float(bucket["weightedWalletCount"])
@@ -2594,6 +2637,10 @@ class WalletTrackerService:
                 str(bucket["coin"]), {"long": 0, "short": 0}
             )
             fresh_independent_counts[str(bucket["side"])] = len(bucket["verifiedFreshWalletGroups"])
+            candidate_fresh_groups = coin_side_candidate_fresh_groups.setdefault(
+                str(bucket["coin"]), {"long": set(), "short": set()}
+            )
+            candidate_fresh_groups[str(bucket["side"])] = set(bucket["candidateFreshWalletGroups"])
         max_net_weighted_wallet_count = 0.0
         for item in consensus:
             side = str(item["side"])
@@ -2655,6 +2702,84 @@ class WalletTrackerService:
                 item["side"],
             ),
         )
+        position_marks: list[dict[str, Any]] = []
+        candidate_signals: list[dict[str, Any]] = []
+        for bucket in aggregate.values():
+            total_size = to_float(bucket["totalSize"])
+            mark_price = to_float(bucket["totalValue"]) / total_size if total_size > 0 else 0.0
+            position_marks.append(
+                {
+                    "coin": bucket["coin"],
+                    "marketCoin": bucket["marketCoin"],
+                    "side": bucket["side"],
+                    "markPrice": round(mark_price, 8),
+                }
+            )
+            fresh_groups = set(bucket["candidateFreshWalletGroups"])
+            fresh_notional = to_float(bucket["candidateFreshAddValue"])
+            if (
+                len(fresh_groups) < CANDIDATE_SIGNAL_MIN_INDEPENDENT_WALLETS
+                or fresh_notional < CANDIDATE_SIGNAL_MIN_FRESH_NOTIONAL
+            ):
+                continue
+            side = str(bucket["side"])
+            opposite_side = "short" if side == "long" else "long"
+            opposite_groups = coin_side_candidate_fresh_groups.get(str(bucket["coin"]), {}).get(
+                opposite_side, set()
+            )
+            top_groups = set(bucket["candidateFreshTopWalletGroups"])
+            if len(opposite_groups) > CANDIDATE_SIGNAL_MAX_OPPOSITE_FRESH_WALLETS:
+                tier = "blocked"
+                reason = "opposite_fresh_flow"
+            elif len(top_groups) >= CANDIDATE_SIGNAL_MIN_ACTION_TOP_WALLETS:
+                tier = "actionable"
+                reason = "two_top_wallets"
+            elif len(top_groups) >= CANDIDATE_SIGNAL_MIN_WATCH_TOP_WALLETS:
+                tier = "watch"
+                reason = "one_top_wallet"
+            else:
+                tier = "shadow"
+                reason = "no_top_wallet"
+            fresh_size = to_float(bucket["candidateFreshAddSize"])
+            fresh_vwap = fresh_notional / fresh_size if fresh_size > 0 else 0.0
+            candidate_signals.append(
+                {
+                    "coin": bucket["coin"],
+                    "marketCoin": bucket["marketCoin"],
+                    "side": side,
+                    "action": signal_action_from_side(side),
+                    "candidateTier": tier,
+                    "candidateReason": reason,
+                    "walletCount": len(bucket["candidateFreshWalletAddresses"]),
+                    "independentWalletCount": len(fresh_groups),
+                    "oppositeFreshIndependentWalletCount": len(opposite_groups),
+                    "independentTopWalletCount": len(top_groups),
+                    "freshWalletAddresses": sorted(bucket["candidateFreshWalletAddresses"]),
+                    "topWalletAddresses": sorted(bucket["candidateFreshTopWalletAddresses"]),
+                    "freshNotional": round(fresh_notional, 2),
+                    "freshAddVwap": round(fresh_vwap, 8),
+                    "markPrice": round(mark_price, 8),
+                    "entryDistancePct": round(((mark_price / fresh_vwap) - 1.0) * 100.0, 3)
+                    if fresh_vwap > 0 and mark_price > 0
+                    else 0.0,
+                    "freshAddLatestTime": int(bucket["candidateFreshAddLatestTime"]),
+                    "wallets": [
+                        wallet
+                        for wallet in bucket["wallets"]
+                        if str(wallet.get("address") or "") in bucket["candidateFreshWalletAddresses"]
+                    ],
+                }
+            )
+        candidate_signals.sort(
+            key=lambda item: (
+                {"actionable": 0, "watch": 1, "shadow": 2, "blocked": 3}.get(
+                    str(item.get("candidateTier")), 4
+                ),
+                -int(to_float(item.get("independentTopWalletCount"))),
+                -to_float(item.get("freshNotional")),
+                str(item.get("coin")),
+            )
+        )
         hip3_consensus = [item for item in consensus if str(item.get("coin", "")).startswith("@")]
         signals = self.build_high_conviction_signals(consensus)
 
@@ -2673,6 +2798,9 @@ class WalletTrackerService:
             "hip3Consensus": hip3_consensus,
             "signals": signals,
             "signalCount": len(signals),
+            "candidateSignals": candidate_signals,
+            "candidateSignalCount": len(candidate_signals),
+            "positionMarks": position_marks,
             "longExposure": round(total_long, 2),
             "shortExposure": round(total_short, 2),
             "longWalletCount": long_wallet_count,
@@ -3020,6 +3148,7 @@ class WalletTrackerService:
             "addedSignals": [],
             "removedSignals": [],
             "changedSignals": [],
+            "addedCandidateSignals": [],
         }
 
     def filter_counted_large_positions(self, positions: dict[str, Any]) -> dict[str, Any]:
@@ -3101,6 +3230,15 @@ class WalletTrackerService:
             f'p{probability_bucket}:v{vwap:.8g}:{fresh_signature}'
         )
 
+    def candidate_signal_event_key(self, item: dict[str, Any]) -> str:
+        fresh_signature = ",".join(
+            sorted(str(address).lower() for address in item.get("freshWalletAddresses", []))
+        )
+        return (
+            f'candidate:actionable:{item.get("coin", "Unknown")}:{item.get("side", "")}:'
+            f'{int(to_float(item.get("firstSeenAt")))}:{fresh_signature}'
+        )
+
     def cmm_signal_event_key(self, event: str, item: dict[str, Any]) -> str:
         probability_bucket = int(to_float(item.get("probabilityScore")) // 5 * 5)
         return f'cmm-signal:{event}:{item.get("coin", "Unknown")}:{item.get("side", "")}:p{probability_bucket}'
@@ -3110,6 +3248,10 @@ class WalletTrackerService:
         for event, field in (("added", "addedSignals"), ("changed", "changedSignals")):
             keys.extend(self.signal_event_key(event, item) for item in changes.get(field, []))
         keys.extend(self.signal_event_key("invalidated", item) for item in changes.get("removedSignals", []))
+        keys.extend(
+            self.candidate_signal_event_key(item)
+            for item in changes.get("addedCandidateSignals", [])
+        )
         for event, field in (("added", "addedCmmSignals"), ("changed", "changedCmmSignals")):
             keys.extend(self.cmm_signal_event_key(event, item) for item in changes.get(field, []))
         keys.extend(self.clustered_open_event_key(item) for item in changes.get("clusteredOpenPositions", []))
@@ -3163,6 +3305,15 @@ class WalletTrackerService:
                 else:
                     kept.append(item)
             filtered[field] = kept
+
+        kept_candidates = []
+        for item in changes.get("addedCandidateSignals", []):
+            key = self.candidate_signal_event_key(item)
+            if is_suppressed(key):
+                suppressed.append(key)
+            else:
+                kept_candidates.append(item)
+        filtered["addedCandidateSignals"] = kept_candidates
 
         for event, field in (("added", "addedCmmSignals"), ("changed", "changedCmmSignals")):
             kept = []
@@ -3300,6 +3451,50 @@ class WalletTrackerService:
             "changedSignals": sorted(changed, key=lambda item: (abs(item["probabilityDelta"]), item["toWalletCount"]), reverse=True),
         }
 
+    def summarize_candidate_signal_changes(
+        self,
+        previous: dict[str, Any],
+        current: dict[str, Any],
+        *,
+        track_hip3: bool,
+    ) -> dict[str, list[dict[str, Any]]]:
+        previous_actionable = {
+            self.signal_key(item): item
+            for item in self.filter_signals_for_alerts(
+                [
+                    item
+                    for item in previous.get("candidateSignals", [])
+                    if isinstance(item, dict) and item.get("candidateTier") == "actionable"
+                ],
+                track_hip3,
+            )
+        }
+        current_actionable = {
+            self.signal_key(item): item
+            for item in self.filter_signals_for_alerts(
+                [
+                    item
+                    for item in current.get("candidateSignals", [])
+                    if isinstance(item, dict) and item.get("candidateTier") == "actionable"
+                ],
+                track_hip3,
+            )
+        }
+        added = [
+            current_actionable[key]
+            for key in current_actionable.keys() - previous_actionable.keys()
+        ]
+        return {
+            "addedCandidateSignals": sorted(
+                added,
+                key=lambda item: (
+                    int(to_float(item.get("independentTopWalletCount"))),
+                    to_float(item.get("freshNotional")),
+                ),
+                reverse=True,
+            )
+        }
+
     def summarize_changes(self, previous: dict[str, Any], current: dict[str, Any], track_hip3: bool) -> dict[str, Any]:
         previous_consensus = {
             f'{item["coin"]}:{item["side"]}': item for item in previous.get("consensus", [])
@@ -3346,6 +3541,11 @@ class WalletTrackerService:
             hip3_removed = [previous_hip3[key] for key in previous_hip3.keys() - current_hip3.keys()]
 
         signal_changes = self.summarize_signal_changes(previous, current, track_hip3)
+        candidate_changes = self.summarize_candidate_signal_changes(
+            previous,
+            current,
+            track_hip3=track_hip3,
+        )
 
         return {
             "biasChanged": previous.get("overallBias") != current.get("overallBias"),
@@ -3355,6 +3555,7 @@ class WalletTrackerService:
             "hip3Added": hip3_added,
             "hip3Removed": hip3_removed,
             **signal_changes,
+            **candidate_changes,
         }
 
     def build_telegram_message(self, changes: dict[str, Any], summary: dict[str, Any], min_wallets: int) -> str:
@@ -3414,6 +3615,26 @@ class WalletTrackerService:
                     f'qnet +{to_float(item.get("netIndependentWeightedWalletCount", item.get("netWeightedWalletCount"))):.1f}, '
                     f'{format_money_compact(item.get("totalValue"))}{fresh_note}'
                     f'{activity_note}{price_note}{cmm_note}{moni_note}'
+                )
+
+        candidate_signals = changes.get("addedCandidateSignals", [])
+        if candidate_signals:
+            lines.append("")
+            lines.append("Fresh candidate signals | 3 independent / 15m")
+            for item in candidate_signals[:5]:
+                evidence = "CMM confirmed"
+                if item.get("candidateReason") == "two_top_wallets":
+                    evidence = f'{int(to_float(item.get("independentTopWalletCount")))} top-10'
+                cmm_note = ""
+                if item.get("cmmConfirmation") == "confirmed":
+                    cmm_note = f', CMM p{to_float(item.get("cmmProbabilityScore")):.0f}'
+                lines.append(
+                    f'- {str(item.get("action") or "watch").upper()} {item.get("coin", "Unknown")} '
+                    f'{item.get("side", "")}: '
+                    f'{int(to_float(item.get("independentWalletCount")))} independent, '
+                    f'{format_money_compact(item.get("freshNotional"))} fresh, '
+                    f'{evidence}, VWAP ${format_price(to_float(item.get("freshAddVwap")))} '
+                    f'live ~${format_price(to_float(item.get("markPrice")))}{cmm_note}'
                 )
 
         if changes.get("removedSignals"):
@@ -4782,9 +5003,20 @@ class WalletTrackerService:
         require_confirmation: bool = False,
     ) -> dict[str, Any]:
         if not cmm_summary.get("enabled"):
-            return summary
+            if "candidateSignals" not in summary:
+                return summary
+            candidates = [
+                {
+                    **item,
+                    "cmmConfirmation": "unavailable",
+                    "cmmSnapshotGeneratedAt": cmm_summary.get("generatedAt", ""),
+                }
+                for item in summary.get("candidateSignals", [])
+                if isinstance(item, dict)
+            ]
+            return {**summary, "candidateSignals": candidates, "candidateSignalCount": len(candidates)}
         cmm_by_key = {
-            self.cmm_signal_key(signal): signal
+            f'cmm:{normalize_cmm_coin(signal.get("coin"))}:{str(signal.get("side") or "").lower()}': signal
             for signal in cmm_summary.get("signals", [])
             if isinstance(signal, dict)
         }
@@ -4793,7 +5025,7 @@ class WalletTrackerService:
         for signal in summary.get("signals", []):
             if not isinstance(signal, dict):
                 continue
-            coin = str(signal.get("coin") or "Unknown")
+            coin = normalize_cmm_coin(signal.get("coin"))
             side = str(signal.get("side") or "").lower()
             opposite_side = "short" if side == "long" else "long"
             same_cmm = cmm_by_key.get(f"cmm:{coin}:{side}")
@@ -4850,12 +5082,67 @@ class WalletTrackerService:
                 str(item.get("side")),
             )
         )
-        return {
+        candidate_signals: list[dict[str, Any]] = []
+        for candidate in summary.get("candidateSignals", []):
+            if not isinstance(candidate, dict):
+                continue
+            coin = normalize_cmm_coin(candidate.get("coin"))
+            side = str(candidate.get("side") or "").lower()
+            opposite_side = "short" if side == "long" else "long"
+            same_cmm = cmm_by_key.get(f"cmm:{coin}:{side}")
+            opposite_cmm = cmm_by_key.get(f"cmm:{coin}:{opposite_side}")
+            tier = str(candidate.get("candidateTier") or "shadow")
+            reason = str(candidate.get("candidateReason") or "")
+            cmm_confirmation = "unconfirmed"
+            if (
+                opposite_cmm
+                and to_float(opposite_cmm.get("probabilityScore")) >= CMM_SIGNAL_PROBABILITY_THRESHOLD
+            ):
+                tier = "blocked"
+                reason = "cmm_conflict"
+                cmm_confirmation = "conflict"
+            elif (
+                tier != "blocked"
+                and same_cmm
+                and to_float(same_cmm.get("probabilityScore")) >= CMM_SIGNAL_PROBABILITY_THRESHOLD
+            ):
+                tier = "actionable"
+                reason = "cmm_confirmed"
+                cmm_confirmation = "confirmed"
+            candidate_signals.append(
+                {
+                    **candidate,
+                    "candidateTier": tier,
+                    "candidateReason": reason,
+                    "cmmConfirmation": cmm_confirmation,
+                    "cmmProbabilityScore": round(
+                        to_float((same_cmm or opposite_cmm or {}).get("probabilityScore")), 1
+                    ),
+                    "cmmCohortCount": int(
+                        to_float((same_cmm or opposite_cmm or {}).get("cohortCount"))
+                    ),
+                    "cmmSnapshotGeneratedAt": cmm_summary.get("generatedAt", ""),
+                }
+            )
+        candidate_signals.sort(
+            key=lambda item: (
+                {"actionable": 0, "watch": 1, "shadow": 2, "blocked": 3}.get(
+                    str(item.get("candidateTier")), 4
+                ),
+                -int(to_float(item.get("independentTopWalletCount"))),
+                -to_float(item.get("freshNotional")),
+            )
+        )
+        result = {
             **summary,
             "signals": adjusted_signals,
             "signalCount": len(adjusted_signals),
             "vetoedSignals": vetoed_signals,
         }
+        if "candidateSignals" in summary:
+            result["candidateSignals"] = candidate_signals
+            result["candidateSignalCount"] = len(candidate_signals)
+        return result
 
     def apply_signal_lifecycle(
         self,
@@ -4950,6 +5237,179 @@ class WalletTrackerService:
             "signalCount": len(active),
             "invalidatedSignals": invalidated,
         }
+
+    def apply_candidate_signal_lifecycle(
+        self,
+        summary: dict[str, Any],
+        previous: dict[str, Any],
+        *,
+        now_ms: int,
+    ) -> dict[str, Any]:
+        if not summary.get("candidateSignals") and not previous.get("candidateSignals"):
+            return summary
+        previous_candidates = {
+            self.signal_key(item): item
+            for item in previous.get("candidateSignals", [])
+            if isinstance(item, dict)
+        }
+        active: list[dict[str, Any]] = []
+        for candidate in summary.get("candidateSignals", []):
+            if not isinstance(candidate, dict):
+                continue
+            key = self.signal_key(candidate)
+            prior = previous_candidates.get(key)
+            fresh_addresses = sorted(
+                {str(address).lower() for address in candidate.get("freshWalletAddresses", [])}
+            )
+            if not prior:
+                status = "NEW"
+                first_seen_at = int(to_float(candidate.get("freshAddLatestTime"))) or now_ms
+            else:
+                first_seen_at = int(to_float(prior.get("firstSeenAt"))) or now_ms
+                prior_tier = str(prior.get("candidateTier") or "shadow")
+                current_tier = str(candidate.get("candidateTier") or "shadow")
+                prior_addresses = {
+                    str(address).lower() for address in prior.get("freshWalletAddresses", [])
+                }
+                if current_tier == "actionable" and prior_tier != "actionable":
+                    status = "PROMOTED"
+                elif set(fresh_addresses) - prior_addresses:
+                    status = "CONFIRMED"
+                else:
+                    status = "ACTIVE"
+            active.append(
+                {
+                    **candidate,
+                    "status": status,
+                    "firstSeenAt": first_seen_at,
+                    "lastFreshAt": int(to_float(candidate.get("freshAddLatestTime"))) or now_ms,
+                    "freshWalletAddresses": fresh_addresses,
+                }
+            )
+        return {
+            **summary,
+            "candidateSignals": active,
+            "candidateSignalCount": len(active),
+        }
+
+    def candidate_outcome_market_price(self, market_coin: str, *, now_ms: int) -> float:
+        result = self.client.safe_post_result(
+            {
+                "type": "candleSnapshot",
+                "req": {
+                    "coin": market_coin,
+                    "interval": "15m",
+                    "startTime": now_ms - 60 * 60 * 1000,
+                    "endTime": now_ms,
+                },
+            },
+            [],
+        )
+        candles = result.get("data") if result.get("ok") else []
+        if not isinstance(candles, list) or not candles:
+            return 0.0
+        return to_float(candles[-1].get("c")) if isinstance(candles[-1], dict) else 0.0
+
+    def update_candidate_signal_outcomes(
+        self,
+        previous: dict[str, Any],
+        summary: dict[str, Any],
+        *,
+        now_ms: int,
+    ) -> dict[str, Any]:
+        records = {
+            str(key): dict(value)
+            for key, value in (previous.items() if isinstance(previous, dict) else [])
+            if isinstance(value, dict)
+            and now_ms - int(to_float(value.get("startedAt"))) <= CANDIDATE_SIGNAL_OUTCOME_RETENTION_MS
+        }
+        marks_by_key: dict[str, float] = {}
+        marks_by_coin: dict[str, float] = {}
+        for item in summary.get("positionMarks", []):
+            if not isinstance(item, dict) or to_float(item.get("markPrice")) <= 0:
+                continue
+            mark_price = to_float(item.get("markPrice"))
+            marks_by_key[self.signal_key(item)] = mark_price
+            marks_by_coin[normalize_position_coin(item.get("coin"))] = mark_price
+
+        for candidate in summary.get("candidateSignals", []):
+            if not isinstance(candidate, dict) or candidate.get("status") not in {"NEW", "PROMOTED"}:
+                continue
+            started_at = int(to_float(candidate.get("firstSeenAt"))) or now_ms
+            record_key = f'candidate:{self.signal_key(candidate)}:{started_at}'
+            entry_price = to_float(candidate.get("markPrice"))
+            if entry_price <= 0:
+                continue
+            record = records.setdefault(
+                record_key,
+                {
+                    "coin": candidate.get("coin", "Unknown"),
+                    "marketCoin": candidate.get("marketCoin", candidate.get("coin", "Unknown")),
+                    "side": candidate.get("side", ""),
+                    "startedAt": started_at,
+                    "entryPrice": round(entry_price, 8),
+                    "walletVwap": round(to_float(candidate.get("freshAddVwap")), 8),
+                    "freshNotional": round(to_float(candidate.get("freshNotional")), 2),
+                    "freshWalletAddresses": list(candidate.get("freshWalletAddresses", [])),
+                    "topWalletAddresses": list(candidate.get("topWalletAddresses", [])),
+                    "independentWalletCount": int(to_float(candidate.get("independentWalletCount"))),
+                    "independentTopWalletCount": int(to_float(candidate.get("independentTopWalletCount"))),
+                    "initialTier": candidate.get("candidateTier", "shadow"),
+                    "highestTier": candidate.get("candidateTier", "shadow"),
+                    "topConvictionMonth": candidate.get("topConvictionMonth", ""),
+                    "topConvictionUpdatedAt": candidate.get("topConvictionUpdatedAt", ""),
+                    "cmmConfirmation": candidate.get("cmmConfirmation", "unavailable"),
+                    "cmmProbabilityScore": round(to_float(candidate.get("cmmProbabilityScore")), 1),
+                    "cmmSnapshotGeneratedAt": candidate.get("cmmSnapshotGeneratedAt", ""),
+                    "outcomes": {},
+                },
+            )
+            if candidate.get("candidateTier") == "actionable":
+                record["highestTier"] = "actionable"
+                record.setdefault("actionableAt", now_ms)
+            record["latestTier"] = candidate.get("candidateTier", "shadow")
+            record["latestCmmConfirmation"] = candidate.get("cmmConfirmation", "unavailable")
+            record["latestCmmProbabilityScore"] = round(
+                to_float(candidate.get("cmmProbabilityScore")), 1
+            )
+
+        fallback_prices: dict[str, float] = {}
+        for record in records.values():
+            started_at = int(to_float(record.get("startedAt")))
+            entry_price = to_float(record.get("entryPrice"))
+            if started_at <= 0 or entry_price <= 0:
+                continue
+            mark_price = marks_by_key.get(self.signal_key(record), 0.0)
+            if mark_price <= 0:
+                mark_price = marks_by_coin.get(normalize_position_coin(record.get("coin")), 0.0)
+            outcomes = record.setdefault("outcomes", {})
+            due = any(
+                label not in outcomes and now_ms - started_at >= horizon_ms
+                for label, horizon_ms in CANDIDATE_SIGNAL_OUTCOME_HORIZONS_MS.items()
+            )
+            if mark_price <= 0 and due:
+                market_coin = str(record.get("marketCoin") or record.get("coin") or "")
+                if market_coin not in fallback_prices:
+                    fallback_prices[market_coin] = self.candidate_outcome_market_price(
+                        market_coin, now_ms=now_ms
+                    )
+                mark_price = fallback_prices[market_coin]
+            if mark_price <= 0:
+                continue
+            direction = 1.0 if str(record.get("side") or "").lower() == "long" else -1.0
+            for label, horizon_ms in CANDIDATE_SIGNAL_OUTCOME_HORIZONS_MS.items():
+                if label in outcomes or now_ms - started_at < horizon_ms:
+                    continue
+                gross_return = ((mark_price / entry_price) - 1.0) * 100.0 * direction
+                outcomes[label] = {
+                    "markPrice": round(mark_price, 8),
+                    "grossReturnPct": round(gross_return, 3),
+                    "netReturnPct": round(
+                        gross_return - CANDIDATE_SIGNAL_ROUND_TRIP_COST_PCT, 3
+                    ),
+                    "measuredAt": now_ms,
+                }
+        return records
 
     def update_signal_outcomes(
         self,
@@ -5280,6 +5740,27 @@ class WalletTrackerService:
                 )
         else:
             lines.append("- No actionable signals right now")
+        candidates = [
+            item
+            for item in summary.get("candidateSignals", [])
+            if isinstance(item, dict) and item.get("candidateTier") in {"actionable", "watch"}
+        ]
+        if candidates:
+            lines.append("")
+            lines.append("Fresh 15m candidates")
+            for item in candidates[:10]:
+                cmm_note = ""
+                if item.get("cmmConfirmation") == "confirmed":
+                    cmm_note = f', CMM p{to_float(item.get("cmmProbabilityScore")):.0f}'
+                lines.append(
+                    f'- {str(item.get("candidateTier") or "watch").upper()} '
+                    f'{str(item.get("action") or "watch").upper()} '
+                    f'{item.get("coin", "Unknown")} {item.get("side", "")}: '
+                    f'{int(to_float(item.get("independentWalletCount")))} independent, '
+                    f'{int(to_float(item.get("independentTopWalletCount")))} top-10, '
+                    f'{format_money_compact(item.get("freshNotional"))} fresh, '
+                    f'VWAP ${format_price(to_float(item.get("freshAddVwap")))}{cmm_note}'
+                )
         if cmm_summary is not None:
             lines.append("")
             lines.append(self.build_cmm_signals_message(cmm_summary, wallet_summary=summary))
@@ -5617,6 +6098,11 @@ class WalletTrackerService:
         moni_summary = self.build_cached_moni_social_summary(state, alert_summary.get("signals", []))
         alert_summary = self.apply_moni_social_context(alert_summary, moni_summary)
         dedupe_now_ms = current_time_ms()
+        alert_summary = self.apply_candidate_signal_lifecycle(
+            alert_summary,
+            previous_summary,
+            now_ms=dedupe_now_ms,
+        )
         alert_summary = self.apply_signal_lifecycle(
             alert_summary,
             previous_summary,
@@ -5624,6 +6110,11 @@ class WalletTrackerService:
         )
         signal_outcomes = self.update_signal_outcomes(
             state.get("signalOutcomes", {}),
+            alert_summary,
+            now_ms=dedupe_now_ms,
+        )
+        candidate_signal_outcomes = self.update_candidate_signal_outcomes(
+            state.get("candidateSignalOutcomes", {}),
             alert_summary,
             now_ms=dedupe_now_ms,
         )
@@ -5674,6 +6165,7 @@ class WalletTrackerService:
                 changes["addedSignals"],
                 changes["changedSignals"],
                 changes["removedSignals"],
+                changes["addedCandidateSignals"],
                 changes["addedCmmSignals"],
                 changes["changedCmmSignals"],
                 changes["clusteredOpenPositions"],
@@ -5723,6 +6215,7 @@ class WalletTrackerService:
             "topConvictionWallets": top_cohort,
             "walletPositionLifecycle": position_lifecycle,
             "signalOutcomes": signal_outcomes,
+            "candidateSignalOutcomes": candidate_signal_outcomes,
             "moniSocial": moni_summary,
         }
         if not should_notify or sent or not config.get("enabled") or acknowledge_suppressed:
@@ -5777,6 +6270,11 @@ class WalletTrackerService:
         moni_summary = self.build_cached_moni_social_summary(state, alert_summary.get("signals", []))
         alert_summary = self.apply_moni_social_context(alert_summary, moni_summary)
         lifecycle_now_ms = current_time_ms()
+        alert_summary = self.apply_candidate_signal_lifecycle(
+            alert_summary,
+            previous_summary,
+            now_ms=lifecycle_now_ms,
+        )
         alert_summary = self.apply_signal_lifecycle(
             alert_summary,
             previous_summary,
@@ -5784,6 +6282,11 @@ class WalletTrackerService:
         )
         signal_outcomes = self.update_signal_outcomes(
             state.get("signalOutcomes", {}),
+            alert_summary,
+            now_ms=lifecycle_now_ms,
+        )
+        candidate_signal_outcomes = self.update_candidate_signal_outcomes(
+            state.get("candidateSignalOutcomes", {}),
             alert_summary,
             now_ms=lifecycle_now_ms,
         )
@@ -5818,6 +6321,13 @@ class WalletTrackerService:
             fresh_flow_positions,
             now_ms=dedupe_now_ms,
         )
+        position_changes.update(
+            self.summarize_candidate_signal_changes(
+                previous_summary,
+                alert_summary,
+                track_hip3=False,
+            )
+        )
         position_changes, suppressed_alert_keys = self.filter_deduped_alert_changes(
             position_changes,
             previous_dedupe,
@@ -5827,6 +6337,7 @@ class WalletTrackerService:
         should_send_position_alert = any(
             [
                 position_changes["clusteredOpenPositions"],
+                position_changes["addedCandidateSignals"],
                 position_changes["newLargePositions"],
                 position_changes["increasedLargePositions"],
                 position_changes["closedLargePositions"],
@@ -5839,7 +6350,7 @@ class WalletTrackerService:
                 self.send_telegram_message(
                     bot_token,
                     chat_id,
-                    self.build_telegram_message(position_changes, summary, min_wallets),
+                    self.build_telegram_message(position_changes, alert_summary, min_wallets),
                 )
                 position_alert_sent = True
             except (urllib.error.URLError, TimeoutError, ValueError) as exc:
@@ -5854,6 +6365,7 @@ class WalletTrackerService:
             "topConvictionWallets": top_cohort,
             "walletPositionLifecycle": position_lifecycle,
             "signalOutcomes": signal_outcomes,
+            "candidateSignalOutcomes": candidate_signal_outcomes,
             "cmmSignals": cmm_summary,
             "moniSocial": moni_summary,
         }
