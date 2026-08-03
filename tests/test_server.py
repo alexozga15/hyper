@@ -3381,7 +3381,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(len(result["changes"]["newLargePositions"]), 1)
         self.assertEqual(result["changes"]["newLargePositions"][0]["coin"], "BTC")
         sent_message = send_telegram_message.call_args.args[2]
-        self.assertIn("New large pos ($700K+)", sent_message)
+        self.assertIn("New large pos ($1.0M+)", sent_message)
         self.assertIn("Trader One opened BTC LONG: $1.2M sz 12 open VWAP $100,000", sent_message)
 
     def test_check_alerts_notifies_on_closed_large_positions(self) -> None:
@@ -3418,7 +3418,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertTrue(result["sent"])
         self.assertEqual(len(result["changes"]["closedLargePositions"]), 1)
         sent_message = send_telegram_message.call_args.args[2]
-        self.assertIn("Closed large pos ($700K+)", sent_message)
+        self.assertIn("Closed large pos ($1.0M+)", sent_message)
         self.assertIn("Trader One closed ETH SHORT: $1.2M sz 400 last ~$3,000", sent_message)
 
     def test_check_alerts_ignores_closed_positions_for_untracked_wallets(self) -> None:
@@ -3877,7 +3877,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertNotIn("Wallet ranks by 7D hit rate + PnL", hourly_message)
         self.assertNotIn("High-conviction signals", hourly_message)
         alert_message = send_telegram_message.call_args_list[1].args[2]
-        self.assertIn("New large pos ($700K+)", alert_message)
+        self.assertIn("New large pos ($1.0M+)", alert_message)
         self.assertIn("Trader One opened BTC LONG: $1.2M", alert_message)
         saved_state = save_json_file.call_args.args[1]["state"]
         self.assertEqual(saved_state["summary"]["consensus"][0]["walletCount"], 8)
@@ -3977,7 +3977,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertTrue(result["sent"])
         self.assertEqual(len(result["changes"]["increasedLargePositions"]), 1)
         sent_message = send_telegram_message.call_args.args[2]
-        self.assertIn("Large pos additions ($700K+)", sent_message)
+        self.assertIn("Large pos additions ($1.0M+)", sent_message)
         self.assertIn("Trader One added $1.2M to BTC LONG at estimated price $120,000", sent_message)
         self.assertIn("Position: $1.2M -> $2.4M +10", sent_message)
         self.assertNotIn("@$78,000", sent_message)
@@ -4001,14 +4001,14 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("0x1111111111111111111111111111111111111111:BTC:long", snapshot)
         self.assertEqual(snapshot["0x1111111111111111111111111111111111111111:BTC:long"]["totalValue"], 1_100_000.0)
 
-    def test_large_position_snapshot_uses_700k_alert_threshold(self) -> None:
+    def test_large_position_snapshot_uses_1m_alert_threshold(self) -> None:
         dashboard = {
             "wallets": [
                 {
                     "address": "0x1111111111111111111111111111111111111111",
                     "positions": [
-                        {"coin": "BTC", "side": "Long", "positionValue": 699_999.0},
-                        {"coin": "ETH", "side": "Short", "positionValue": 700_000.0},
+                        {"coin": "BTC", "side": "Long", "positionValue": 999_999.0},
+                        {"coin": "ETH", "side": "Short", "positionValue": 1_000_000.0},
                     ],
                 }
             ]
@@ -4019,13 +4019,13 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertNotIn("0x1111111111111111111111111111111111111111:BTC:long", snapshot)
         self.assertIn("0x1111111111111111111111111111111111111111:ETH:short", snapshot)
 
-    def test_threshold_migration_does_not_report_sub_700k_position_as_closed(self) -> None:
+    def test_threshold_migration_does_not_report_sub_1m_position_as_closed(self) -> None:
         previous = {
             "wallet:BTC:long": {
                 "address": "wallet",
                 "coin": "BTC",
                 "side": "long",
-                "totalValue": 600_000.0,
+                "totalValue": 900_000.0,
             }
         }
 
