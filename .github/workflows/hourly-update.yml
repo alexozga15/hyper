@@ -22,7 +22,7 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Send hourly update
+      - name: Send 4-hour update
         env:
           ALERTS_ENABLED: "true"
           SEND_HOURLY_UPDATE: "true"
