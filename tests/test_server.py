@@ -1,3 +1,4 @@
+import random
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -8,11 +9,20 @@ from server import (
     ALERTS_FILE,
     ELITE_WALLET_OVERRIDES,
     HyperliquidClient,
+    POSITION_INCREASE_ALERT_MIN_DELTA,
+    RANKING_WINDOW_MS,
+    RECENT_FILL_ALERT_LIMIT,
+    SHADOW_SIGNAL_OUTCOME_MAX_RECORDS,
+    SHADOW_SIGNAL_OUTCOME_RETENTION_MS,
+    SIGNAL_ROUND_TRIP_COST_PCT,
     TrackedWallet,
     WALLETS_FILE,
+    WALLET_LIVE_FILL_LOOKBACK_MS,
+    WALLET_RECENT_FILL_CONSUMER_WINDOW_MS,
     WalletStore,
     WalletTrackerService,
     build_wallet_quality_rank,
+    current_time_ms,
     classify_profitability,
     classify_wallet_size,
     now_iso,
@@ -1524,6 +1534,176 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertTrue(snapshot["dataQuality"]["qualityCacheHit"])
         self.assertFalse(snapshot["holdingOnly30d"])
 
+    def test_recent_fills_keep_newest_fills_regardless_of_api_ordering(self) -> None:
+        wallet = TrackedWallet(address="0x1111111111111111111111111111111111111111", alias="", notes="", created_at="")
+        state = {
+            "marginSummary": {"accountValue": "1000000", "totalNtlPos": "0", "totalMarginUsed": "0"},
+            "withdrawable": "1000000",
+            "assetPositions": [],
+        }
+        now_ms = current_time_ms()
+        total_fills = RECENT_FILL_ALERT_LIMIT * 2 + 37
+        fills = [
+            {
+                "coin": "BTC",
+                "dir": "Open Long",
+                "px": "70000",
+                "sz": "1",
+                "closedPnl": "100",
+                "fee": "1",
+                "time": now_ms - (index + 1) * 60_000,
+            }
+            for index in range(total_fills)
+        ]
+        shuffled = list(fills)
+        random.Random(7).shuffle(shuffled)
+        expected_times = sorted((int(fill["time"]) for fill in fills), reverse=True)[:RECENT_FILL_ALERT_LIMIT]
+
+        with patch.object(
+            self.service.client, "safe_subscribe_all_dexs_clearinghouse_state", return_value=state
+        ), patch.object(
+            self.service,
+            "fetch_fills_result",
+            return_value={"ok": True, "data": shuffled, "error": ""},
+        ), patch.object(self.service, "fetch_open_orders_result", return_value={"ok": True, "data": [], "error": ""}), patch.object(
+            self.service, "fetch_portfolio_result", return_value={"ok": True, "data": {}, "error": ""}
+        ), patch.object(self.service, "fetch_wallet_role", return_value="user"):
+            snapshot = self.service.fetch_wallet_snapshot(wallet)
+
+        recent_fills = snapshot["recentFills"]
+        self.assertEqual(len(recent_fills), RECENT_FILL_ALERT_LIMIT)
+        self.assertEqual([int(fill["time"]) for fill in recent_fills], expected_times)
+        self.assertEqual(
+            set(recent_fills[0]),
+            {"coin", "direction", "price", "size", "closedPnl", "fee", "time"},
+        )
+        # Aggregates must still see every fill, not just the retained newest slice.
+        self.assertEqual(snapshot["fills30d"], total_fills)
+        self.assertEqual(snapshot["closedTrades30d"], total_fills)
+        self.assertAlmostEqual(snapshot["realizedPnl30d"], 100.0 * total_fills)
+
+    def test_live_fill_lookback_covers_widest_recent_fill_consumer_window(self) -> None:
+        self.assertEqual(WALLET_RECENT_FILL_CONSUMER_WINDOW_MS, RANKING_WINDOW_MS)
+        self.assertGreaterEqual(WALLET_LIVE_FILL_LOOKBACK_MS, RANKING_WINDOW_MS)
+
+        wallet = TrackedWallet(address="0x1111111111111111111111111111111111111111", alias="", notes="", created_at="")
+        state = {
+            "marginSummary": {"accountValue": "1000000", "totalNtlPos": "0", "totalMarginUsed": "0"},
+            "withdrawable": "1000000",
+            "assetPositions": [],
+        }
+        captured: dict[str, int] = {}
+
+        def fake_fills(address: str, start_time: int) -> dict[str, Any]:
+            captured["startTime"] = int(start_time)
+            return {"ok": True, "data": [], "error": ""}
+
+        before_ms = current_time_ms()
+        with patch.object(
+            self.service.client, "safe_subscribe_all_dexs_clearinghouse_state", return_value=state
+        ), patch.object(self.service, "fetch_fills_result", side_effect=fake_fills):
+            self.service.fetch_wallet_snapshot(
+                wallet,
+                full_quality_refresh=False,
+                cached_snapshot={"recentFills": []},
+            )
+
+        # fetch_wallet_snapshot reads its own clock, so the requested startTime is
+        # anchored a few milliseconds *after* before_ms. Comparing the two clock
+        # reads exactly is a race; allow a few seconds of slack in both directions
+        # while still proving the request covers at least RANKING_WINDOW_MS.
+        tolerance_ms = 5_000
+        start_time_ms = captured["startTime"]
+        self.assertLessEqual(start_time_ms, before_ms - RANKING_WINDOW_MS + tolerance_ms)
+        self.assertGreaterEqual(start_time_ms, before_ms - WALLET_LIVE_FILL_LOOKBACK_MS - tolerance_ms)
+
+    def test_recent_add_threshold_uses_aggregate_of_fills(self) -> None:
+        now_ms = 1_700_000_000_000
+        position = {"coin": "BTC", "side": "Long", "positionValue": 100_000_000.0}
+        small_fills = [
+            {
+                "coin": "BTC",
+                "direction": "Open Long",
+                "price": 100_000.0,
+                "size": 1.0,
+                "time": now_ms - (index + 1) * 60_000,
+            }
+            for index in range(12)
+        ]
+        wallet = {"recentFills": small_fills}
+
+        # Twelve $100K fills: no single fill clears the $1M floor, but the
+        # aggregate ($1.2M) does, so this is a real recent add.
+        for fill in small_fills:
+            self.assertLess(fill["price"] * fill["size"], POSITION_INCREASE_ALERT_MIN_DELTA)
+        self.assertTrue(
+            self.service.has_recent_position_fill(
+                wallet, position, now_ms=now_ms, event="add", window_ms=RANKING_WINDOW_MS
+            )
+        )
+
+        # Same fills, but only the ones inside the tight window are aggregated.
+        self.assertFalse(
+            self.service.has_recent_position_fill(
+                wallet, position, now_ms=now_ms, event="add", window_ms=5 * 60 * 1000
+            )
+        )
+
+        # Aggregate under the absolute floor still qualifies at >= 20% of the position.
+        small_position = {"coin": "BTC", "side": "Long", "positionValue": 500_000.0}
+        self.assertTrue(
+            self.service.has_recent_position_fill(
+                {"recentFills": small_fills[:1]},
+                small_position,
+                now_ms=now_ms,
+                event="add",
+                window_ms=RANKING_WINDOW_MS,
+            )
+        )
+
+        # Under both the absolute floor and the relative share: no add.
+        tiny = {
+            "recentFills": [
+                {
+                    "coin": "BTC",
+                    "direction": "Open Long",
+                    "price": 100_000.0,
+                    "size": 0.01,
+                    "time": now_ms - 60_000,
+                }
+            ]
+        }
+        self.assertFalse(
+            self.service.has_recent_position_fill(
+                tiny, position, now_ms=now_ms, event="add", window_ms=RANKING_WINDOW_MS
+            )
+        )
+
+    def test_recent_close_fill_keeps_any_match_semantics(self) -> None:
+        now_ms = 1_700_000_000_000
+        position = {"coin": "BTC", "side": "Long", "positionValue": 100_000_000.0}
+        wallet = {
+            "recentFills": [
+                {
+                    "coin": "BTC",
+                    "direction": "Close Long",
+                    "price": 100_000.0,
+                    "size": 0.001,
+                    "time": now_ms - 60_000,
+                }
+            ]
+        }
+        self.assertTrue(
+            self.service.has_recent_position_fill(
+                wallet, position, now_ms=now_ms, event="close", window_ms=RANKING_WINDOW_MS
+            )
+        )
+        self.assertFalse(
+            self.service.has_recent_position_fill(
+                wallet, position, now_ms=now_ms, event="add", window_ms=RANKING_WINDOW_MS
+            )
+        )
+
     def test_summarize_changes_detects_signal_changes(self) -> None:
         previous = {
             "overallBias": "mixed",
@@ -2425,7 +2605,8 @@ class AlertSummaryTests(unittest.TestCase):
                     "side": "short",
                     "status": "NEW",
                     "firstSeenAt": started_at,
-                    "freshAddVwap": 100.0,
+                    "markPrice": 100.0,
+                    "freshAddVwap": 98.0,
                     "probabilityScore": 82.0,
                     "verifiedFreshIndependentWalletCount": 3,
                 }
@@ -2446,6 +2627,326 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(record["outcomes"]["15m"]["returnPct"], 5.0)
         self.assertEqual(record["outcomes"]["1h"]["returnPct"], 5.0)
         self.assertNotIn("4h", record["outcomes"])
+
+    def test_signal_outcome_entry_is_mark_price_and_keeps_wallet_vwap(self) -> None:
+        started_at = 1_700_000_000_000
+        summary = {
+            "signals": [
+                {
+                    "coin": "BTC",
+                    "side": "long",
+                    "status": "NEW",
+                    "firstSeenAt": started_at,
+                    # A follower enters here, not at the wallets' add VWAP.
+                    "markPrice": 104.0,
+                    "freshAddVwap": 100.0,
+                    "entryDistancePct": 4.0,
+                    "probabilityScore": 82.0,
+                }
+            ],
+            "consensus": [{"coin": "BTC", "side": "long", "markPrice": 104.0}],
+            "positionMarks": [
+                {"coin": "BTC", "marketCoin": "BTC", "side": "long", "markPrice": 104.0}
+            ],
+        }
+        records = self.service.update_signal_outcomes({}, summary, now_ms=started_at)
+        record = next(iter(records.values()))
+
+        self.assertEqual(record["entryPrice"], 104.0)
+        self.assertEqual(record["walletVwap"], 100.0)
+        self.assertEqual(record["marketCoin"], "BTC")
+        self.assertFalse(record["shadow"])
+
+    def test_signal_outcome_records_gross_and_net_returns(self) -> None:
+        started_at = 1_700_000_000_000
+        summary = {
+            "signals": [
+                {
+                    "coin": "BTC",
+                    "side": "long",
+                    "status": "NEW",
+                    "firstSeenAt": started_at,
+                    "markPrice": 100.0,
+                    "freshAddVwap": 100.0,
+                    "probabilityScore": 82.0,
+                }
+            ],
+            "consensus": [{"coin": "BTC", "side": "long", "markPrice": 100.0}],
+        }
+        records = self.service.update_signal_outcomes({}, summary, now_ms=started_at)
+        measured = self.service.update_signal_outcomes(
+            records,
+            {"signals": [], "consensus": [{"coin": "BTC", "side": "long", "markPrice": 100.1}]},
+            now_ms=started_at + 15 * 60 * 1000,
+        )
+
+        outcome = next(iter(measured.values()))["outcomes"]["15m"]
+        self.assertEqual(outcome["grossReturnPct"], 0.1)
+        self.assertEqual(
+            outcome["netReturnPct"], round(0.1 - SIGNAL_ROUND_TRIP_COST_PCT, 3)
+        )
+        # A +0.1% move does not survive the round trip.
+        self.assertLess(outcome["netReturnPct"], 0)
+        self.assertEqual(outcome["priceSource"], "mark")
+
+    def test_signal_outcome_falls_back_to_candle_when_coin_leaves_consensus(self) -> None:
+        started_at = 1_700_000_000_000
+        summary = {
+            "signals": [
+                {
+                    "coin": "BTC",
+                    "side": "long",
+                    "status": "NEW",
+                    "firstSeenAt": started_at,
+                    "markPrice": 100.0,
+                    "freshAddVwap": 100.0,
+                    "probabilityScore": 82.0,
+                }
+            ],
+            "consensus": [{"coin": "BTC", "side": "long", "markPrice": 100.0}],
+            "positionMarks": [
+                {"coin": "BTC", "marketCoin": "BTC", "side": "long", "markPrice": 100.0}
+            ],
+        }
+        records = self.service.update_signal_outcomes({}, summary, now_ms=started_at)
+
+        # The wallets closed out, so the coin is gone from consensus entirely.
+        with patch.object(
+            self.service.client,
+            "safe_post_result",
+            return_value={"ok": True, "data": [{"c": "90.0"}]},
+        ) as post:
+            measured = self.service.update_signal_outcomes(
+                records,
+                {"signals": [], "consensus": [], "positionMarks": []},
+                now_ms=started_at + 15 * 60 * 1000,
+            )
+
+        outcome = next(iter(measured.values()))["outcomes"]["15m"]
+        self.assertEqual(outcome["markPrice"], 90.0)
+        self.assertEqual(outcome["grossReturnPct"], -10.0)
+        self.assertEqual(outcome["priceSource"], "candle")
+        self.assertEqual(post.call_count, 1)
+
+    def test_signal_outcome_skips_network_when_no_horizon_is_due(self) -> None:
+        started_at = 1_700_000_000_000
+        summary = {
+            "signals": [
+                {
+                    "coin": "BTC",
+                    "side": "long",
+                    "status": "NEW",
+                    "firstSeenAt": started_at,
+                    "markPrice": 100.0,
+                    "probabilityScore": 82.0,
+                }
+            ],
+            "consensus": [{"coin": "BTC", "side": "long", "markPrice": 100.0}],
+        }
+        records = self.service.update_signal_outcomes({}, summary, now_ms=started_at)
+
+        with patch.object(self.service.client, "safe_post_result") as post:
+            self.service.update_signal_outcomes(
+                records,
+                {"signals": [], "consensus": []},
+                now_ms=started_at + 60 * 1000,
+            )
+
+        post.assert_not_called()
+
+    def test_late_measurement_is_flagged_degraded_and_left_out_of_calibration(self) -> None:
+        started_at = 1_700_000_000_000
+        summary = {
+            "signals": [
+                {
+                    "coin": "BTC",
+                    "side": "long",
+                    "status": "NEW",
+                    "firstSeenAt": started_at,
+                    "markPrice": 100.0,
+                    "probabilityScore": 92.0,
+                }
+            ],
+            "consensus": [{"coin": "BTC", "side": "long", "markPrice": 100.0}],
+        }
+        records = self.service.update_signal_outcomes({}, summary, now_ms=started_at)
+        # Runner was down: the "1h" outcome is only measured six hours later.
+        measured = self.service.update_signal_outcomes(
+            records,
+            {"signals": [], "consensus": [{"coin": "BTC", "side": "long", "markPrice": 110.0}]},
+            now_ms=started_at + 6 * 60 * 60 * 1000,
+        )
+
+        outcome = next(iter(measured.values()))["outcomes"]["1h"]
+        self.assertTrue(outcome["degraded"])
+        self.assertEqual(outcome["measuredAfterMs"], 6 * 60 * 60 * 1000)
+        self.assertEqual(outcome["horizonMs"], 60 * 60 * 1000)
+        # On-time measurement is not flagged.
+        self.assertFalse(measured[next(iter(measured))]["outcomes"]["4h"]["degraded"])
+
+        calibration = self.service.build_signal_calibration(measured, horizon="1h")
+        stats = calibration["groups"]["crypto"]["90"]
+        self.assertEqual(stats["sample"], 0)
+        self.assertEqual(stats["degradedSample"], 1)
+        # The record itself is kept on disk, just excluded from the maths.
+        self.assertIn("1h", next(iter(measured.values()))["outcomes"])
+
+    def test_shadow_outcomes_cover_unpublished_sub_threshold_scores(self) -> None:
+        started_at = 1_700_000_000_000
+        consensus_item = {
+            "coin": "ETH",
+            "side": "long",
+            "markPrice": 100.0,
+            "freshAddVwap": 99.0,
+            "convictionScore": 50.0,
+            "verifiedFreshIndependentWalletCount": 1,
+        }
+        summary = {
+            "signals": [],
+            "consensus": [consensus_item],
+            "positionMarks": [
+                {"coin": "ETH", "marketCoin": "ETH", "side": "long", "markPrice": 100.0}
+            ],
+        }
+        records = self.service.update_shadow_signal_outcomes({}, summary, now_ms=started_at)
+        record = next(iter(records.values()))
+        self.assertTrue(record["shadow"])
+        self.assertFalse(record["published"])
+        self.assertLess(record["rawProbabilityScore"], 70.0)
+
+        measured = self.service.update_shadow_signal_outcomes(
+            records,
+            {
+                "signals": [],
+                "consensus": [{**consensus_item, "markPrice": 110.0}],
+                "positionMarks": [],
+            },
+            now_ms=started_at + 4 * 60 * 60 * 1000,
+        )
+        calibration = self.service.build_signal_calibration({}, shadow_records=measured)
+        buckets = calibration["groups"]["crypto"]
+        # The published pipeline can only ever produce 70/80/90 buckets.
+        self.assertTrue(all(int(bucket) < 70 for bucket in buckets))
+        stats = next(iter(buckets.values()))
+        self.assertEqual(stats["sample"], 1)
+        self.assertEqual(stats["shadowSample"], 1)
+
+    def test_shadow_outcomes_skip_published_signals_and_rearm_slowly(self) -> None:
+        started_at = 1_700_000_000_000
+        consensus = [
+            {"coin": "ETH", "side": "long", "markPrice": 100.0, "convictionScore": 50.0},
+            {"coin": "BTC", "side": "long", "markPrice": 100.0, "convictionScore": 50.0},
+        ]
+        summary = {
+            "signals": [{"coin": "BTC", "side": "long"}],
+            "consensus": consensus,
+            "positionMarks": [],
+        }
+        records = self.service.update_shadow_signal_outcomes({}, summary, now_ms=started_at)
+        self.assertEqual([record["coin"] for record in records.values()], ["ETH"])
+
+        # A second cycle inside the re-arm window must not duplicate the record.
+        again = self.service.update_shadow_signal_outcomes(
+            records, summary, now_ms=started_at + 15 * 60 * 1000
+        )
+        self.assertEqual(len(again), 1)
+
+    def test_shadow_outcomes_stay_within_retention_budget(self) -> None:
+        now_ms = 1_700_000_000_000
+        previous = {
+            f"shadow:COIN{index}:long:{now_ms - index}": {
+                "coin": f"COIN{index}",
+                "side": "long",
+                "signalKey": f"COIN{index}:long",
+                "startedAt": now_ms - index,
+                "entryPrice": 100.0,
+                "probabilityScore": 40.0,
+                "rawProbabilityScore": 40.0,
+                "shadow": True,
+                "outcomes": {},
+            }
+            for index in range(SHADOW_SIGNAL_OUTCOME_MAX_RECORDS + 250)
+        }
+        records = self.service.update_shadow_signal_outcomes(
+            previous, {"signals": [], "consensus": []}, now_ms=now_ms
+        )
+        self.assertEqual(len(records), SHADOW_SIGNAL_OUTCOME_MAX_RECORDS)
+        # The newest records survive the trim.
+        self.assertIn(f"shadow:COIN0:long:{now_ms}", records)
+
+    def test_shadow_outcomes_drop_records_older_than_the_retention_window(self) -> None:
+        now_ms = 1_700_000_000_000
+        fresh_at = now_ms - SHADOW_SIGNAL_OUTCOME_RETENTION_MS + 60_000
+        stale_at = now_ms - SHADOW_SIGNAL_OUTCOME_RETENTION_MS - 60_000
+
+        def record(coin: str, started_at: int) -> dict:
+            return {
+                "coin": coin,
+                "side": "long",
+                "signalKey": f"{coin}:long",
+                "startedAt": started_at,
+                "entryPrice": 100.0,
+                "probabilityScore": 40.0,
+                "rawProbabilityScore": 40.0,
+                "shadow": True,
+                "outcomes": {},
+            }
+
+        previous = {
+            f"shadow:FRESH:long:{fresh_at}": record("FRESH", fresh_at),
+            f"shadow:STALE:long:{stale_at}": record("STALE", stale_at),
+        }
+        records = self.service.update_shadow_signal_outcomes(
+            previous, {"signals": [], "consensus": []}, now_ms=now_ms
+        )
+        self.assertIn(f"shadow:FRESH:long:{fresh_at}", records)
+        self.assertNotIn(f"shadow:STALE:long:{stale_at}", records)
+
+    def test_calibration_prior_is_neutral_base_rate_not_the_bucket(self) -> None:
+        records = {
+            f"a{index}": {
+                "coin": "BTC",
+                "probabilityScore": 92.0,
+                "outcomes": {"4h": {"netReturnPct": -1.0, "degraded": False}},
+            }
+            for index in range(10)
+        }
+        records.update(
+            {
+                f"b{index}": {
+                    "coin": "BTC",
+                    "probabilityScore": 45.0,
+                    "outcomes": {"4h": {"netReturnPct": -1.0, "degraded": False}},
+                }
+                for index in range(10)
+            }
+        )
+        calibration = self.service.build_signal_calibration(records)
+        stats = calibration["groups"]["crypto"]["90"]
+
+        self.assertEqual(calibration["baseRates"]["crypto"], 0.0)
+        self.assertEqual(stats["baseRateProbability"], 0.0)
+        # The old prior (bucket + 5, weight 12) would have produced ~51.8 here.
+        self.assertEqual(stats["calibratedProbability"], 0.0)
+        self.assertEqual(stats["confidenceLow"], 0.0)
+        self.assertLess(stats["confidenceHigh"], 40.0)
+
+    def test_calibration_reads_legacy_gross_only_records(self) -> None:
+        # Records already on disk only carry the pre-cost "returnPct".
+        records = {
+            str(index): {
+                "coin": "BTC",
+                "probabilityScore": 82.0,
+                "outcomes": {"4h": {"returnPct": 0.1, "measuredAt": 1}},
+            }
+            for index in range(4)
+        }
+        calibration = self.service.build_signal_calibration(records)
+        stats = calibration["groups"]["crypto"]["80"]
+
+        self.assertEqual(stats["sample"], 4)
+        # +0.1% gross is a loss once the round trip is charged.
+        self.assertEqual(stats["wins"], 0)
 
     def test_build_signals_message_includes_cmm_section(self) -> None:
         summary = {"generatedAt": "2026-06-16T00:00:00Z", "signals": []}
