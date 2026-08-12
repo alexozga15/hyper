@@ -31,7 +31,7 @@ class OperationalControlTests(unittest.TestCase):
                 "probabilityScore": 85,
                 "outcomes": {"4h": {"returnPct": -1}},
             }
-            for index in range(8)
+            for index in range(20)
         }
         calibration = self.service.build_signal_calibration(records)
         summary = {"signals": [{"coin": "BTC", "probabilityScore": 85}], "signalCount": 1}

@@ -80,6 +80,19 @@ CANDIDATE_SIGNAL_OUTCOME_HORIZONS_MS = {
     "24h": 24 * 60 * 60 * 1000,
 }
 CANDIDATE_SIGNAL_ROUND_TRIP_COST_PCT = 0.20
+# Published-signal outcomes use the same round-trip cost assumption as the
+# candidate layer (fees + slippage on entry and exit).
+SIGNAL_ROUND_TRIP_COST_PCT = CANDIDATE_SIGNAL_ROUND_TRIP_COST_PCT
+# An outcome measured substantially after its nominal horizon is informative
+# for tracking, but must not be used to calibrate that horizon.
+SIGNAL_OUTCOME_HORIZON_TOLERANCE_PCT = 50.0
+# Keep unpublished consensus setups too. They are the control group needed to
+# check whether the probability score is genuinely predictive.
+SHADOW_SIGNAL_OUTCOME_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
+SHADOW_SIGNAL_OUTCOME_MAX_RECORDS = 2000
+SHADOW_SIGNAL_OUTCOME_RESTART_MS = 24 * 60 * 60 * 1000
+SIGNAL_CALIBRATION_PRIOR_WEIGHT = 6.0
+SIGNAL_CALIBRATION_MIN_SAMPLE = 20
 WALLET_SIGNAL_MAX_ENTRY_DISTANCE_PCT = 4.0
 WALLET_SIGNAL_MAJOR_ASSET_MAX_ENTRY_DISTANCE_PCT = 1.5
 WALLET_SIGNAL_HIGH_BETA_MAX_ENTRY_DISTANCE_PCT = 2.5
@@ -172,7 +185,6 @@ HYPERLIQUID_REQUESTS_PER_SECOND = max(
 WALLET_QUALITY_REFRESH_BATCH_SIZE = 3
 WALLET_QUALITY_SOFT_TTL_MS = 2 * 60 * 60 * 1000
 WALLET_QUALITY_HARD_TTL_MS = 6 * 60 * 60 * 1000
-WALLET_LIVE_FILL_LOOKBACK_MS = 2 * 60 * 60 * 1000
 WALLET_RECENT_FILL_CACHE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 WALLET_RECENT_FILL_CACHE_LIMIT = 200
 WALLET_CACHED_QUALITY_FIELDS = (
@@ -251,6 +263,13 @@ BACKTEST_REVIEW_WALLETS = {
 TOXIC_CONVICTION_WALLET_MAX_30D_PNL = -500_000
 RANKING_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 HOLDING_ONLY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
+# Fresh-flow, VWAP, and activity checks consume recent fills for up to seven
+# days. A shorter fetch horizon silently makes those checks see no activity.
+WALLET_RECENT_FILL_CONSUMER_WINDOW_MS = RANKING_WINDOW_MS
+WALLET_LIVE_FILL_LOOKBACK_MS = max(
+    WALLET_RECENT_FILL_CONSUMER_WINDOW_MS,
+    int(float(os.environ.get("WALLET_LIVE_FILL_LOOKBACK_MS", WALLET_RECENT_FILL_CONSUMER_WINDOW_MS))),
+)
 OIL_POSITION_ALIASES = {"flx:OIL", "cash:WTI", "xyz:BRENTOIL", "xyz:CL"}
 RAW_OIL_POSITION_NAMES = {"BRENTOIL", "CL", "WTI", "OIL"}
 RAW_COMMODITY_POSITION_NAMES = RAW_OIL_POSITION_NAMES | {"GOLD", "SILVER", "COPPER", "NATGAS"}
@@ -1302,7 +1321,7 @@ class WalletTrackerService:
 
         positions.sort(key=lambda item: abs(item["positionValue"]), reverse=True)
 
-        recent_fills = []
+        recent_fill_entries: list[dict[str, Any]] = []
         recent_realized_pnl = 0.0
         realized_pnl_30d = 0.0
         gross_profit_30d = 0.0
@@ -1355,18 +1374,25 @@ class WalletTrackerService:
                 elif closed_pnl < 0:
                     loss_count += 1
 
-            if len(recent_fills) < RECENT_FILL_ALERT_LIMIT:
-                recent_fills.append(
-                    {
-                        "coin": fill.get("coin", "Unknown"),
-                        "direction": fill.get("dir", "Unknown"),
-                        "price": to_float(fill.get("px")),
-                        "size": to_float(fill.get("sz")),
-                        "closedPnl": closed_pnl,
-                        "fee": fee,
-                        "time": fill.get("time"),
-                    }
-                )
+            recent_fill_entries.append(
+                {
+                    "coin": fill.get("coin", "Unknown"),
+                    "direction": fill.get("dir", "Unknown"),
+                    "price": to_float(fill.get("px")),
+                    "size": to_float(fill.get("sz")),
+                    "closedPnl": closed_pnl,
+                    "fee": fee,
+                    "time": fill.get("time"),
+                }
+            )
+
+        # Hyperliquid supplies fills oldest first. Keep the newest records so
+        # freshness and recent-add logic inspect actual current activity.
+        recent_fills = sorted(
+            recent_fill_entries,
+            key=lambda item: int(to_float(item.get("time"))),
+            reverse=True,
+        )[:RECENT_FILL_ALERT_LIMIT]
 
         normalized_orders = []
         for order in open_orders[:25]:
@@ -2143,6 +2169,10 @@ class WalletTrackerService:
         if side not in {"long", "short"}:
             return False
         cutoff_ms = now_ms - window_ms
+        # Large orders are commonly split into many fills. Thresholds apply to
+        # the complete add inside the window, not to any individual fill.
+        add_notional = 0.0
+        matched_add = False
         for fill in recent_fills:
             if not isinstance(fill, dict):
                 continue
@@ -2158,15 +2188,17 @@ class WalletTrackerService:
             if fill_time < cutoff_ms or fill_time > now_ms:
                 continue
             if event == "add":
-                fill_notional = to_float(fill.get("price")) * abs(to_float(fill.get("size")))
-                position_value = abs(to_float(position.get("positionValue")))
-                relative_add_value = position_value * RECENT_ADD_POSITION_MIN_PCT
-                if fill_notional < POSITION_INCREASE_ALERT_MIN_DELTA and (
-                    relative_add_value <= 0 or fill_notional < relative_add_value
-                ):
-                    continue
+                matched_add = True
+                add_notional += to_float(fill.get("price")) * abs(to_float(fill.get("size")))
+                continue
             return True
-        return False
+        if event != "add" or not matched_add:
+            return False
+        position_value = abs(to_float(position.get("positionValue")))
+        relative_add_value = position_value * RECENT_ADD_POSITION_MIN_PCT
+        return add_notional >= POSITION_INCREASE_ALERT_MIN_DELTA or (
+            relative_add_value > 0 and add_notional >= relative_add_value
+        )
 
     def recent_position_add_metrics(
         self,
@@ -5451,6 +5483,93 @@ class WalletTrackerService:
                 }
         return records
 
+    def signal_outcome_mark_maps(
+        self, summary: dict[str, Any]
+    ) -> tuple[dict[str, float], dict[str, float]]:
+        """Mark prices keyed by coin:side and by coin, from marks and consensus."""
+        marks_by_key: dict[str, float] = {}
+        marks_by_coin: dict[str, float] = {}
+        for source_key in ("positionMarks", "consensus"):
+            for item in summary.get(source_key, []):
+                if not isinstance(item, dict):
+                    continue
+                mark_price = to_float(item.get("markPrice"))
+                if mark_price <= 0:
+                    continue
+                marks_by_key.setdefault(self.signal_key(item), mark_price)
+                marks_by_coin.setdefault(normalize_position_coin(item.get("coin")), mark_price)
+        return marks_by_key, marks_by_coin
+
+    def signal_market_coin_map(self, summary: dict[str, Any]) -> dict[str, str]:
+        market_coins: dict[str, str] = {}
+        for item in summary.get("positionMarks", []):
+            if not isinstance(item, dict):
+                continue
+            market_coin = str(item.get("marketCoin") or item.get("coin") or "")
+            if market_coin:
+                market_coins.setdefault(normalize_position_coin(item.get("coin")), market_coin)
+        return market_coins
+
+    def measure_signal_outcome_records(
+        self,
+        records: dict[str, Any],
+        *,
+        marks_by_key: dict[str, float],
+        marks_by_coin: dict[str, float],
+        now_ms: int,
+    ) -> dict[str, Any]:
+        """Measure due outcomes, including setups that have left consensus."""
+        fallback_prices: dict[str, float] = {}
+        for record in records.values():
+            started_at = int(to_float(record.get("startedAt")))
+            entry_price = to_float(record.get("entryPrice"))
+            if started_at <= 0 or entry_price <= 0:
+                continue
+            outcomes = record.get("outcomes")
+            if not isinstance(outcomes, dict):
+                outcomes = {}
+                record["outcomes"] = outcomes
+            due = any(
+                label not in outcomes and now_ms - started_at >= horizon_ms
+                for label, horizon_ms in SIGNAL_OUTCOME_HORIZONS_MS.items()
+            )
+            if not due:
+                continue
+            price_source = "mark"
+            mark_price = marks_by_key.get(self.signal_key(record), 0.0)
+            if mark_price <= 0:
+                mark_price = marks_by_coin.get(normalize_position_coin(record.get("coin")), 0.0)
+            if mark_price <= 0:
+                market_coin = str(record.get("marketCoin") or record.get("coin") or "")
+                if market_coin:
+                    if market_coin not in fallback_prices:
+                        fallback_prices[market_coin] = self.candidate_outcome_market_price(
+                            market_coin, now_ms=now_ms
+                        )
+                    mark_price = fallback_prices[market_coin]
+                    price_source = "candle"
+            if mark_price <= 0:
+                continue
+            direction = 1.0 if str(record.get("side") or "").lower() == "long" else -1.0
+            for label, horizon_ms in SIGNAL_OUTCOME_HORIZONS_MS.items():
+                if label in outcomes or now_ms - started_at < horizon_ms:
+                    continue
+                elapsed_ms = now_ms - started_at
+                gross_return = ((mark_price / entry_price) - 1.0) * 100.0 * direction
+                tolerance_ms = horizon_ms * (1.0 + SIGNAL_OUTCOME_HORIZON_TOLERANCE_PCT / 100.0)
+                outcomes[label] = {
+                    "markPrice": round(mark_price, 8),
+                    "grossReturnPct": round(gross_return, 3),
+                    "netReturnPct": round(gross_return - SIGNAL_ROUND_TRIP_COST_PCT, 3),
+                    "returnPct": round(gross_return, 3),
+                    "measuredAt": now_ms,
+                    "measuredAfterMs": elapsed_ms,
+                    "horizonMs": horizon_ms,
+                    "priceSource": price_source,
+                    "degraded": elapsed_ms > tolerance_ms,
+                }
+        return records
+
     def update_signal_outcomes(
         self,
         previous: dict[str, Any],
@@ -5464,86 +5583,175 @@ class WalletTrackerService:
             if isinstance(value, dict)
             and now_ms - int(to_float(value.get("startedAt"))) <= SIGNAL_OUTCOME_RETENTION_MS
         }
-        marks = {
-            self.signal_key(item): to_float(item.get("markPrice"))
-            for item in summary.get("consensus", [])
-            if isinstance(item, dict) and to_float(item.get("markPrice")) > 0
-        }
-
+        marks_by_key, marks_by_coin = self.signal_outcome_mark_maps(summary)
+        market_coins = self.signal_market_coin_map(summary)
         for signal in summary.get("signals", []):
             if not isinstance(signal, dict) or signal.get("status") != "NEW":
                 continue
             started_at = int(to_float(signal.get("firstSeenAt"))) or now_ms
-            entry_price = to_float(signal.get("freshAddVwap"))
+            entry_price = to_float(signal.get("markPrice"))
+            if entry_price <= 0:
+                entry_price = marks_by_key.get(self.signal_key(signal), 0.0)
+            if entry_price <= 0:
+                entry_price = marks_by_coin.get(normalize_position_coin(signal.get("coin")), 0.0)
             if entry_price <= 0:
                 continue
+            coin = signal.get("coin", "Unknown")
             record_key = f'{self.signal_key(signal)}:{started_at}'
             records.setdefault(
                 record_key,
                 {
-                    "coin": signal.get("coin", "Unknown"),
+                    "coin": coin,
+                    "marketCoin": str(signal.get("marketCoin") or market_coins.get(normalize_position_coin(coin)) or coin),
                     "side": signal.get("side", ""),
                     "startedAt": started_at,
                     "entryPrice": round(entry_price, 8),
+                    "walletVwap": round(to_float(signal.get("freshAddVwap")), 8),
+                    "entryDistancePct": round(to_float(signal.get("entryDistancePct")), 3),
                     "probabilityScore": round(to_float(signal.get("probabilityScore")), 1),
-                    "rawProbabilityScore": round(
-                        to_float(signal.get("rawProbabilityScore", signal.get("probabilityScore"))), 1
-                    ),
+                    "rawProbabilityScore": round(to_float(signal.get("rawProbabilityScore", signal.get("probabilityScore"))), 1),
                     "freshWalletCount": int(to_float(signal.get("verifiedFreshIndependentWalletCount"))),
+                    "shadow": False,
+                    "published": True,
                     "outcomes": {},
                 },
             )
+        return self.measure_signal_outcome_records(
+            records, marks_by_key=marks_by_key, marks_by_coin=marks_by_coin, now_ms=now_ms
+        )
 
+    def update_shadow_signal_outcomes(
+        self,
+        previous: dict[str, Any],
+        summary: dict[str, Any],
+        *,
+        now_ms: int,
+    ) -> dict[str, Any]:
+        """Track consensus setups that are not published as alerts."""
+        records = {
+            str(key): dict(value)
+            for key, value in (previous.items() if isinstance(previous, dict) else [])
+            if isinstance(value, dict)
+            and now_ms - int(to_float(value.get("startedAt"))) <= SHADOW_SIGNAL_OUTCOME_RETENTION_MS
+        }
+        marks_by_key, marks_by_coin = self.signal_outcome_mark_maps(summary)
+        market_coins = self.signal_market_coin_map(summary)
+        published_keys = {
+            self.signal_key(signal)
+            for signal in summary.get("signals", [])
+            if isinstance(signal, dict)
+        }
+        recent_starts: dict[str, int] = {}
         for record in records.values():
-            started_at = int(to_float(record.get("startedAt")))
-            entry_price = to_float(record.get("entryPrice"))
-            mark_price = marks.get(self.signal_key(record), 0.0)
-            if started_at <= 0 or entry_price <= 0 or mark_price <= 0:
+            key = str(record.get("signalKey") or self.signal_key(record))
+            recent_starts[key] = max(recent_starts.get(key, 0), int(to_float(record.get("startedAt"))))
+        for item in summary.get("consensus", []):
+            if not isinstance(item, dict):
                 continue
-            outcomes = record.setdefault("outcomes", {})
-            direction = 1.0 if str(record.get("side") or "").lower() == "long" else -1.0
-            for label, horizon_ms in SIGNAL_OUTCOME_HORIZONS_MS.items():
-                if label in outcomes or now_ms - started_at < horizon_ms:
-                    continue
-                outcomes[label] = {
-                    "markPrice": round(mark_price, 8),
-                    "returnPct": round(((mark_price / entry_price) - 1.0) * 100.0 * direction, 3),
-                    "measuredAt": now_ms,
-                }
-        return records
+            signal_key = self.signal_key(item)
+            if signal_key in published_keys:
+                continue
+            if now_ms - recent_starts.get(signal_key, 0) < SHADOW_SIGNAL_OUTCOME_RESTART_MS:
+                continue
+            entry_price = to_float(item.get("markPrice"))
+            probability = self.signal_probability_score(item)
+            if entry_price <= 0 or probability <= 0:
+                continue
+            coin = item.get("coin", "Unknown")
+            records[f"shadow:{signal_key}:{now_ms}"] = {
+                "coin": coin,
+                "marketCoin": str(item.get("marketCoin") or market_coins.get(normalize_position_coin(coin)) or coin),
+                "side": item.get("side", ""),
+                "signalKey": signal_key,
+                "startedAt": now_ms,
+                "entryPrice": round(entry_price, 8),
+                "walletVwap": round(to_float(item.get("freshAddVwap")), 8),
+                "probabilityScore": round(probability, 1),
+                "rawProbabilityScore": round(probability, 1),
+                "freshWalletCount": int(to_float(item.get("verifiedFreshIndependentWalletCount"))),
+                "rejectionReasons": self.signal_rejection_reasons(item, probability),
+                "shadow": True,
+                "published": False,
+                "outcomes": {},
+            }
+            recent_starts[signal_key] = now_ms
+        if len(records) > SHADOW_SIGNAL_OUTCOME_MAX_RECORDS:
+            records = dict(sorted(records.items(), key=lambda row: int(to_float(row[1].get("startedAt"))), reverse=True)[:SHADOW_SIGNAL_OUTCOME_MAX_RECORDS])
+        return self.measure_signal_outcome_records(
+            records, marks_by_key=marks_by_key, marks_by_coin=marks_by_coin, now_ms=now_ms
+        )
 
     def signal_calibration_group(self, coin: Any) -> str:
         normalized = normalize_position_coin(coin)
         return "hip3" if is_stock_like_position(normalized) or is_commodity_like_position(normalized) else "crypto"
 
-    def build_signal_calibration(self, records: dict[str, Any], *, horizon: str = "4h") -> dict[str, Any]:
-        buckets: dict[str, dict[str, list[dict[str, Any]]]] = {}
-        for record in records.values() if isinstance(records, dict) else []:
-            if not isinstance(record, dict):
-                continue
-            outcome = record.get("outcomes", {}).get(horizon)
-            if not isinstance(outcome, dict):
-                continue
-            probability = to_float(record.get("rawProbabilityScore", record.get("probabilityScore")))
-            if probability <= 0:
-                continue
-            group = self.signal_calibration_group(record.get("coin"))
-            bucket = f"{int(probability // 10) * 10}"
-            buckets.setdefault(group, {}).setdefault(bucket, []).append(outcome)
+    def signal_outcome_net_return_pct(self, outcome: dict[str, Any]) -> float:
+        if "netReturnPct" in outcome:
+            return to_float(outcome.get("netReturnPct"))
+        return to_float(outcome.get("grossReturnPct", outcome.get("returnPct"))) - SIGNAL_ROUND_TRIP_COST_PCT
 
-        result: dict[str, Any] = {"horizon": horizon, "groups": {}}
+    def wilson_score_interval(self, wins: int, sample: int, *, z: float = 1.96) -> tuple[float, float]:
+        if sample <= 0:
+            return (0.0, 100.0)
+        phat = wins / sample
+        denominator = 1.0 + (z * z) / sample
+        centre = phat + (z * z) / (2 * sample)
+        spread = z * ((phat * (1.0 - phat) / sample) + (z * z) / (4 * sample * sample)) ** 0.5
+        return (max(0.0, (centre - spread) / denominator) * 100.0, min(1.0, (centre + spread) / denominator) * 100.0)
+
+    def build_signal_calibration(
+        self,
+        records: dict[str, Any],
+        *,
+        horizon: str = "4h",
+        shadow_records: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        buckets: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        shadow_counts: dict[str, dict[str, int]] = {}
+        degraded_counts: dict[str, dict[str, int]] = {}
+        for source_records, is_shadow in ((records, False), (shadow_records or {}, True)):
+            for record in source_records.values() if isinstance(source_records, dict) else []:
+                if not isinstance(record, dict):
+                    continue
+                outcomes = record.get("outcomes")
+                outcome = outcomes.get(horizon) if isinstance(outcomes, dict) else None
+                if not isinstance(outcome, dict):
+                    continue
+                probability = to_float(record.get("rawProbabilityScore", record.get("probabilityScore")))
+                if probability <= 0:
+                    continue
+                group = self.signal_calibration_group(record.get("coin"))
+                bucket = f"{int(probability // 10) * 10}"
+                if outcome.get("degraded"):
+                    degraded_counts.setdefault(group, {})[bucket] = degraded_counts.setdefault(group, {}).get(bucket, 0) + 1
+                    continue
+                buckets.setdefault(group, {}).setdefault(bucket, []).append(outcome)
+                if is_shadow:
+                    shadow_counts.setdefault(group, {})[bucket] = shadow_counts.setdefault(group, {}).get(bucket, 0) + 1
+
+        result: dict[str, Any] = {"horizon": horizon, "groups": {}, "baseRates": {}, "priorWeight": SIGNAL_CALIBRATION_PRIOR_WEIGHT, "minSample": SIGNAL_CALIBRATION_MIN_SAMPLE, "roundTripCostPct": SIGNAL_ROUND_TRIP_COST_PCT}
         for group, group_buckets in buckets.items():
+            group_sample = sum(len(outcomes) for outcomes in group_buckets.values())
+            group_wins = sum(1 for outcomes in group_buckets.values() for outcome in outcomes if self.signal_outcome_net_return_pct(outcome) > 0)
+            base_rate = group_wins / group_sample * 100.0 if group_sample else 50.0
+            result["baseRates"][group] = round(base_rate, 1)
             result["groups"][group] = {}
             for bucket, outcomes in group_buckets.items():
                 sample = len(outcomes)
-                wins = sum(1 for item in outcomes if to_float(item.get("returnPct")) > 0)
+                wins = sum(1 for item in outcomes if self.signal_outcome_net_return_pct(item) > 0)
                 empirical = wins / sample * 100.0
-                prior = min(95.0, int(bucket) + 5.0)
-                calibrated = (empirical * sample + prior * 12) / (sample + 12)
+                calibrated = (empirical * sample + base_rate * SIGNAL_CALIBRATION_PRIOR_WEIGHT) / (sample + SIGNAL_CALIBRATION_PRIOR_WEIGHT)
+                low, high = self.wilson_score_interval(wins, sample)
                 result["groups"][group][bucket] = {
                     "sample": sample,
                     "wins": wins,
+                    "empiricalProbability": round(empirical, 1),
+                    "baseRateProbability": round(base_rate, 1),
                     "calibratedProbability": round(calibrated, 1),
+                    "confidenceLow": round(low, 1),
+                    "confidenceHigh": round(high, 1),
+                    "shadowSample": int(shadow_counts.get(group, {}).get(bucket, 0)),
+                    "degradedSample": int(degraded_counts.get(group, {}).get(bucket, 0)),
                 }
         return result
 
@@ -5552,7 +5760,7 @@ class WalletTrackerService:
         summary: dict[str, Any],
         calibration: dict[str, Any],
         *,
-        min_sample: int = 8,
+        min_sample: int = SIGNAL_CALIBRATION_MIN_SAMPLE,
     ) -> dict[str, Any]:
         adjusted = []
         groups = calibration.get("groups", {}) if isinstance(calibration, dict) else {}
@@ -5565,15 +5773,21 @@ class WalletTrackerService:
             group = self.signal_calibration_group(signal.get("coin"))
             bucket = f"{int(raw // 10) * 10}"
             stats = groups.get(group, {}).get(bucket, {}) if isinstance(groups.get(group, {}), dict) else {}
+            sample = int(to_float(stats.get("sample")))
             calibrated = raw
-            if int(to_float(stats.get("sample"))) >= min_sample:
+            applied = sample >= min_sample
+            if applied:
                 target = to_float(stats.get("calibratedProbability"))
                 calibrated = max(raw - 10.0, min(raw + 10.0, target))
             item = {
                 **signal,
                 "rawProbabilityScore": round(raw, 1),
                 "probabilityScore": round(calibrated, 1),
-                "calibrationSample": int(to_float(stats.get("sample"))),
+                "calibrationSample": sample,
+                "calibrationApplied": applied,
+                "calibrationMinSample": int(min_sample),
+                "calibrationConfidenceLow": round(to_float(stats.get("confidenceLow")), 1),
+                "calibrationConfidenceHigh": round(to_float(stats.get("confidenceHigh")), 1) if stats else 100.0,
             }
             if calibrated >= ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD:
                 adjusted.append(item)
@@ -6145,7 +6359,10 @@ class WalletTrackerService:
             state,
             position_lifecycle=position_lifecycle,
         )
-        calibration = self.build_signal_calibration(state.get("signalOutcomes", {}))
+        calibration = self.build_signal_calibration(
+            state.get("signalOutcomes", {}),
+            shadow_records=state.get("shadowSignalOutcomes", {}),
+        )
         summary = self.apply_signal_calibration(summary, calibration)
         cmm_summary = self.build_cached_cmm_signal_summary(state)
         previous_summary = state.get("summary", {}) if isinstance(state, dict) else {}
@@ -6169,6 +6386,11 @@ class WalletTrackerService:
         )
         signal_outcomes = self.update_signal_outcomes(
             state.get("signalOutcomes", {}),
+            alert_summary,
+            now_ms=dedupe_now_ms,
+        )
+        shadow_signal_outcomes = self.update_shadow_signal_outcomes(
+            state.get("shadowSignalOutcomes", {}),
             alert_summary,
             now_ms=dedupe_now_ms,
         )
@@ -6274,6 +6496,7 @@ class WalletTrackerService:
             "topConvictionWallets": top_cohort,
             "walletPositionLifecycle": position_lifecycle,
             "signalOutcomes": signal_outcomes,
+            "shadowSignalOutcomes": shadow_signal_outcomes,
             "candidateSignalOutcomes": candidate_signal_outcomes,
             "moniSocial": moni_summary,
         }
@@ -6317,7 +6540,10 @@ class WalletTrackerService:
             state,
             position_lifecycle=position_lifecycle,
         )
-        calibration = self.build_signal_calibration(state.get("signalOutcomes", {}))
+        calibration = self.build_signal_calibration(
+            state.get("signalOutcomes", {}),
+            shadow_records=state.get("shadowSignalOutcomes", {}),
+        )
         summary = self.apply_signal_calibration(summary, calibration)
         cmm_summary = self.build_cached_cmm_signal_summary(state)
         previous_summary = state.get("summary", {}) if isinstance(state, dict) else {}
@@ -6341,6 +6567,11 @@ class WalletTrackerService:
         )
         signal_outcomes = self.update_signal_outcomes(
             state.get("signalOutcomes", {}),
+            alert_summary,
+            now_ms=lifecycle_now_ms,
+        )
+        shadow_signal_outcomes = self.update_shadow_signal_outcomes(
+            state.get("shadowSignalOutcomes", {}),
             alert_summary,
             now_ms=lifecycle_now_ms,
         )
@@ -6424,6 +6655,7 @@ class WalletTrackerService:
             "topConvictionWallets": top_cohort,
             "walletPositionLifecycle": position_lifecycle,
             "signalOutcomes": signal_outcomes,
+            "shadowSignalOutcomes": shadow_signal_outcomes,
             "candidateSignalOutcomes": candidate_signal_outcomes,
             "cmmSignals": cmm_summary,
             "moniSocial": moni_summary,

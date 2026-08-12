@@ -14,6 +14,8 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import random
+import statistics
 import sys
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -33,6 +35,11 @@ DEFAULT_CONFIGS = (
     {"name": "core_4w_30m", "minWallets": 4, "windowMinutes": 30},
     {"name": "strict_5w_30m", "minWallets": 5, "windowMinutes": 30},
 )
+CONSENSUS_REFRACTORY_WINDOWS = 1
+BOOTSTRAP_SEED = 20240517
+BOOTSTRAP_RESAMPLES = 2000
+BOOTSTRAP_CONFIDENCE = 0.95
+MIN_OBSERVATIONS_FOR_SELECTION = 30
 
 
 def classify_open_side(direction: Any) -> str | None:
@@ -64,39 +71,45 @@ def normalize_fill(address: str, fill: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def build_consensus_events(
-    fills: list[dict[str, Any]], *, min_wallets: int, window_minutes: int
+    fills: list[dict[str, Any]],
+    *,
+    min_wallets: int,
+    window_minutes: int,
+    refractory_windows: int = CONSENSUS_REFRACTORY_WINDOWS,
 ) -> list[dict[str, Any]]:
-    """Emit one signal when a fixed, non-overlapping window first reaches consensus."""
-    window_ms = window_minutes * 60 * 1000
-    buckets: dict[tuple[str, str, int], list[dict[str, Any]]] = defaultdict(list)
+    """Emit consensus from a rolling time window, as the live detector does."""
+    window_ms = max(int(window_minutes), 0) * 60 * 1000
+    refractory_ms = window_ms * max(int(refractory_windows), 0)
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for fill in fills:
-        bucket_start = (int(fill["time"]) // window_ms) * window_ms
-        buckets[(str(fill["coin"]), str(fill["side"]), bucket_start)].append(fill)
+        groups[(str(fill["coin"]), str(fill["side"]))].append(fill)
 
     events = []
-    for (coin, side, bucket_start), bucket_fills in sorted(buckets.items(), key=lambda item: item[0][2]):
-        wallet_fills: dict[str, list[dict[str, Any]]] = defaultdict(list)
-        for fill in bucket_fills:
-            wallet_fills[str(fill["address"])].append(fill)
-        if len(wallet_fills) < min_wallets:
-            continue
-        weighted_size = sum(fill["price"] * fill["size"] for fill in bucket_fills)
-        total_size = sum(fill["size"] for fill in bucket_fills)
-        event_time = max(int(fill["time"]) for fill in bucket_fills)
-        events.append(
-            {
-                "coin": coin,
-                "side": side,
-                "time": event_time,
-                "windowStart": bucket_start,
-                "windowMinutes": window_minutes,
-                "walletCount": len(wallet_fills),
-                "fillCount": len(bucket_fills),
+    for (coin, side), group in groups.items():
+        ordered = sorted(group, key=lambda item: (int(item["time"]), str(item["address"])))
+        left = 0
+        muted_until: int | None = None
+        for right, fill in enumerate(ordered):
+            event_time = int(fill["time"])
+            while int(ordered[left]["time"]) < event_time - window_ms:
+                left += 1
+            if muted_until is not None and event_time <= muted_until:
+                continue
+            window_fills = ordered[left : right + 1]
+            wallets = sorted({str(item["address"]) for item in window_fills})
+            if len(wallets) < min_wallets:
+                continue
+            weighted_size = sum(to_float(item["price"]) * to_float(item["size"]) for item in window_fills)
+            total_size = sum(to_float(item["size"]) for item in window_fills)
+            events.append({
+                "coin": coin, "side": side, "time": event_time,
+                "windowStart": int(window_fills[0]["time"]), "windowMinutes": window_minutes,
+                "walletCount": len(wallets), "fillCount": len(window_fills),
                 "entryPrice": round(weighted_size / total_size, 10) if total_size else 0.0,
-                "size": round(total_size, 10),
-                "wallets": sorted(wallet_fills),
-            }
-        )
+                "size": round(total_size, 10), "wallets": wallets,
+            })
+            muted_until = event_time + refractory_ms
+    events.sort(key=lambda item: (int(item["time"]), str(item["coin"]), str(item["side"])))
     return events
 
 
@@ -141,6 +154,28 @@ def evaluate_event(
     return {**event, "outcomes": outcomes}
 
 
+def bootstrap_mean_ci(
+    values: list[float], *, confidence: float = BOOTSTRAP_CONFIDENCE,
+    resamples: int = BOOTSTRAP_RESAMPLES, seed: int = BOOTSTRAP_SEED,
+) -> dict[str, Any] | None:
+    """Deterministic percentile-bootstrap confidence interval for a mean."""
+    sample = [to_float(value) for value in values]
+    if len(sample) < 2 or resamples < 2 or not 0.0 < confidence < 1.0:
+        return None
+    rng = random.Random(seed)
+    means = sorted(sum(sample[rng.randrange(len(sample))] for _ in sample) / len(sample) for _ in range(resamples))
+    alpha = (1.0 - confidence) / 2.0
+    return {
+        "lowerPct": round(means[min(resamples - 1, max(0, math.floor(alpha * resamples)))], 4),
+        "upperPct": round(means[min(resamples - 1, max(0, math.ceil((1.0 - alpha) * resamples) - 1))], 4),
+        "confidence": confidence, "method": "percentile bootstrap", "resamples": resamples, "seed": seed,
+    }
+
+
+def ci_excludes_zero(interval: dict[str, Any] | None) -> bool:
+    return bool(interval) and (to_float(interval["lowerPct"]) > 0.0 or to_float(interval["upperPct"]) < 0.0)
+
+
 def summarize_events(events: list[dict[str, Any]], *, period: str) -> dict[str, Any]:
     output: dict[str, Any] = {"period": period, "signals": len(events), "horizons": {}}
     for horizon in HORIZONS_HOURS:
@@ -150,6 +185,7 @@ def summarize_events(events: list[dict[str, Any]], *, period: str) -> dict[str, 
         returns = [to_float(row["netReturnPct"]) for row in rows]
         wins = [value for value in returns if value > 0]
         losses = [value for value in returns if value <= 0]
+        interval = bootstrap_mean_ci(returns)
         output["horizons"][f"{horizon}h"] = {
             "observations": len(rows),
             "winRatePct": round(len(wins) / len(rows) * 100, 2),
@@ -158,6 +194,11 @@ def summarize_events(events: list[dict[str, Any]], *, period: str) -> dict[str, 
             "profitFactor": round(sum(wins) / abs(sum(losses)), 3) if losses and sum(losses) else None,
             "avgMfePct": round(sum(to_float(row["mfePct"]) for row in rows) / len(rows), 4),
             "avgMaePct": round(sum(to_float(row["maePct"]) for row in rows) / len(rows), 4),
+            "stdevNetReturnPct": round(statistics.stdev(returns), 4) if len(returns) > 1 else None,
+            "netReturnCi95": interval,
+            "ciExcludesZero": ci_excludes_zero(interval),
+            "belowMinObservations": len(rows) < MIN_OBSERVATIONS_FOR_SELECTION,
+            "minObservationsForSelection": MIN_OBSERVATIONS_FOR_SELECTION,
         }
     return output
 
@@ -255,7 +296,7 @@ def main() -> int:
 
     validation_candidates = [
         item for item in configurations
-        if item["summary"]["validation"]["horizons"].get("4h", {}).get("observations", 0) >= 5
+        if item["summary"]["validation"]["horizons"].get("4h", {}).get("observations", 0) >= MIN_OBSERVATIONS_FOR_SELECTION
     ]
     selected = max(
         validation_candidates,
@@ -266,14 +307,18 @@ def main() -> int:
         "generatedAt": now_iso(),
         "methodology": {
             "source": "Hyperliquid userFillsByTime plus 1h candleSnapshot",
-            "signal": "distinct wallets opening the same coin and side within a fixed window",
+            "signal": "distinct wallets opening the same coin and side within any rolling window, matching the live engine's rolling activity window",
+            "refractory": f"after a coin/side fires, further events for that pair are suppressed for {CONSENSUS_REFRACTORY_WINDOWS} window length(s)",
             "entry": "fill-size-weighted consensus price at the last fill in the window",
             "outcomes": "direction-adjusted close return, MFE and MAE after estimated round-trip costs",
             "costBpsPerSide": args.cost_bps_per_side,
             "walkForward": "chronological 60% train / 20% validation / 20% test; select only on validation",
+            "significance": f"{int(BOOTSTRAP_CONFIDENCE * 100)}% bootstrap confidence intervals for net return; {MIN_OBSERVATIONS_FOR_SELECTION} validation observations are required for selection.",
             "limitations": [
                 "Historical position snapshots, correlation groups, CMM confirmation, and point-in-time top-10 membership are unavailable.",
                 "This evaluates opening consensus only; it is not a claim that the complete live signal engine is backtested.",
+                "The current wallet universe is hindsight-selected, so this is not a clean out-of-sample estimate of the original wallet-selection process.",
+                f"{len(DEFAULT_CONFIGS)} configs x {len(HORIZONS_HOURS)} horizons are screened without multiple-comparison correction.",
             ],
         },
         "coverage": {"wallets": len(wallets), "openFills": len(fills), "coinsWithEvents": len(coins), "days": args.days},
@@ -281,6 +326,8 @@ def main() -> int:
         "selectedOnValidation": {
             "name": selected["name"],
             "test4h": selected["summary"]["test"]["horizons"].get("4h", {}),
+            "validation4h": selected["summary"]["validation"]["horizons"].get("4h", {}),
+            "minObservationsForSelection": MIN_OBSERVATIONS_FOR_SELECTION,
         } if selected else None,
         "errors": errors,
     }
