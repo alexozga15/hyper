@@ -6,7 +6,12 @@ from unittest.mock import patch
 
 from scripts.run_health_monitor import detect_health_issues
 from scripts.run_wallet_review import evaluate_wallets
-from server import HyperliquidClient, RequestRateLimiter, WalletTrackerService
+from server import (
+    SIGNAL_CALIBRATION_MIN_SAMPLE,
+    HyperliquidClient,
+    RequestRateLimiter,
+    WalletTrackerService,
+)
 
 
 class OperationalControlTests(unittest.TestCase):
@@ -25,19 +30,32 @@ class OperationalControlTests(unittest.TestCase):
         self.assertFalse(self.service.should_count_wallet_for_conviction(wallet))
 
     def test_calibration_requires_sample_and_caps_adjustment(self) -> None:
-        records = {
-            str(index): {
-                "coin": "BTC",
-                "probabilityScore": 85,
-                "outcomes": {"4h": {"returnPct": -1}},
+        def build_records(count: int) -> dict[str, dict[str, object]]:
+            return {
+                str(index): {
+                    "coin": "BTC",
+                    "probabilityScore": 85,
+                    "outcomes": {"4h": {"returnPct": -1}},
+                }
+                for index in range(count)
             }
-            for index in range(20)
-        }
-        calibration = self.service.build_signal_calibration(records)
+
         summary = {"signals": [{"coin": "BTC", "probabilityScore": 85}], "signalCount": 1}
+
+        thin = self.service.apply_signal_calibration(
+            summary, self.service.build_signal_calibration(build_records(8))
+        )
+        # 8 samples is below SIGNAL_CALIBRATION_MIN_SAMPLE, so nothing moves.
+        self.assertEqual(thin["signals"][0]["probabilityScore"], 85.0)
+        self.assertFalse(thin["signals"][0]["calibrationApplied"])
+
+        calibration = self.service.build_signal_calibration(
+            build_records(SIGNAL_CALIBRATION_MIN_SAMPLE)
+        )
         adjusted = self.service.apply_signal_calibration(summary, calibration)
         self.assertEqual(adjusted["signals"][0]["probabilityScore"], 75.0)
         self.assertEqual(adjusted["signals"][0]["rawProbabilityScore"], 85.0)
+        self.assertTrue(adjusted["signals"][0]["calibrationApplied"])
 
     def test_wallet_review_reduces_weak_wallet_weight(self) -> None:
         reviews = evaluate_wallets(
