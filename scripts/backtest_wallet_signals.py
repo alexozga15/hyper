@@ -219,6 +219,45 @@ def evaluable_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [item for item in events if item.get("outcomes")]
 
 
+def build_report_warnings(
+    selected: dict[str, Any] | None,
+    configurations: list[dict[str, Any]],
+    *,
+    min_observations: int = MIN_OBSERVATIONS_FOR_SELECTION,
+) -> list[str]:
+    """Make statistical limitations explicit in every backtest report."""
+    comparisons = len(configurations) * len(HORIZONS_HOURS)
+    warnings = [
+        f"{len(configurations)} configs x {len(HORIZONS_HOURS)} horizons = {comparisons} comparisons were "
+        "screened without multiple-comparison correction, so the selected edge and confidence interval are optimistic."
+    ]
+    if selected is None:
+        warnings.append(
+            f"No configuration reached {min_observations} validation observations at 4h, so nothing was selected."
+        )
+        return warnings
+    validation = selected["summary"]["validation"]["horizons"].get("4h", {})
+    test = selected["summary"]["test"]["horizons"].get("4h", {})
+    interval = validation.get("netReturnCi95")
+    if not interval:
+        warnings.append(f"Selected config '{selected['name']}' has too few 4h validation observations for a confidence interval.")
+    elif not ci_excludes_zero(interval):
+        warnings.append(
+            f"Selected config '{selected['name']}' has a 95% 4h validation interval of "
+            f"[{interval['lowerPct']}%, {interval['upperPct']}%], which includes zero."
+        )
+    for period, summary in (("validation", validation), ("test", test)):
+        observations = int(to_float(summary.get("observations")))
+        if observations < min_observations:
+            warnings.append(
+                f"Selected config '{selected['name']}' has only {observations} {period} observations at 4h, "
+                f"below the minimum of {min_observations}."
+            )
+    if test and not test.get("ciExcludesZero"):
+        warnings.append(f"Selected config '{selected['name']}' does not have a 4h test confidence interval that excludes zero.")
+    return warnings
+
+
 def fetch_candles(client: HyperliquidClient, coin: str, start_ms: int, end_ms: int) -> list[dict[str, Any]]:
     result = client.safe_post_result(
         {"type": "candleSnapshot", "req": {"coin": coin, "interval": "1h", "startTime": start_ms, "endTime": end_ms}},
@@ -303,6 +342,7 @@ def main() -> int:
         key=lambda item: item["summary"]["validation"]["horizons"]["4h"]["avgNetReturnPct"],
         default=None,
     )
+    warnings = build_report_warnings(selected, configurations)
     report = {
         "generatedAt": now_iso(),
         "methodology": {
@@ -329,11 +369,12 @@ def main() -> int:
             "validation4h": selected["summary"]["validation"]["horizons"].get("4h", {}),
             "minObservationsForSelection": MIN_OBSERVATIONS_FOR_SELECTION,
         } if selected else None,
+        "warnings": warnings,
         "errors": errors,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2), encoding="utf-8")
-    print(json.dumps({"output": str(args.output), "coverage": report["coverage"], "selectedOnValidation": report["selectedOnValidation"], "errors": errors}, indent=2))
+    print(json.dumps({"output": str(args.output), "coverage": report["coverage"], "selectedOnValidation": report["selectedOnValidation"], "warnings": warnings, "errors": errors}, indent=2))
     return 0
 
 

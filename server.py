@@ -5753,6 +5753,26 @@ class WalletTrackerService:
                     "shadowSample": int(shadow_counts.get(group, {}).get(bucket, 0)),
                     "degradedSample": int(degraded_counts.get(group, {}).get(bucket, 0)),
                 }
+        # A bucket containing only delayed measurements has no normal outcome
+        # entry above. Keep that fact visible instead of presenting an empty
+        # calibration as if there was simply no data.
+        for group, group_degraded in degraded_counts.items():
+            result["groups"].setdefault(group, {})
+            for bucket, count in group_degraded.items():
+                result["groups"][group].setdefault(
+                    bucket,
+                    {
+                        "sample": 0,
+                        "wins": 0,
+                        "empiricalProbability": 0.0,
+                        "baseRateProbability": result["baseRates"].get(group, 50.0),
+                        "calibratedProbability": result["baseRates"].get(group, 50.0),
+                        "confidenceLow": 0.0,
+                        "confidenceHigh": 100.0,
+                        "shadowSample": 0,
+                        "degradedSample": int(count),
+                    },
+                )
         return result
 
     def apply_signal_calibration(
