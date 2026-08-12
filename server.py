@@ -380,6 +380,44 @@ def normalize_position_coin(coin: Any) -> str:
     return label
 
 
+def raw_fill_identity(fill: Any) -> tuple[Any, ...]:
+    """Stable identity for a raw Hyperliquid fill.
+
+    ``userFills`` and ``userFillsByTime`` overlap, so the same trade can arrive
+    from both endpoints. Trade ids are unique when present; aggregated or
+    partial payloads can omit them, so fall back to the observable trade
+    attributes. Missing keys must never raise.
+    """
+    if not isinstance(fill, dict):
+        return ("raw", repr(fill))
+    trade_id = fill.get("tid")
+    if trade_id not in (None, ""):
+        return ("tid", str(trade_id))
+    return (
+        "attrs",
+        int(to_float(fill.get("time"))),
+        normalize_position_coin(fill.get("coin")),
+        to_float(fill.get("px")),
+        to_float(fill.get("sz")),
+        str(fill.get("dir") or ""),
+        str(fill.get("oid") or ""),
+    )
+
+
+def normalize_fill_entry(fill: Any) -> dict[str, Any]:
+    if not isinstance(fill, dict):
+        return {}
+    return {
+        "coin": fill.get("coin", "Unknown"),
+        "direction": fill.get("dir", "Unknown"),
+        "price": to_float(fill.get("px")),
+        "size": to_float(fill.get("sz")),
+        "closedPnl": to_float(fill.get("closedPnl")),
+        "fee": abs(to_float(fill.get("fee"))),
+        "time": fill.get("time"),
+    }
+
+
 def normalize_cmm_coin(coin: Any) -> str:
     label = normalize_position_coin(coin)
     prefix, separator, suffix = label.partition(":")
@@ -1219,6 +1257,26 @@ class WalletTrackerService:
         ok = bool(result.get("ok")) and isinstance(fills, list)
         return {"ok": ok, "data": fills if isinstance(fills, list) else [], "error": result.get("error", "")}
 
+    def fetch_recent_fills_result(self, address: str) -> dict[str, Any]:
+        """Latest fills for a wallet, newest first.
+
+        ``userFillsByTime`` caps at 2000 rows ascending from ``startTime``, so a
+        busy wallet exhausts the quota inside the oldest hours of the lookback
+        window and its current activity never appears. ``userFills`` returns the
+        most recent 2000 fills instead, which is what freshness detection needs.
+        """
+        result = self.client.safe_post_result(
+            {
+                "type": "userFills",
+                "user": address,
+                "aggregateByTime": True,
+            },
+            [],
+        )
+        fills = result.get("data") if result.get("ok") else []
+        ok = bool(result.get("ok")) and isinstance(fills, list)
+        return {"ok": ok, "data": fills if isinstance(fills, list) else [], "error": result.get("error", "")}
+
     def build_performance(self, portfolio: dict[str, Any]) -> dict[str, Any]:
         periods = {}
         for period_name in ("day", "week", "month", "allTime"):
@@ -1260,6 +1318,7 @@ class WalletTrackerService:
                     },
                 ),
                 "fills": executor.submit(self.fetch_fills_result, wallet.address, fills_start_ms),
+                "recentFills": executor.submit(self.fetch_recent_fills_result, wallet.address),
             }
             if full_quality_refresh:
                 futures["orders"] = executor.submit(self.fetch_open_orders_result, wallet.address)
@@ -1268,6 +1327,7 @@ class WalletTrackerService:
 
         state = futures["state"].result()
         fills_result = futures["fills"].result()
+        recent_fills_result = futures["recentFills"].result()
         cached = cached_snapshot if isinstance(cached_snapshot, dict) else {}
         orders_result = (
             futures["orders"].result()
@@ -1284,6 +1344,10 @@ class WalletTrackerService:
         fills = fills_result.get("data", []) if isinstance(fills_result, dict) else []
         portfolio = portfolio_result.get("data", {}) if isinstance(portfolio_result, dict) else {}
         fills_ok = bool(isinstance(fills_result, dict) and fills_result.get("ok"))
+        recent_fills_ok = bool(isinstance(recent_fills_result, dict) and recent_fills_result.get("ok"))
+        live_fills = recent_fills_result.get("data", []) if recent_fills_ok else []
+        if not isinstance(live_fills, list):
+            live_fills = []
         portfolio_ok = bool(isinstance(portfolio_result, dict) and portfolio_result.get("ok"))
         orders_ok = bool(isinstance(orders_result, dict) and orders_result.get("ok"))
 
@@ -1322,6 +1386,7 @@ class WalletTrackerService:
         positions.sort(key=lambda item: abs(item["positionValue"]), reverse=True)
 
         recent_fill_entries: list[dict[str, Any]] = []
+        windowed_identities: set[tuple[Any, ...]] = set()
         recent_realized_pnl = 0.0
         realized_pnl_30d = 0.0
         gross_profit_30d = 0.0
@@ -1374,6 +1439,7 @@ class WalletTrackerService:
                 elif closed_pnl < 0:
                     loss_count += 1
 
+            windowed_identities.add(raw_fill_identity(fill))
             recent_fill_entries.append(
                 {
                     "coin": fill.get("coin", "Unknown"),
@@ -1386,8 +1452,20 @@ class WalletTrackerService:
                 }
             )
 
-        # Hyperliquid supplies fills oldest first. Keep the newest records so
-        # freshness and recent-add logic inspect actual current activity.
+        # userFillsByTime caps at 2000 rows ascending from startTime, so a busy
+        # wallet's newest trades fall off the end of the time-windowed page.
+        # Union in the userFills page (newest first) so freshness and
+        # recent-add logic inspect actual current activity. Aggregates above
+        # deliberately keep using the time-windowed result only.
+        for fill in live_fills:
+            identity = raw_fill_identity(fill)
+            if identity in windowed_identities:
+                continue
+            windowed_identities.add(identity)
+            entry = normalize_fill_entry(fill)
+            if entry:
+                recent_fill_entries.append(entry)
+
         recent_fills = sorted(
             recent_fill_entries,
             key=lambda item: int(to_float(item.get("time"))),
@@ -1512,6 +1590,10 @@ class WalletTrackerService:
                 "fillsOk": fills_ok,
                 "portfolioOk": portfolio_ok,
                 "ordersOk": orders_ok,
+                "recentFillsOk": recent_fills_ok,
+                "recentFillsError": (
+                    recent_fills_result.get("error", "") if isinstance(recent_fills_result, dict) else ""
+                ),
                 "fillsError": fills_result.get("error", "") if isinstance(fills_result, dict) else "",
                 "portfolioError": portfolio_result.get("error", "") if isinstance(portfolio_result, dict) else "",
                 "ordersError": orders_result.get("error", "") if isinstance(orders_result, dict) else "",

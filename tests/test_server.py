@@ -1471,6 +1471,8 @@ class AlertSummaryTests(unittest.TestCase):
         ), patch.object(
             self.service, "fetch_fills_result", return_value={"ok": False, "data": [], "error": "HTTP 429"}
         ), patch.object(
+            self.service, "fetch_recent_fills_result", return_value={"ok": False, "data": [], "error": "HTTP 429"}
+        ), patch.object(
             self.service, "fetch_open_orders_result", return_value={"ok": True, "data": [], "error": ""}
         ), patch.object(
             self.service, "fetch_portfolio_result", return_value={"ok": False, "data": {}, "error": "HTTP 429"}
@@ -1517,6 +1519,8 @@ class AlertSummaryTests(unittest.TestCase):
                 ],
                 "error": "",
             },
+        ), patch.object(
+            self.service, "fetch_recent_fills_result", return_value={"ok": True, "data": [], "error": ""}
         ), patch.object(self.service, "fetch_open_orders_result") as orders, patch.object(
             self.service, "fetch_portfolio_result"
         ) as portfolio, patch.object(self.service, "fetch_wallet_role") as role:
@@ -1565,6 +1569,8 @@ class AlertSummaryTests(unittest.TestCase):
             self.service,
             "fetch_fills_result",
             return_value={"ok": True, "data": shuffled, "error": ""},
+        ), patch.object(
+            self.service, "fetch_recent_fills_result", return_value={"ok": True, "data": [], "error": ""}
         ), patch.object(self.service, "fetch_open_orders_result", return_value={"ok": True, "data": [], "error": ""}), patch.object(
             self.service, "fetch_portfolio_result", return_value={"ok": True, "data": {}, "error": ""}
         ), patch.object(self.service, "fetch_wallet_role", return_value="user"):
@@ -1581,6 +1587,132 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(snapshot["fills30d"], total_fills)
         self.assertEqual(snapshot["closedTrades30d"], total_fills)
         self.assertAlmostEqual(snapshot["realizedPnl30d"], 100.0 * total_fills)
+
+    def _snapshot_with_fill_pages(
+        self,
+        windowed: dict[str, Any],
+        recent: dict[str, Any],
+    ) -> dict[str, Any]:
+        wallet = TrackedWallet(address="0x1111111111111111111111111111111111111111", alias="", notes="", created_at="")
+        state = {
+            "marginSummary": {"accountValue": "1000000", "totalNtlPos": "0", "totalMarginUsed": "0"},
+            "withdrawable": "1000000",
+            "assetPositions": [],
+        }
+        with patch.object(
+            self.service.client, "safe_subscribe_all_dexs_clearinghouse_state", return_value=state
+        ), patch.object(
+            self.service, "fetch_fills_result", return_value=windowed
+        ), patch.object(
+            self.service, "fetch_recent_fills_result", return_value=recent
+        ), patch.object(
+            self.service, "fetch_open_orders_result", return_value={"ok": True, "data": [], "error": ""}
+        ), patch.object(
+            self.service, "fetch_portfolio_result", return_value={"ok": True, "data": {}, "error": ""}
+        ), patch.object(self.service, "fetch_wallet_role", return_value="user"):
+            return self.service.fetch_wallet_snapshot(wallet)
+
+    @staticmethod
+    def _raw_fill(time_ms: int, **overrides: Any) -> dict[str, Any]:
+        fill = {
+            "coin": "BTC",
+            "dir": "Open Long",
+            "px": "70000",
+            "sz": "1",
+            "closedPnl": "0",
+            "fee": "1",
+            "time": int(time_ms),
+        }
+        fill.update(overrides)
+        return fill
+
+    def test_recent_fills_include_live_page_when_time_window_page_is_truncated(self) -> None:
+        # userFillsByTime caps at 2000 rows ascending from startTime, so a busy
+        # wallet's page is exhausted days before "now" and its current activity
+        # is invisible. The userFills page is the only source of fresh fills.
+        now_ms = current_time_ms()
+        truncated_ascending = [
+            self._raw_fill(now_ms - (6 * 24 * 60 * 60 * 1000) + index * 60_000, tid=index)
+            for index in range(2000)
+        ]
+        live_page = [
+            self._raw_fill(now_ms - 18 * 60_000, tid=900_001, coin="ETH"),
+            self._raw_fill(now_ms - 45 * 60_000, tid=900_002, coin="SOL"),
+        ]
+
+        snapshot = self._snapshot_with_fill_pages(
+            {"ok": True, "data": truncated_ascending, "error": ""},
+            {"ok": True, "data": list(reversed(live_page)), "error": ""},
+        )
+
+        recent_fills = snapshot["recentFills"]
+        times = [int(fill["time"]) for fill in recent_fills]
+        self.assertEqual(times, sorted(times, reverse=True))
+        self.assertEqual([fill["coin"] for fill in recent_fills[:2]], ["ETH", "SOL"])
+        self.assertLess(now_ms - times[0], 60 * 60 * 1000)
+        self.assertEqual(snapshot["daysSinceLastFill"], 0.0)
+
+    def test_recent_fills_deduplicate_overlap_between_fill_endpoints(self) -> None:
+        now_ms = current_time_ms()
+        shared_with_tid = self._raw_fill(now_ms - 30 * 60_000, tid=4242)
+        shared_without_tid = self._raw_fill(now_ms - 40 * 60_000, coin="SOL", oid=77)
+        live_only = self._raw_fill(now_ms - 5 * 60_000, coin="ETH", tid=4243)
+
+        snapshot = self._snapshot_with_fill_pages(
+            {"ok": True, "data": [shared_without_tid, shared_with_tid], "error": ""},
+            {
+                "ok": True,
+                "data": [live_only, dict(shared_with_tid), dict(shared_without_tid)],
+                "error": "",
+            },
+        )
+
+        recent_fills = snapshot["recentFills"]
+        self.assertEqual([fill["coin"] for fill in recent_fills], ["ETH", "BTC", "SOL"])
+        self.assertEqual(
+            [int(fill["time"]) for fill in recent_fills],
+            [int(live_only["time"]), int(shared_with_tid["time"]), int(shared_without_tid["time"])],
+        )
+
+    def test_recent_fills_degrade_to_time_window_page_when_live_call_fails(self) -> None:
+        now_ms = current_time_ms()
+        windowed = [self._raw_fill(now_ms - 2 * 60 * 60 * 1000, tid=1)]
+
+        snapshot = self._snapshot_with_fill_pages(
+            {"ok": True, "data": windowed, "error": ""},
+            {"ok": False, "data": [], "error": "HTTP 429"},
+        )
+
+        self.assertEqual(len(snapshot["recentFills"]), 1)
+        self.assertTrue(snapshot["dataQuality"]["fillsOk"])
+        self.assertFalse(snapshot["dataQuality"]["recentFillsOk"])
+        self.assertEqual(snapshot["dataQuality"]["recentFillsError"], "HTTP 429")
+        self.assertTrue(snapshot["dataQuality"]["qualityRefreshSucceeded"])
+
+    def test_live_fill_page_does_not_change_thirty_day_aggregates(self) -> None:
+        now_ms = current_time_ms()
+        windowed = [self._raw_fill(now_ms - 60 * 60 * 1000, closedPnl="100", tid=1)]
+        live_only = [
+            self._raw_fill(now_ms - 60_000, closedPnl="500", tid=2),
+            self._raw_fill(now_ms - 40 * 24 * 60 * 60 * 1000, closedPnl="900", tid=3),
+        ]
+
+        baseline = self._snapshot_with_fill_pages(
+            {"ok": True, "data": windowed, "error": ""},
+            {"ok": True, "data": [], "error": ""},
+        )
+        merged = self._snapshot_with_fill_pages(
+            {"ok": True, "data": windowed, "error": ""},
+            {"ok": True, "data": live_only, "error": ""},
+        )
+
+        for field in ("fills30d", "closedTrades30d", "realizedPnl30d", "grossProfit30d", "recentWins"):
+            self.assertEqual(merged[field], baseline[field], field)
+        self.assertEqual(merged["assetQuality"], baseline["assetQuality"])
+        self.assertEqual(merged["qualityNetPnl30d"], baseline["qualityNetPnl30d"])
+        # Only the freshness-facing view grows.
+        self.assertEqual(len(baseline["recentFills"]), 1)
+        self.assertEqual(len(merged["recentFills"]), 2)
 
     def test_live_fill_lookback_covers_widest_recent_fill_consumer_window(self) -> None:
         self.assertEqual(WALLET_RECENT_FILL_CONSUMER_WINDOW_MS, RANKING_WINDOW_MS)
@@ -1601,7 +1733,9 @@ class AlertSummaryTests(unittest.TestCase):
         before_ms = current_time_ms()
         with patch.object(
             self.service.client, "safe_subscribe_all_dexs_clearinghouse_state", return_value=state
-        ), patch.object(self.service, "fetch_fills_result", side_effect=fake_fills):
+        ), patch.object(self.service, "fetch_fills_result", side_effect=fake_fills), patch.object(
+            self.service, "fetch_recent_fills_result", return_value={"ok": True, "data": [], "error": ""}
+        ):
             self.service.fetch_wallet_snapshot(
                 wallet,
                 full_quality_refresh=False,
