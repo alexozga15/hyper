@@ -12,12 +12,16 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from server import (
+    DASHBOARD_SNAPSHOT_FILE,
+    DASHBOARD_SNAPSHOT_MAX_AGE_SECONDS,
     HyperliquidClient,
     TELEGRAM_STATE_FILE,
     WalletStore,
     WalletTrackerService,
     WALLETS_FILE,
     current_time_ms,
+    env_int,
+    iso_to_ms,
     load_json_file,
     save_json_file,
 )
@@ -229,6 +233,41 @@ def build_reply(
     return build_help_message()
 
 
+def dashboard_snapshot_max_age_ms() -> int:
+    return max(0, env_int("DASHBOARD_SNAPSHOT_MAX_AGE_SECONDS", DASHBOARD_SNAPSHOT_MAX_AGE_SECONDS)) * 1000
+
+
+def load_dashboard_snapshot(now_ms: int | None = None) -> dict[str, Any] | None:
+    """Return the dashboard the sentiment cycle already built, when fresh enough.
+
+    The Hyperliquid rate limiter is a per-process singleton, so an on-demand
+    rebuild that overlaps the 5-minute sentiment sweep makes both processes
+    exceed the real budget and silently lose fill data. Returns None when the
+    snapshot is missing, unreadable, malformed or stale, and the caller then
+    falls back to a full rebuild.
+    """
+    snapshot = load_json_file(DASHBOARD_SNAPSHOT_FILE, None)
+    if not isinstance(snapshot, dict):
+        return None
+    if not isinstance(snapshot.get("wallets"), list):
+        return None
+    generated_ms = iso_to_ms(snapshot.get("generatedAt"))
+    if generated_ms <= 0:
+        return None
+    age_ms = (current_time_ms() if now_ms is None else now_ms) - generated_ms
+    if age_ms < 0 or age_ms > dashboard_snapshot_max_age_ms():
+        return None
+    return snapshot
+
+
+def resolve_dashboard(service: WalletTrackerService) -> dict[str, Any]:
+    snapshot = load_dashboard_snapshot()
+    if snapshot is not None:
+        print(f'Reusing dashboard snapshot built at {snapshot.get("generatedAt", "")}.')
+        return snapshot
+    return service.dashboard()
+
+
 def build_summary_cache(
     service: WalletTrackerService,
     dashboard: dict[str, Any],
@@ -245,8 +284,15 @@ def build_summary_cache(
             persist=True,
             stored_config=stored_config,
         )
-        return summary
-    return service.build_sentiment_summary(dashboard["wallets"], min_wallets)
+    else:
+        summary = service.build_sentiment_summary(dashboard["wallets"], min_wallets)
+    # The summary is computed now but describes the dashboard's data, so the
+    # "Updated:" line has to report when that dashboard was built, not when the
+    # command happened to be answered.
+    generated_at = str(dashboard.get("generatedAt") or "")
+    if generated_at and isinstance(summary, dict):
+        summary = {**summary, "generatedAt": generated_at}
+    return summary
 
 
 def build_cmm_cache(service: WalletTrackerService, *, include_position_entries: bool = False) -> dict[str, Any]:
@@ -305,7 +351,7 @@ def main() -> int:
         position_query = parse_position_wallet_query(message_text)
         if command in LIVE_COMMANDS or position_query:
             if dashboard_cache is None:
-                dashboard_cache = service.dashboard()
+                dashboard_cache = resolve_dashboard(service)
             if (command in SUMMARY_COMMANDS or command in CMM_COMMANDS) and summary_cache is None:
                 summary_cache = build_summary_cache(service, dashboard_cache, min_wallets)
 
