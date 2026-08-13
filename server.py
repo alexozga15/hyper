@@ -296,6 +296,11 @@ HOLDING_ONLY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
 # Fresh-flow, VWAP, and activity checks consume recent fills for up to seven
 # days. A shorter fetch horizon silently makes those checks see no activity.
 WALLET_RECENT_FILL_CONSUMER_WINDOW_MS = RANKING_WINDOW_MS
+# A wallet that has not traded within this window is dormant: it still holds
+# risk, but it is stale evidence of agreement, so consensus counting drops it.
+# Override with the DORMANT_WALLET_MAX_IDLE_MS env var; set it to 0 or less to
+# turn the exclusion off entirely without a code change.
+DORMANT_WALLET_MAX_IDLE_MS = RANKING_WINDOW_MS
 WALLET_LIVE_FILL_LOOKBACK_MS = max(
     WALLET_RECENT_FILL_CONSUMER_WINDOW_MS,
     int(float(os.environ.get("WALLET_LIVE_FILL_LOOKBACK_MS", WALLET_RECENT_FILL_CONSUMER_WINDOW_MS))),
@@ -2419,6 +2424,34 @@ class WalletTrackerService:
         cutoff = now_ms - window_ms
         return any(int(to_float(fill.get("time"))) >= cutoff for fill in fills if isinstance(fill, dict))
 
+    def dormant_wallet_max_idle_ms(self) -> int:
+        """Idle window after which a wallet stops counting towards consensus."""
+        return env_int("DORMANT_WALLET_MAX_IDLE_MS", DORMANT_WALLET_MAX_IDLE_MS)
+
+    def is_wallet_dormant(
+        self,
+        wallet: dict[str, Any],
+        *,
+        now_ms: int,
+        window_ms: int | None = None,
+    ) -> bool:
+        """Has this wallet demonstrably not traded inside the idle window?
+
+        Only ever true when the fill data is good enough to answer the
+        question. A wallet whose fills are unusable, or that carries no fill
+        record at all, is *unassessable* rather than dormant and keeps counting
+        exactly as before - a bad API cycle must never silently delete real
+        wallets from the consensus.
+        """
+        window = self.dormant_wallet_max_idle_ms() if window_ms is None else int(window_ms)
+        if window <= 0:
+            return False
+        if not self.wallet_fill_data_reliable(wallet):
+            return False
+        if not isinstance(wallet.get("recentFills"), list):
+            return False
+        return not self.wallet_has_fills_in_window(wallet, now_ms=now_ms, window_ms=window)
+
     def should_count_wallet_for_conviction(self, wallet: dict[str, Any]) -> bool:
         quality_age_ms = self.wallet_quality_age_ms(wallet)
         if quality_age_ms is not None and quality_age_ms > WALLET_QUALITY_HARD_TTL_MS:
@@ -2801,6 +2834,16 @@ class WalletTrackerService:
             if not self.wallet_has_fills_in_window(snapshot, now_ms=now_ms, window_ms=RANKING_WINDOW_MS)
         }
         dormant_wallets.discard("")
+        # Deliberately narrower than the observability set above, which also
+        # sweeps up wallets we simply have no fill data for. Only wallets we
+        # can positively show went quiet are removed from the counts.
+        dormant_idle_window_ms = self.dormant_wallet_max_idle_ms()
+        excluded_dormant_wallets = {
+            str(snapshot.get("address") or "").lower()
+            for snapshot in snapshots
+            if self.is_wallet_dormant(snapshot, now_ms=now_ms, window_ms=dormant_idle_window_ms)
+        }
+        excluded_dormant_wallets.discard("")
 
         for snapshot in snapshots:
             if not self.should_count_wallet_for_conviction(snapshot):
@@ -2852,11 +2895,18 @@ class WalletTrackerService:
                         "topWalletGroups": set(),
                         "fillQualityUnknownWalletAddresses": set(),
                         "quarantinedWalletAddresses": set(),
+                        "dormantWalletAddresses": set(),
+                        "dormantWalletValue": 0.0,
                     },
                 )
+                # Exposure and the derived mark price describe the book, so a
+                # dormant wallet's capital still belongs in them.
                 bucket["totalValue"] += position_value
                 bucket["totalSize"] += abs(to_float(position.get("size")))
-                if address and address not in bucket["walletAddresses"]:
+                if address and address.lower() in excluded_dormant_wallets:
+                    bucket["dormantWalletAddresses"].add(address)
+                    bucket["dormantWalletValue"] += position_value
+                elif address and address not in bucket["walletAddresses"]:
                     bucket["walletAddresses"].add(address)
                     bucket["walletCount"] += 1
                     bucket["weightedWalletCount"] += wallet_weight
@@ -2956,6 +3006,8 @@ class WalletTrackerService:
                 "independentTopWalletCount": len(bucket["topWalletGroups"]),
                 "fillQualityUnknownWalletCount": len(bucket["fillQualityUnknownWalletAddresses"]),
                 "quarantinedWalletCount": len(bucket["quarantinedWalletAddresses"]),
+                "excludedDormantWalletCount": len(bucket["dormantWalletAddresses"]),
+                "excludedDormantWalletValue": round(bucket["dormantWalletValue"], 2),
                 "totalValue": round(bucket["totalValue"], 2),
                 "markPrice": round(bucket["totalValue"] / bucket["totalSize"], 8)
                 if bucket["totalSize"] > 0
@@ -3162,6 +3214,9 @@ class WalletTrackerService:
             "fillFetchFailedWalletCount": len(fill_fetch_failed_wallets),
             "fillFetchFailedWalletAddresses": sorted(fill_fetch_failed_wallets),
             "dormantWalletCount": len(dormant_wallets),
+            "excludedDormantWalletCount": len(excluded_dormant_wallets),
+            "excludedDormantWalletAddresses": sorted(excluded_dormant_wallets),
+            "dormantWalletMaxIdleMs": dormant_idle_window_ms,
         }
 
     def build_large_position_snapshot(
@@ -4141,6 +4196,9 @@ class WalletTrackerService:
         dormant_wallets = int(to_float(summary.get("dormantWalletCount")))
         if dormant_wallets > 0:
             lines.append(f"No fills in the last 7 days: {dormant_wallets} wallets")
+        excluded_dormant = int(to_float(summary.get("excludedDormantWalletCount")))
+        if excluded_dormant > 0:
+            lines.append(f"Dropped from consensus as dormant: {excluded_dormant} wallets")
         if include_signals:
             lines.append(
                 f'Signals ready to act on: {summary.get("signalCount", len(summary.get("signals", [])))}'

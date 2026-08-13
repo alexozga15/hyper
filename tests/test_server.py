@@ -1,4 +1,5 @@
 import json
+import os
 import random
 import tempfile
 import unittest
@@ -9,6 +10,7 @@ from typing import Any
 from coinmarketman import CoinMarketManApiError
 from server import (
     ALERTS_FILE,
+    DORMANT_WALLET_MAX_IDLE_MS,
     ELITE_WALLET_OVERRIDES,
     HyperliquidClient,
     POSITION_INCREASE_ALERT_MIN_DELTA,
@@ -886,7 +888,10 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertNotIn("ETH:long", consensus_keys)
         self.assertNotIn("SOL:long", consensus_keys)
         self.assertIn("BNB:long", consensus_keys)
-        self.assertIn("HYPE:long", consensus_keys)
+        # The HYPE wallet is not holding-only, but its last fill is 20 days
+        # old, so the dormancy filter drops it even though the stale-position
+        # rule would have let it through.
+        self.assertNotIn("HYPE:long", consensus_keys)
         self.assertNotIn("PAXG:long", consensus_keys)
         self.assertIn("TON:long", consensus_keys)
 
@@ -1548,11 +1553,16 @@ class AlertSummaryTests(unittest.TestCase):
             ["0x3333333333333333333333333333333333333333"],
         )
         self.assertEqual(summary["dormantWalletCount"], 2)
+        # Only the wallet with usable fills proving no recent trading is
+        # dropped; the one whose fills could not be read still counts.
+        self.assertEqual(summary["excludedDormantWalletCount"], 1)
+        self.assertEqual(summary["consensus"][0]["walletCount"], 2)
 
         message = self.service.build_summary_message(summary, min_wallets=1)
         self.assertIn("No usable fill data: 1 wallets", message)
         self.assertIn("Fill fetch failed this cycle: 1 wallets", message)
         self.assertIn("No fills in the last 7 days: 2 wallets", message)
+        self.assertIn("Dropped from consensus as dormant: 1 wallets", message)
 
     def test_summary_message_omits_zero_data_quality_counts(self) -> None:
         summary = {
@@ -1568,6 +1578,217 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertNotIn("No usable fill data", message)
         self.assertNotIn("Fill fetch failed this cycle", message)
         self.assertNotIn("No fills in the last 7 days", message)
+        self.assertNotIn("Dropped from consensus as dormant", message)
+
+    @staticmethod
+    def dormancy_snapshot(
+        address: str,
+        *,
+        now_ms: int,
+        last_fill_age_ms: int | None,
+        value: float = 1_000_000.0,
+        data_quality: dict[str, Any] | None = None,
+        with_fills_key: bool = True,
+    ) -> dict[str, Any]:
+        """One wallet, one BTC long, one fill of a chosen age.
+
+        ``last_fill_age_ms=None`` means an empty fill list, and
+        ``with_fills_key=False`` drops the fill record entirely.
+        """
+        snapshot: dict[str, Any] = {
+            "address": address,
+            "alias": address[-4:],
+            "positions": [{"coin": "BTC", "side": "Long", "positionValue": value, "size": 10.0}],
+            "dataQuality": data_quality
+            if data_quality is not None
+            else {"fillsOk": True, "fillsUsable": True, "fillsDegraded": False},
+        }
+        if with_fills_key:
+            snapshot["recentFills"] = (
+                []
+                if last_fill_age_ms is None
+                else [
+                    {
+                        "coin": "BTC",
+                        "direction": "Increase Long",
+                        "price": 100_000.0,
+                        "size": 10.0,
+                        "time": now_ms - last_fill_age_ms,
+                    }
+                ]
+            )
+        return snapshot
+
+    def test_dormant_wallet_is_dropped_from_consensus_counts(self) -> None:
+        now_ms = 1_700_000_000_000
+        day_ms = 24 * 60 * 60 * 1000
+        dormant_address = "0x3333333333333333333333333333333333333333"
+        snapshots = [
+            self.dormancy_snapshot(
+                "0x1111111111111111111111111111111111111111", now_ms=now_ms, last_fill_age_ms=day_ms
+            ),
+            self.dormancy_snapshot(
+                "0x2222222222222222222222222222222222222222", now_ms=now_ms, last_fill_age_ms=2 * day_ms
+            ),
+            self.dormancy_snapshot(
+                dormant_address, now_ms=now_ms, last_fill_age_ms=9 * day_ms, value=5_000_000.0
+            ),
+        ]
+        top_wallets = {"0x1111111111111111111111111111111111111111", dormant_address}
+
+        with patch("server.current_time_ms", return_value=now_ms):
+            summary = self.service.build_sentiment_summary(
+                snapshots, min_wallets=1, top_wallet_addresses=top_wallets
+            )
+            fresh_snapshots = [
+                self.dormancy_snapshot(
+                    "0x1111111111111111111111111111111111111111", now_ms=now_ms, last_fill_age_ms=day_ms
+                ),
+                self.dormancy_snapshot(
+                    "0x2222222222222222222222222222222222222222", now_ms=now_ms, last_fill_age_ms=2 * day_ms
+                ),
+                self.dormancy_snapshot(
+                    dormant_address, now_ms=now_ms, last_fill_age_ms=3 * day_ms, value=5_000_000.0
+                ),
+            ]
+            fresh_summary = self.service.build_sentiment_summary(
+                fresh_snapshots, min_wallets=1, top_wallet_addresses=top_wallets
+            )
+
+        item = summary["consensus"][0]
+        fresh_item = fresh_summary["consensus"][0]
+        self.assertEqual(item["coin"], "BTC")
+        self.assertEqual(item["walletCount"], 2)
+        self.assertEqual(item["independentWalletCount"], 2)
+        self.assertEqual(item["topWalletCount"], 1)
+        self.assertEqual(item["independentTopWalletCount"], 1)
+        self.assertEqual(item["excludedDormantWalletCount"], 1)
+        self.assertEqual(item["excludedDormantWalletValue"], 5_000_000.0)
+        self.assertNotIn(
+            dormant_address, [wallet["address"] for wallet in item["wallets"]]
+        )
+        # The same book with that wallet still trading keeps every count.
+        self.assertEqual(fresh_item["walletCount"], 3)
+        self.assertEqual(fresh_item["independentWalletCount"], 3)
+        self.assertEqual(fresh_item["topWalletCount"], 2)
+        self.assertEqual(fresh_item["excludedDormantWalletCount"], 0)
+        self.assertLess(item["weightedWalletCount"], fresh_item["weightedWalletCount"])
+        self.assertLess(
+            item["independentWeightedWalletCount"], fresh_item["independentWeightedWalletCount"]
+        )
+        # Their capital is still in the book.
+        self.assertEqual(item["totalValue"], fresh_item["totalValue"])
+        self.assertEqual(summary["longExposure"], fresh_summary["longExposure"])
+        self.assertEqual(summary["longWalletCount"], 3)
+        self.assertEqual(summary["walletCount"], 3)
+        self.assertEqual(summary["excludedDormantWalletCount"], 1)
+        self.assertEqual(summary["excludedDormantWalletAddresses"], [dormant_address])
+
+    def test_unassessable_fill_data_never_makes_a_wallet_dormant(self) -> None:
+        now_ms = 1_700_000_000_000
+        day_ms = 24 * 60 * 60 * 1000
+        snapshots = [
+            self.dormancy_snapshot(
+                "0x1111111111111111111111111111111111111111", now_ms=now_ms, last_fill_age_ms=day_ms
+            ),
+            # Fetch failed and nothing usable was cached: no evidence either way.
+            self.dormancy_snapshot(
+                "0x2222222222222222222222222222222222222222",
+                now_ms=now_ms,
+                last_fill_age_ms=None,
+                data_quality={"fillsOk": False, "fillsFetchOk": False, "fillsUsable": False},
+            ),
+            # Degraded fills are unusable too.
+            self.dormancy_snapshot(
+                "0x3333333333333333333333333333333333333333",
+                now_ms=now_ms,
+                last_fill_age_ms=20 * day_ms,
+                data_quality={"fillsOk": True, "fillsUsable": True, "fillsDegraded": True},
+            ),
+            # No fill record at all is missing data, not proven silence.
+            self.dormancy_snapshot(
+                "0x4444444444444444444444444444444444444444",
+                now_ms=now_ms,
+                last_fill_age_ms=None,
+                with_fills_key=False,
+            ),
+        ]
+
+        with patch("server.current_time_ms", return_value=now_ms):
+            summary = self.service.build_sentiment_summary(snapshots, min_wallets=1)
+
+        item = summary["consensus"][0]
+        self.assertEqual(item["walletCount"], 4)
+        self.assertEqual(item["excludedDormantWalletCount"], 0)
+        self.assertEqual(summary["excludedDormantWalletCount"], 0)
+        for snapshot in snapshots[1:]:
+            self.assertFalse(self.service.is_wallet_dormant(snapshot, now_ms=now_ms))
+
+    def test_coin_drops_out_when_dormant_wallets_break_the_threshold(self) -> None:
+        now_ms = 1_700_000_000_000
+        day_ms = 24 * 60 * 60 * 1000
+        snapshots = [
+            self.dormancy_snapshot(
+                f"0x{index}{'0' * 39}", now_ms=now_ms, last_fill_age_ms=index * day_ms
+            )
+            for index in range(1, 5)
+        ]
+        snapshots.append(
+            self.dormancy_snapshot(
+                "0x5555555555555555555555555555555555555555", now_ms=now_ms, last_fill_age_ms=8 * day_ms
+            )
+        )
+
+        with patch("server.current_time_ms", return_value=now_ms):
+            summary = self.service.build_sentiment_summary(snapshots, min_wallets=5)
+            kept = self.service.build_sentiment_summary(snapshots, min_wallets=4)
+
+        self.assertEqual(summary["consensus"], [])
+        self.assertEqual(summary["signals"], [])
+        self.assertEqual(summary["excludedDormantWalletCount"], 1)
+        self.assertEqual([item["coin"] for item in kept["consensus"]], ["BTC"])
+        self.assertEqual(kept["consensus"][0]["walletCount"], 4)
+        # Nothing downstream may assume a non-empty consensus.
+        message = self.service.build_summary_message(summary, min_wallets=5)
+        self.assertIn("- None", message)
+
+    def test_dormancy_window_is_env_overridable(self) -> None:
+        now_ms = 1_700_000_000_000
+        day_ms = 24 * 60 * 60 * 1000
+        self.assertEqual(DORMANT_WALLET_MAX_IDLE_MS, 7 * 24 * 60 * 60 * 1000)
+        snapshots = [
+            self.dormancy_snapshot(
+                "0x1111111111111111111111111111111111111111", now_ms=now_ms, last_fill_age_ms=day_ms
+            ),
+            self.dormancy_snapshot(
+                "0x2222222222222222222222222222222222222222", now_ms=now_ms, last_fill_age_ms=3 * day_ms
+            ),
+        ]
+
+        with patch("server.current_time_ms", return_value=now_ms):
+            with patch.dict(os.environ, {"DORMANT_WALLET_MAX_IDLE_MS": str(2 * day_ms)}):
+                tightened = self.service.build_sentiment_summary(snapshots, min_wallets=1)
+            with patch.dict(os.environ, {"DORMANT_WALLET_MAX_IDLE_MS": "0"}):
+                stale = self.service.build_sentiment_summary(
+                    [
+                        self.dormancy_snapshot(
+                            "0x1111111111111111111111111111111111111111",
+                            now_ms=now_ms,
+                            last_fill_age_ms=90 * day_ms,
+                        )
+                    ],
+                    min_wallets=1,
+                )
+            default = self.service.build_sentiment_summary(snapshots, min_wallets=1)
+
+        self.assertEqual(tightened["consensus"][0]["walletCount"], 1)
+        self.assertEqual(tightened["consensus"][0]["excludedDormantWalletCount"], 1)
+        self.assertEqual(tightened["dormantWalletMaxIdleMs"], 2 * day_ms)
+        self.assertEqual(default["consensus"][0]["walletCount"], 2)
+        self.assertEqual(default["consensus"][0]["excludedDormantWalletCount"], 0)
+        # Zero switches the exclusion off, however long the wallet has idled.
+        self.assertEqual(stale["consensus"][0]["walletCount"], 1)
+        self.assertEqual(stale["excludedDormantWalletCount"], 0)
 
     def test_position_lifecycle_preserves_verified_recent_add(self) -> None:
         now_ms = 1_700_000_000_000
