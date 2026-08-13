@@ -1,4 +1,6 @@
+import json
 import random
+import tempfile
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -1330,6 +1332,239 @@ class AlertSummaryTests(unittest.TestCase):
             groups["0x1111111111111111111111111111111111111111"],
             groups["0x2222222222222222222222222222222222222222"],
         )
+
+    def test_correlation_groups_merge_wallets_sharing_a_burst_on_one_coin(self) -> None:
+        now_ms = 1_700_000_000_000
+        shared_fills = [
+            {"coin": "BTC", "direction": "Increase Long", "time": now_ms - index * 300_000}
+            for index in range(8)
+        ]
+        left_only = [
+            {"coin": "ETH", "direction": "Increase Long", "time": now_ms - 10_000_000 - index * 300_000}
+            for index in range(4)
+        ]
+        right_only = [
+            {"coin": "SOL", "direction": "Increase Short", "time": now_ms - 20_000_000 - index * 300_000}
+            for index in range(20)
+        ]
+        snapshots = [
+            {"address": "0x1111111111111111111111111111111111111111", "recentFills": [*shared_fills, *left_only]},
+            {"address": "0x2222222222222222222222222222222222222222", "recentFills": [*shared_fills, *right_only]},
+        ]
+
+        groups = self.service.build_wallet_correlation_groups(snapshots)
+
+        self.assertEqual(
+            groups["0x1111111111111111111111111111111111111111"],
+            groups["0x2222222222222222222222222222222222222222"],
+        )
+
+    def test_correlation_groups_ignore_incidental_shared_events(self) -> None:
+        now_ms = 1_700_000_000_000
+        shared_fills = [
+            {"coin": "BTC", "direction": "Increase Long", "time": now_ms - index * 300_000}
+            for index in range(3)
+        ]
+        left_only = [
+            {"coin": "ETH", "direction": "Increase Long", "time": now_ms - 10_000_000 - index * 300_000}
+            for index in range(197)
+        ]
+        right_only = [
+            {"coin": "SOL", "direction": "Increase Short", "time": now_ms - 10_000_000 - index * 300_000}
+            for index in range(197)
+        ]
+        snapshots = [
+            {"address": "0x1111111111111111111111111111111111111111", "recentFills": [*shared_fills, *left_only]},
+            {"address": "0x2222222222222222222222222222222222222222", "recentFills": [*shared_fills, *right_only]},
+        ]
+
+        groups = self.service.build_wallet_correlation_groups(snapshots)
+
+        self.assertNotEqual(
+            groups["0x1111111111111111111111111111111111111111"],
+            groups["0x2222222222222222222222222222222222222222"],
+        )
+
+    def test_current_cycle_fill_success_is_not_marked_fill_quality_unknown(self) -> None:
+        wallet = TrackedWallet(address="0x1111111111111111111111111111111111111111", alias="", notes="", created_at="")
+        cached = {
+            "realizedPnl30d": 999.0,
+            "recentWinRateRank": {"label": "Strong", "score": 70.0},
+            "recentFills": [],
+            "qualityRefreshedAt": "2026-07-21T10:00:00Z",
+            "refreshAttemptedAtMs": 1,
+        }
+        state = {
+            "marginSummary": {"accountValue": "1000000", "totalNtlPos": "0", "totalMarginUsed": "0"},
+            "withdrawable": "1000000",
+            "assetPositions": [],
+        }
+
+        with patch.object(
+            self.service.client, "safe_subscribe_all_dexs_clearinghouse_state", return_value=state
+        ), patch.object(
+            self.service, "fetch_fills_result", return_value={"ok": True, "data": [], "error": ""}
+        ), patch.object(
+            self.service, "fetch_recent_fills_result", return_value={"ok": True, "data": [], "error": ""}
+        ), patch.object(
+            self.service, "fetch_open_orders_result", return_value={"ok": True, "data": [], "error": ""}
+        ), patch.object(
+            # The cached entry was written by an older cycle that failed here.
+            self.service,
+            "fetch_portfolio_result",
+            return_value={"ok": False, "data": {}, "error": "HTTP 429"},
+        ), patch.object(self.service, "fetch_wallet_role", return_value="user"):
+            snapshot = self.service.fetch_wallet_snapshot(wallet, cached_snapshot=cached)
+
+        quality = snapshot["dataQuality"]
+        self.assertTrue(quality["fillsOk"])
+        self.assertTrue(self.service.wallet_fill_data_reliable(snapshot))
+        self.assertEqual(quality["fillsCheckedAt"], snapshot["fetchedAt"])
+        self.assertTrue(quality["cachedQuality"]["used"])
+        self.assertIn("realizedPnl30d", quality["cachedQuality"]["fields"])
+        self.assertEqual(quality["cachedQuality"]["refreshedAt"], "2026-07-21T10:00:00Z")
+
+    def test_skipped_quality_endpoints_are_not_reported_as_successful_fetches(self) -> None:
+        wallet = TrackedWallet(address="0x1111111111111111111111111111111111111111", alias="", notes="", created_at="")
+        cached = {"realizedPnl30d": 1.0, "recentFills": [], "qualityRefreshedAt": "2026-07-21T10:00:00Z"}
+        state = {
+            "marginSummary": {"accountValue": "1000000", "totalNtlPos": "0", "totalMarginUsed": "0"},
+            "withdrawable": "1000000",
+            "assetPositions": [],
+        }
+
+        with patch.object(
+            self.service.client, "safe_subscribe_all_dexs_clearinghouse_state", return_value=state
+        ), patch.object(
+            self.service, "fetch_fills_result", return_value={"ok": True, "data": [], "error": ""}
+        ), patch.object(
+            self.service, "fetch_recent_fills_result", return_value={"ok": True, "data": [], "error": ""}
+        ):
+            snapshot = self.service.fetch_wallet_snapshot(
+                wallet,
+                full_quality_refresh=False,
+                cached_snapshot=cached,
+            )
+
+        quality = snapshot["dataQuality"]
+        self.assertTrue(quality["fillsOk"])
+        self.assertIsNone(quality["portfolioOk"])
+        self.assertIsNone(quality["ordersOk"])
+        self.assertFalse(quality["portfolioFetched"])
+        self.assertFalse(quality["ordersFetched"])
+
+    def test_failed_quality_refresh_does_not_monopolise_the_refresh_rotation(self) -> None:
+        wallets = [
+            TrackedWallet(address=f"0x{index:040x}", alias="", notes="", created_at="")
+            for index in range(1, 6)
+        ]
+        cached = {
+            # Refresh keeps failing for this wallet, so it never gets a
+            # successful "refreshedAtMs" - only the attempt marker.
+            wallets[0].address: {"refreshAttemptedAtMs": 900},
+            wallets[1].address: {"refreshedAtMs": 100},
+            wallets[2].address: {"refreshedAtMs": 300},
+            wallets[3].address: {"refreshedAtMs": 400},
+            wallets[4].address: {"refreshedAtMs": 500},
+        }
+
+        selected = self.service.wallet_quality_refresh_addresses(wallets, cached)
+
+        self.assertNotIn(wallets[0].address, selected)
+        self.assertEqual(selected, {wallets[1].address, wallets[2].address, wallets[3].address})
+
+    def test_dashboard_records_failed_refresh_attempts_in_quality_cache(self) -> None:
+        snapshots = [
+            {
+                "address": f"0x{index:040x}",
+                "accountValue": 1_000_000.0,
+                "totalNotional": 1_000_000.0,
+                "unrealizedPnl": 0.0,
+                "realizedPnl": 0.0,
+                "recentFills": [],
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000.0}],
+                "exposure": {"long": 1_000_000.0, "short": 0.0, "net": 1_000_000.0},
+                "cohorts": {"walletSize": "Whale", "profitability": "Profitable"},
+                "dataQuality": {
+                    "fillsOk": False,
+                    "fillsDegraded": False,
+                    "qualityRefreshAttempted": True,
+                    "qualityRefreshSucceeded": False,
+                },
+            }
+            for index in range(1, 3)
+        ]
+        wallets = [
+            TrackedWallet(address=f"0x{index:040x}", alias="", notes="", created_at="")
+            for index in range(1, len(snapshots) + 1)
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "wallet_quality_cache.json"
+            with patch.object(self.service, "wallet_quality_cache_path", cache_path), patch(
+                "server.RUNTIME_HEALTH_FILE", Path(tmp) / "runtime_health.json"
+            ), patch.object(self.service.store, "list_wallets", return_value=wallets), patch.object(
+                self.service.client, "list_markets", return_value=[]
+            ), patch.object(self.service, "fetch_wallet_snapshot", side_effect=snapshots):
+                self.service.dashboard()
+
+            stored = json.loads(cache_path.read_text(encoding="utf-8"))
+
+        entries = stored["wallets"]
+        self.assertEqual(len(entries), 2)
+        for entry in entries.values():
+            self.assertGreater(int(entry["refreshAttemptedAtMs"]), 0)
+            self.assertNotIn("refreshedAtMs", entry)
+
+    def test_summary_reports_fill_quality_and_dormant_wallet_counts(self) -> None:
+        now_ms = current_time_ms()
+        position = {"coin": "BTC", "side": "Long", "positionValue": 1_000_000.0}
+        snapshots = [
+            {
+                "address": "0x1111111111111111111111111111111111111111",
+                "positions": [position],
+                "recentFills": [{"coin": "BTC", "direction": "Increase Long", "time": now_ms - 3_600_000}],
+                "dataQuality": {"fillsOk": True, "fillsDegraded": False},
+            },
+            {
+                "address": "0x2222222222222222222222222222222222222222",
+                "positions": [position],
+                "recentFills": [{"coin": "BTC", "direction": "Increase Long", "time": now_ms - 30 * 86_400_000}],
+                "dataQuality": {"fillsOk": True, "fillsDegraded": False},
+            },
+            {
+                "address": "0x3333333333333333333333333333333333333333",
+                "positions": [position],
+                "recentFills": [],
+                "dataQuality": {"fillsOk": False, "fillsDegraded": False},
+            },
+        ]
+
+        summary = self.service.build_sentiment_summary(snapshots, min_wallets=1)
+
+        self.assertEqual(summary["fillQualityUnknownWalletCount"], 1)
+        self.assertEqual(
+            summary["fillQualityUnknownWalletAddresses"],
+            ["0x3333333333333333333333333333333333333333"],
+        )
+        self.assertEqual(summary["dormantWalletCount"], 2)
+
+        message = self.service.build_summary_message(summary, min_wallets=1)
+        self.assertIn("Fill data unavailable this cycle: 1 wallets", message)
+        self.assertIn("No fills in the last 7 days: 2 wallets", message)
+
+    def test_summary_message_omits_zero_data_quality_counts(self) -> None:
+        summary = {
+            "overallBias": "mixed",
+            "walletCount": 3,
+            "fillQualityUnknownWalletCount": 0,
+            "dormantWalletCount": 0,
+        }
+
+        message = self.service.build_summary_message(summary, min_wallets=1)
+
+        self.assertNotIn("Fill data unavailable this cycle", message)
+        self.assertNotIn("No fills in the last 7 days", message)
 
     def test_position_lifecycle_preserves_verified_recent_add(self) -> None:
         now_ms = 1_700_000_000_000
