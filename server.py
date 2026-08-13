@@ -36,6 +36,19 @@ TELEGRAM_STATE_FILE = DATA_DIR / "telegram_bot_state.json"
 WALLET_QUALITY_CACHE_FILE = DATA_DIR / "wallet_quality_cache.json"
 WALLET_REVIEW_FILE = DATA_DIR / "wallet_review.json"
 RUNTIME_HEALTH_FILE = DATA_DIR / "runtime_health.json"
+DASHBOARD_SNAPSHOT_FILE = DATA_DIR / "dashboard_snapshot.json"
+DASHBOARD_SNAPSHOT_VERSION = 1
+# The sentiment timer rebuilds the dashboard every 5 minutes. Three cadences of
+# slack means one skipped or slow sentiment run still serves a Telegram command
+# from cache instead of starting a second full API sweep against the same
+# per-process rate limiter.
+DASHBOARD_SNAPSHOT_MAX_AGE_SECONDS = 15 * 60
+# Nothing reachable from a Telegram reply reads these back, and they carry most
+# of the bytes: "performance" is a nested multi-window PnL report and
+# "openOrders" is up to 25 normalized orders per wallet.
+DASHBOARD_SNAPSHOT_DROPPED_WALLET_FIELDS = ("performance", "openOrders", "notes", "createdAt")
+# Recent-fill consumers only read coin/direction/price/size/time.
+DASHBOARD_SNAPSHOT_DROPPED_FILL_FIELDS = ("closedPnl", "fee")
 HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
 HYPERLIQUID_WS_URLS = (
     "wss://api-ui.hyperliquid.xyz/ws",
@@ -751,6 +764,41 @@ def load_json_file(path: Path, default: Any) -> Any:
 def save_json_file(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def build_dashboard_snapshot(dashboard: dict[str, Any]) -> dict[str, Any]:
+    """Trim a dashboard down to what an on-demand Telegram reply consumes.
+
+    "generatedAt" and "wallets" are the only dashboard keys any reply builder
+    reads, so every other top-level key is dropped. The file is rewritten on
+    every dashboard build, so the per-wallet fields no reply reads are dropped
+    too rather than paying for them every cycle.
+    """
+    wallets: list[dict[str, Any]] = []
+    for wallet in dashboard.get("wallets", []):
+        if not isinstance(wallet, dict):
+            continue
+        trimmed = {
+            key: value for key, value in wallet.items() if key not in DASHBOARD_SNAPSHOT_DROPPED_WALLET_FIELDS
+        }
+        fills = wallet.get("recentFills")
+        if isinstance(fills, list):
+            trimmed["recentFills"] = [
+                {key: value for key, value in fill.items() if key not in DASHBOARD_SNAPSHOT_DROPPED_FILL_FIELDS}
+                for fill in fills
+                if isinstance(fill, dict)
+            ]
+        wallets.append(trimmed)
+    return {
+        "version": DASHBOARD_SNAPSHOT_VERSION,
+        "generatedAt": dashboard.get("generatedAt") or now_iso(),
+        "savedAt": now_iso(),
+        "wallets": wallets,
+    }
+
+
+def save_dashboard_snapshot(dashboard: dict[str, Any], path: Path | None = None) -> None:
+    save_json_file(path or DASHBOARD_SNAPSHOT_FILE, build_dashboard_snapshot(dashboard))
 
 
 def parse_import_lines(raw_text: str) -> tuple[list[dict[str, str]], list[str]]:
@@ -1911,7 +1959,7 @@ class WalletTrackerService:
             },
         )
 
-        return {
+        payload = {
             "generatedAt": now_iso(),
             "markets": self.client.list_markets()[:30],
             "totals": totals,
@@ -1921,6 +1969,11 @@ class WalletTrackerService:
             "wallets": snapshots,
             "savedWallets": [wallet.to_dict() for wallet in wallets],
         }
+        # Persisted here rather than at the sentiment entry point so whichever
+        # process paid for the sweep makes it reusable. Telegram commands read
+        # this instead of running a second concurrent sweep of their own.
+        save_dashboard_snapshot(payload)
+        return payload
 
     def import_wallets(self, raw_text: str) -> dict[str, Any]:
         entries, invalid = parse_import_lines(raw_text)
