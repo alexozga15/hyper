@@ -102,8 +102,21 @@ SIGNAL_OUTCOME_HORIZON_TOLERANCE_PCT = 50.0
 # Keep unpublished consensus setups too. They are the control group needed to
 # check whether the probability score is genuinely predictive.
 SHADOW_SIGNAL_OUTCOME_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
-SHADOW_SIGNAL_OUTCOME_MAX_RECORDS = 2000
+SHADOW_SIGNAL_OUTCOME_MAX_RECORDS = 6000
+# Ceiling on how often one coin:side can be re-sampled when nothing about the
+# consensus changed. A day of silence per key produced ~20 records/day, which
+# cannot fill SIGNAL_CALIBRATION_MIN_SAMPLE per score bucket per calibration
+# group inside a useful horizon.
 SHADOW_SIGNAL_OUTCOME_RESTART_MS = 24 * 60 * 60 * 1000
+# Floor between two samples of the same coin:side even when the consensus did
+# change materially. Set to SIGNAL_LIFETIME_MS: that is already the interval
+# after which this system treats a setup as a new opportunity, and it caps the
+# overlap of two 4h outcome windows (the calibration horizon) at 50%.
+SHADOW_SIGNAL_OUTCOME_MIN_GAP_MS = SIGNAL_LIFETIME_MS
+# Position-value move that counts as a materially different setup. 25% is well
+# clear of mark-price drift on an unchanged position and roughly the size of one
+# average wallet joining or leaving a typical 4-6 wallet consensus.
+SHADOW_SIGNAL_OUTCOME_MIN_SIZE_CHANGE_PCT = 25.0
 SIGNAL_CALIBRATION_PRIOR_WEIGHT = 6.0
 SIGNAL_CALIBRATION_MIN_SAMPLE = 20
 WALLET_SIGNAL_MAX_ENTRY_DISTANCE_PCT = 4.0
@@ -1703,6 +1716,24 @@ class WalletTrackerService:
             reverse=True,
         )[:WALLET_RECENT_FILL_CACHE_LIMIT]
 
+        # `fillsOk` above describes one request (userFillsByTime) issued this
+        # cycle. It is not the same thing as "this wallet has usable fill
+        # history": `recentFills` is built from a *different* request
+        # (userFills) unioned with the windowed page and then merged with the
+        # recent-fill cache, which retains WALLET_RECENT_FILL_CACHE_RETENTION_MS
+        # of history. A single flaky request therefore used to strip a wallet of
+        # every freshness check while its last known-good fills sat right there
+        # in the merged list. Keep the per-cycle flags honest and report
+        # usability separately.
+        merged_fill_list = snapshot["recentFills"]
+        fills_fetch_ok = bool(fills_ok and recent_fills_ok)
+        fills_usable = bool(fills_ok) or bool(merged_fill_list)
+        fills_served_from_cache = bool(merged_fill_list) and not fills_fetch_ok
+        recent_fill_latest_ms = max(
+            (int(to_float(fill.get("time"))) for fill in merged_fill_list if isinstance(fill, dict)),
+            default=0,
+        )
+
         quality_refresh_succeeded = full_quality_refresh and fills_ok and portfolio_ok
         has_cached_quality = any(field in cached for field in WALLET_CACHED_QUALITY_FIELDS)
         use_cached_quality = has_cached_quality and not quality_refresh_succeeded
@@ -1724,6 +1755,16 @@ class WalletTrackerService:
                 "qualityRefreshedAt": cached.get("qualityRefreshedAt", "") if use_cached_quality else snapshot["fetchedAt"],
                 # Currency proof for the flags above: they belong to this fetch.
                 "fillsCheckedAt": snapshot["fetchedAt"],
+                # Did every fill request issued this cycle succeed? Purely a
+                # fetch-health signal - never an eligibility gate.
+                "fillsFetchOk": fills_fetch_ok,
+                # Is there usable recent-fill data at all, live or cached? This
+                # is the eligibility gate.
+                "fillsUsable": fills_usable,
+                "fillsServedFromCache": fills_served_from_cache,
+                "recentFillCount": len(merged_fill_list),
+                "liveRecentFillCount": len(recent_fills),
+                "recentFillLatestMs": recent_fill_latest_ms,
                 "cachedQuality": {
                     "used": use_cached_quality,
                     "fields": cached_fields_used,
@@ -1865,6 +1906,7 @@ class WalletTrackerService:
                 },
             )
         fill_ok_count = sum(1 for item in snapshots if item.get("dataQuality", {}).get("fillsOk"))
+        fill_fetch_failed_count = sum(1 for item in snapshots if self.wallet_fill_fetch_failed(item))
         wallets_with_recent_fills = sum(1 for item in snapshots if item.get("recentFills"))
         total_recent_fills = sum(len(item.get("recentFills", [])) for item in snapshots)
         total_positions = sum(len(item.get("positions", [])) for item in snapshots)
@@ -1877,6 +1919,14 @@ class WalletTrackerService:
             for item in snapshots:
                 item["holdingOnly30d"] = False
                 item.setdefault("dataQuality", {})["fillsDegraded"] = True
+        # Evaluated after the global-degradation pass so the counts describe the
+        # snapshots consumers actually receive.
+        fill_cache_served_count = sum(
+            1
+            for item in snapshots
+            if self.wallet_fill_fetch_failed(item) and self.wallet_fill_data_reliable(item)
+        )
+        fill_unusable_count = sum(1 for item in snapshots if not self.wallet_fill_data_reliable(item))
         snapshots.sort(key=lambda item: item["accountValue"], reverse=True)
 
         totals = {
@@ -1891,6 +1941,11 @@ class WalletTrackerService:
             "holdingOnly30dWallets": sum(1 for item in snapshots if item.get("holdingOnly30d")),
             "dataQuality": {
                 "fillsOkWallets": fill_ok_count,
+                # "a fetch failed this cycle" and "this wallet has no usable
+                # fill data" are different failures and are counted separately.
+                "fillsFetchFailedWallets": fill_fetch_failed_count,
+                "fillsServedFromCacheWallets": fill_cache_served_count,
+                "fillsUnusableWallets": fill_unusable_count,
                 "walletsWithRecentFills": wallets_with_recent_fills,
                 "totalRecentFills": total_recent_fills,
                 "fillsGloballyDegraded": fills_globally_degraded,
@@ -1953,6 +2008,9 @@ class WalletTrackerService:
                 "checkedAt": now_iso(),
                 "walletsTracked": len(snapshots),
                 "fillsOkWallets": fill_ok_count,
+                "fillsFetchFailedWallets": fill_fetch_failed_count,
+                "fillsServedFromCacheWallets": fill_cache_served_count,
+                "fillsUnusableWallets": fill_unusable_count,
                 "cacheCoverage": round(cache_coverage, 4),
                 "rateLimitedWallets": rate_limited_wallets,
                 "fillsGloballyDegraded": fills_globally_degraded,
@@ -2320,10 +2378,33 @@ class WalletTrackerService:
         )
 
     def wallet_fill_data_reliable(self, wallet: dict[str, Any]) -> bool:
+        """Does this wallet have usable recent-fill data?
+
+        Deliberately not "did every request succeed this cycle". A transient
+        failure of one fills request must not remove a wallet from freshness
+        consideration while the merged recent-fill cache still holds its last
+        known-good fills - see ``fillsUsable`` in ``fetch_wallet_snapshot``.
+        Use ``wallet_fill_fetch_failed`` for per-cycle fetch health.
+        """
         quality = wallet.get("dataQuality")
         if not isinstance(quality, dict):
             return True
-        return bool(quality.get("fillsOk", True)) and not bool(quality.get("fillsDegraded"))
+        if bool(quality.get("fillsDegraded")):
+            return False
+        if bool(quality.get("fillsOk", True)):
+            return True
+        # Snapshots written before ``fillsUsable`` existed carry no usability
+        # evidence, so they keep the old conservative answer.
+        return bool(quality.get("fillsUsable"))
+
+    def wallet_fill_fetch_failed(self, wallet: dict[str, Any]) -> bool:
+        """Did any fill request for this wallet fail during the current cycle?"""
+        quality = wallet.get("dataQuality")
+        if not isinstance(quality, dict):
+            return False
+        if "fillsFetchOk" in quality:
+            return not bool(quality.get("fillsFetchOk"))
+        return not bool(quality.get("fillsOk", True))
 
     def wallet_has_fills_in_window(
         self,
@@ -2705,6 +2786,15 @@ class WalletTrackerService:
             if not self.wallet_fill_data_reliable(snapshot)
         }
         fill_quality_unknown_wallets.discard("")
+        # Reported separately from the line above on purpose: a failed fetch is
+        # an operational problem, missing usable fill data is a data problem,
+        # and collapsing them hid one behind the other.
+        fill_fetch_failed_wallets = {
+            str(snapshot.get("address") or "").lower()
+            for snapshot in snapshots
+            if self.wallet_fill_fetch_failed(snapshot)
+        }
+        fill_fetch_failed_wallets.discard("")
         dormant_wallets = {
             str(snapshot.get("address") or "").lower()
             for snapshot in snapshots
@@ -3069,6 +3159,8 @@ class WalletTrackerService:
             "walletCount": len(snapshots),
             "fillQualityUnknownWalletCount": len(fill_quality_unknown_wallets),
             "fillQualityUnknownWalletAddresses": sorted(fill_quality_unknown_wallets),
+            "fillFetchFailedWalletCount": len(fill_fetch_failed_wallets),
+            "fillFetchFailedWalletAddresses": sorted(fill_fetch_failed_wallets),
             "dormantWalletCount": len(dormant_wallets),
         }
 
@@ -4042,7 +4134,10 @@ class WalletTrackerService:
         ]
         fill_quality_unknown = int(to_float(summary.get("fillQualityUnknownWalletCount")))
         if fill_quality_unknown > 0:
-            lines.append(f"Fill data unavailable this cycle: {fill_quality_unknown} wallets")
+            lines.append(f"No usable fill data: {fill_quality_unknown} wallets")
+        fill_fetch_failed = int(to_float(summary.get("fillFetchFailedWalletCount")))
+        if fill_fetch_failed > 0:
+            lines.append(f"Fill fetch failed this cycle: {fill_fetch_failed} wallets")
         dormant_wallets = int(to_float(summary.get("dormantWalletCount")))
         if dormant_wallets > 0:
             lines.append(f"No fills in the last 7 days: {dormant_wallets} wallets")
@@ -5845,6 +5940,73 @@ class WalletTrackerService:
             records, marks_by_key=marks_by_key, marks_by_coin=marks_by_coin, now_ms=now_ms
         )
 
+    def shadow_consensus_fingerprint(self, item: dict[str, Any]) -> dict[str, Any]:
+        """The identity of a consensus setup, for deciding sample independence.
+
+        Two shadow observations of the same coin:side are only distinct events
+        if the underlying consensus actually moved: a different wallet set, a
+        materially different position size, or a fresh add landing after the
+        previous sample. Everything here is derived from the consensus row, so
+        the fingerprint stored on a record can be re-derived and audited later.
+        """
+        wallets = item.get("wallets") if isinstance(item.get("wallets"), list) else []
+        addresses = sorted(
+            {
+                str(entry.get("address") or "").lower()
+                for entry in wallets
+                if isinstance(entry, dict) and entry.get("address")
+            }
+        )
+        if not addresses:
+            fresh = item.get("freshWalletAddresses")
+            addresses = sorted({str(entry).lower() for entry in fresh if entry} if isinstance(fresh, list) else set())
+        return {
+            "walletAddresses": addresses,
+            "walletCount": int(to_float(item.get("walletCount"))) or len(addresses),
+            "totalValue": round(to_float(item.get("totalValue")), 2),
+            "freshAddLatestTime": int(to_float(item.get("freshAddLatestTime"))),
+        }
+
+    def shadow_sample_reason(
+        self,
+        fingerprint: dict[str, Any],
+        previous_record: dict[str, Any] | None,
+        *,
+        now_ms: int,
+    ) -> str:
+        """Why this observation is a new shadow sample, or "" to skip it."""
+        if not isinstance(previous_record, dict) or not previous_record:
+            return "initial"
+        elapsed_ms = now_ms - int(to_float(previous_record.get("startedAt")))
+        if elapsed_ms < SHADOW_SIGNAL_OUTCOME_MIN_GAP_MS:
+            return ""
+        previous_fingerprint = previous_record.get("consensusFingerprint")
+        if not isinstance(previous_fingerprint, dict):
+            # Written before fingerprints existed, so duplication cannot be
+            # ruled out or confirmed. Sampling is allowed - the min gap still
+            # applies - and the reason records the uncertainty.
+            return "unknownPriorFingerprint"
+        previous_addresses = previous_fingerprint.get("walletAddresses")
+        addresses = fingerprint.get("walletAddresses")
+        if set(previous_addresses if isinstance(previous_addresses, list) else []) != set(
+            addresses if isinstance(addresses, list) else []
+        ):
+            return "walletSetChanged"
+        fresh_at = int(to_float(fingerprint.get("freshAddLatestTime")))
+        if fresh_at > 0 and fresh_at > int(to_float(previous_fingerprint.get("freshAddLatestTime"))):
+            return "freshAdd"
+        previous_value = to_float(previous_fingerprint.get("totalValue"))
+        value = to_float(fingerprint.get("totalValue"))
+        change_pct = abs(value - previous_value) / max(abs(previous_value), 1.0) * 100.0
+        if change_pct >= SHADOW_SIGNAL_OUTCOME_MIN_SIZE_CHANGE_PCT:
+            return "sizeChanged"
+        if elapsed_ms >= SHADOW_SIGNAL_OUTCOME_RESTART_MS:
+            # Unchanged for a full day. Kept as a slow floor so a permanently
+            # static consensus still contributes, but flagged so calibration can
+            # exclude these when it needs strictly independent observations.
+            return "periodic"
+        return ""
+
     def update_shadow_signal_outcomes(
         self,
         previous: dict[str, Any],
@@ -5866,24 +6028,36 @@ class WalletTrackerService:
             for signal in summary.get("signals", [])
             if isinstance(signal, dict)
         }
-        recent_starts: dict[str, int] = {}
+        latest_records: dict[str, dict[str, Any]] = {}
+        sample_counts: dict[str, int] = {}
         for record in records.values():
             key = str(record.get("signalKey") or self.signal_key(record))
-            recent_starts[key] = max(recent_starts.get(key, 0), int(to_float(record.get("startedAt"))))
+            sample_counts[key] = sample_counts.get(key, 0) + 1
+            previous_latest = latest_records.get(key)
+            if previous_latest is None or int(to_float(record.get("startedAt"))) > int(
+                to_float(previous_latest.get("startedAt"))
+            ):
+                latest_records[key] = record
         for item in summary.get("consensus", []):
             if not isinstance(item, dict):
                 continue
             signal_key = self.signal_key(item)
             if signal_key in published_keys:
                 continue
-            if now_ms - recent_starts.get(signal_key, 0) < SHADOW_SIGNAL_OUTCOME_RESTART_MS:
+            fingerprint = self.shadow_consensus_fingerprint(item)
+            previous_record = latest_records.get(signal_key)
+            sample_reason = self.shadow_sample_reason(fingerprint, previous_record, now_ms=now_ms)
+            if not sample_reason:
                 continue
             entry_price = to_float(item.get("markPrice"))
             probability = self.signal_probability_score(item)
             if entry_price <= 0 or probability <= 0:
                 continue
             coin = item.get("coin", "Unknown")
-            records[f"shadow:{signal_key}:{now_ms}"] = {
+            previous_started_at = (
+                int(to_float(previous_record.get("startedAt"))) if isinstance(previous_record, dict) else 0
+            )
+            record = {
                 "coin": coin,
                 "marketCoin": str(item.get("marketCoin") or market_coins.get(normalize_position_coin(coin)) or coin),
                 "side": item.get("side", ""),
@@ -5897,9 +6071,20 @@ class WalletTrackerService:
                 "rejectionReasons": self.signal_rejection_reasons(item, probability),
                 "shadow": True,
                 "published": False,
+                # Independence evidence. "periodic" means the consensus had not
+                # moved and the sample only exists because a day elapsed, so any
+                # analysis that needs uncorrelated observations can drop those.
+                "sampleReason": sample_reason,
+                "independentSample": sample_reason not in {"periodic", "unknownPriorFingerprint"},
+                "consensusFingerprint": fingerprint,
+                "previousSampleAt": previous_started_at,
+                "msSincePreviousSample": (now_ms - previous_started_at) if previous_started_at else 0,
+                "sampleIndex": sample_counts.get(signal_key, 0) + 1,
                 "outcomes": {},
             }
-            recent_starts[signal_key] = now_ms
+            records[f"shadow:{signal_key}:{now_ms}"] = record
+            latest_records[signal_key] = record
+            sample_counts[signal_key] = sample_counts.get(signal_key, 0) + 1
         if len(records) > SHADOW_SIGNAL_OUTCOME_MAX_RECORDS:
             records = dict(sorted(records.items(), key=lambda row: int(to_float(row[1].get("startedAt"))), reverse=True)[:SHADOW_SIGNAL_OUTCOME_MAX_RECORDS])
         return self.measure_signal_outcome_records(

@@ -1550,7 +1550,8 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(summary["dormantWalletCount"], 2)
 
         message = self.service.build_summary_message(summary, min_wallets=1)
-        self.assertIn("Fill data unavailable this cycle: 1 wallets", message)
+        self.assertIn("No usable fill data: 1 wallets", message)
+        self.assertIn("Fill fetch failed this cycle: 1 wallets", message)
         self.assertIn("No fills in the last 7 days: 2 wallets", message)
 
     def test_summary_message_omits_zero_data_quality_counts(self) -> None:
@@ -1558,12 +1559,14 @@ class AlertSummaryTests(unittest.TestCase):
             "overallBias": "mixed",
             "walletCount": 3,
             "fillQualityUnknownWalletCount": 0,
+            "fillFetchFailedWalletCount": 0,
             "dormantWalletCount": 0,
         }
 
         message = self.service.build_summary_message(summary, min_wallets=1)
 
-        self.assertNotIn("Fill data unavailable this cycle", message)
+        self.assertNotIn("No usable fill data", message)
+        self.assertNotIn("Fill fetch failed this cycle", message)
         self.assertNotIn("No fills in the last 7 days", message)
 
     def test_position_lifecycle_preserves_verified_recent_add(self) -> None:
@@ -1662,7 +1665,9 @@ class AlertSummaryTests(unittest.TestCase):
             TrackedWallet(address=f"0x{index:040x}", alias="", notes="", created_at="")
             for index in range(1, len(snapshots) + 1)
         ]
-        with patch.object(self.service.store, "list_wallets", return_value=wallets):
+        with patch.object(self.service.store, "list_wallets", return_value=wallets), patch.object(
+            self.service.client, "list_markets", return_value=[]
+        ):
             with patch.object(self.service, "fetch_wallet_snapshot", side_effect=snapshots):
                 dashboard = self.service.dashboard()
 
@@ -3265,9 +3270,10 @@ class AlertSummaryTests(unittest.TestCase):
             f"shadow:FRESH:long:{fresh_at}": record("FRESH", fresh_at),
             f"shadow:STALE:long:{stale_at}": record("STALE", stale_at),
         }
-        records = self.service.update_shadow_signal_outcomes(
-            previous, {"signals": [], "consensus": []}, now_ms=now_ms
-        )
+        with patch.object(self.service, "candidate_outcome_market_price", return_value=0.0):
+            records = self.service.update_shadow_signal_outcomes(
+                previous, {"signals": [], "consensus": []}, now_ms=now_ms
+            )
         self.assertIn(f"shadow:FRESH:long:{fresh_at}", records)
         self.assertNotIn(f"shadow:STALE:long:{stale_at}", records)
 
@@ -5213,6 +5219,360 @@ class HyperliquidClientTests(unittest.TestCase):
         self.assertAlmostEqual(float(merged["marginSummary"]["totalNtlPos"]), 19380689.7974)
         self.assertAlmostEqual(float(merged["withdrawable"]), 3651041.1919750003)
         self.assertEqual(merged["time"], 1775742878000)
+
+
+class TransientFillFailureTests(unittest.TestCase):
+    """A flaky fills request must not make a wallet ineligible.
+
+    ``fillsOk`` describes one request (userFillsByTime). ``recentFills`` comes
+    from a different request unioned with a cache that retains a week of fills.
+    The two are not interchangeable.
+    """
+
+    def setUp(self) -> None:
+        self.service = WalletTrackerService(WalletStore(Path(ALERTS_FILE)), HyperliquidClient())
+        self.wallet = TrackedWallet(
+            address="0x2fcb6898d5000000000000000000000000000000", alias="", notes="", created_at=""
+        )
+        self.now_ms = current_time_ms()
+        self.state = {
+            "marginSummary": {"accountValue": "1000000", "totalNtlPos": "500000", "totalMarginUsed": "0"},
+            "withdrawable": "500000",
+            "assetPositions": [
+                {
+                    "position": {
+                        "coin": "BTC",
+                        "szi": "10",
+                        "positionValue": "500000",
+                        "entryPx": "50000",
+                        "unrealizedPnl": "0",
+                        "returnOnEquity": "0",
+                    }
+                }
+            ],
+        }
+        self.cached_fill = {
+            "coin": "BTC",
+            "direction": "Open Long",
+            "price": 50000.0,
+            "size": 10.0,
+            "closedPnl": 0.0,
+            "fee": 0.0,
+            "time": self.now_ms - 5 * 60 * 1000,
+        }
+
+    def snapshot_with_failed_fills(self, cached: dict[str, Any] | None) -> dict[str, Any]:
+        failure = {"ok": False, "data": [], "error": "HTTP 429: Too Many Requests"}
+        with patch.object(
+            self.service.client, "safe_subscribe_all_dexs_clearinghouse_state", return_value=self.state
+        ), patch.object(
+            self.service, "fetch_fills_result", return_value=failure
+        ), patch.object(
+            self.service, "fetch_recent_fills_result", return_value=failure
+        ), patch.object(
+            self.service, "fetch_open_orders_result", return_value={"ok": True, "data": [], "error": ""}
+        ), patch.object(
+            self.service, "fetch_portfolio_result", return_value={"ok": True, "data": {}, "error": ""}
+        ), patch.object(self.service, "fetch_wallet_role", return_value="user"):
+            return self.service.fetch_wallet_snapshot(self.wallet, cached_snapshot=cached)
+
+    def test_cached_fills_keep_a_wallet_eligible_when_the_fills_request_fails(self) -> None:
+        snapshot = self.snapshot_with_failed_fills({"recentFills": [self.cached_fill]})
+        quality = snapshot["dataQuality"]
+
+        # The per-cycle flags stay honest about the failure...
+        self.assertFalse(quality["fillsOk"])
+        self.assertFalse(quality["fillsFetchOk"])
+        self.assertTrue(self.service.wallet_fill_fetch_failed(snapshot))
+        self.assertIn("429", quality["fillsError"])
+        # ...but the wallet is still usable off the merged recent-fill cache.
+        self.assertTrue(quality["fillsUsable"])
+        self.assertTrue(quality["fillsServedFromCache"])
+        self.assertEqual(quality["recentFillCount"], 1)
+        self.assertEqual(quality["liveRecentFillCount"], 0)
+        self.assertEqual(snapshot["recentFills"], [self.cached_fill])
+        self.assertTrue(self.service.wallet_fill_data_reliable(snapshot))
+
+    def test_a_failed_fills_request_no_longer_blocks_freshness_verification(self) -> None:
+        position = {"coin": "BTC", "side": "Long", "positionValue": 500_000.0}
+        with_cache = self.snapshot_with_failed_fills({"recentFills": [self.cached_fill]})
+        without_cache = self.snapshot_with_failed_fills({"recentFills": []})
+
+        self.assertTrue(
+            self.service.has_verified_recent_activity(
+                with_cache, position, {}, now_ms=self.now_ms, window_ms=15 * 60 * 1000
+            )
+        )
+        # Same failed request, but nothing usable to fall back on.
+        self.assertFalse(
+            self.service.has_verified_recent_activity(
+                without_cache, position, {}, now_ms=self.now_ms, window_ms=15 * 60 * 1000
+            )
+        )
+
+    def test_a_wallet_with_no_recent_fill_data_at_all_stays_fill_quality_unknown(self) -> None:
+        snapshot = self.snapshot_with_failed_fills({"recentFills": []})
+        quality = snapshot["dataQuality"]
+
+        self.assertFalse(quality["fillsUsable"])
+        self.assertFalse(quality["fillsServedFromCache"])
+        self.assertEqual(quality["recentFillCount"], 0)
+        self.assertFalse(self.service.wallet_fill_data_reliable(snapshot))
+
+    def test_cached_fills_older_than_the_retention_window_are_not_treated_as_usable(self) -> None:
+        stale_fill = {**self.cached_fill, "time": self.now_ms - 30 * 24 * 60 * 60 * 1000}
+        snapshot = self.snapshot_with_failed_fills({"recentFills": [stale_fill]})
+
+        self.assertEqual(snapshot["recentFills"], [])
+        self.assertFalse(snapshot["dataQuality"]["fillsUsable"])
+        self.assertFalse(self.service.wallet_fill_data_reliable(snapshot))
+
+    def test_summary_counts_fetch_failures_separately_from_unusable_fill_data(self) -> None:
+        position = {"coin": "BTC", "side": "Long", "positionValue": 1000.0}
+        snapshots = [
+            {
+                "address": "0x1111111111111111111111111111111111111111",
+                "positions": [position],
+                "recentFills": [self.cached_fill],
+                "dataQuality": {"fillsOk": True, "fillsFetchOk": True, "fillsUsable": True},
+            },
+            {
+                # Fills request failed, cache carried the wallet.
+                "address": "0x2222222222222222222222222222222222222222",
+                "positions": [position],
+                "recentFills": [self.cached_fill],
+                "dataQuality": {"fillsOk": False, "fillsFetchOk": False, "fillsUsable": True},
+            },
+            {
+                # Fills request failed and there is nothing cached either.
+                "address": "0x3333333333333333333333333333333333333333",
+                "positions": [position],
+                "recentFills": [],
+                "dataQuality": {"fillsOk": False, "fillsFetchOk": False, "fillsUsable": False},
+            },
+        ]
+
+        summary = self.service.build_sentiment_summary(snapshots, min_wallets=1)
+
+        self.assertEqual(summary["fillFetchFailedWalletCount"], 2)
+        self.assertEqual(
+            summary["fillFetchFailedWalletAddresses"],
+            [
+                "0x2222222222222222222222222222222222222222",
+                "0x3333333333333333333333333333333333333333",
+            ],
+        )
+        self.assertEqual(summary["fillQualityUnknownWalletCount"], 1)
+        self.assertEqual(
+            summary["fillQualityUnknownWalletAddresses"],
+            ["0x3333333333333333333333333333333333333333"],
+        )
+
+    def test_dashboard_totals_split_fetch_failures_from_unusable_wallets(self) -> None:
+        def snapshot(index: int, fills_ok: bool, usable: bool) -> dict[str, Any]:
+            return {
+                "address": f"0x{index:040x}",
+                "accountValue": 1_000_000.0,
+                "totalNotional": 1_000_000.0,
+                "unrealizedPnl": 0.0,
+                "realizedPnl": 0.0,
+                "recentFills": [self.cached_fill] if usable else [],
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000.0}],
+                "exposure": {"long": 1_000_000.0, "short": 0.0, "net": 1_000_000.0},
+                "cohorts": {"walletSize": "Whale", "profitability": "Profitable"},
+                "dataQuality": {
+                    "fillsOk": fills_ok,
+                    "fillsFetchOk": fills_ok,
+                    "fillsUsable": usable,
+                    "fillsDegraded": False,
+                },
+            }
+
+        snapshots = [
+            snapshot(1, True, True),
+            snapshot(2, True, True),
+            snapshot(3, False, True),
+            snapshot(4, False, True),
+            snapshot(5, False, False),
+        ]
+        wallets = [
+            TrackedWallet(address=f"0x{index:040x}", alias="", notes="", created_at="")
+            for index in range(1, len(snapshots) + 1)
+        ]
+
+        with patch.object(self.service.store, "list_wallets", return_value=wallets), patch.object(
+            self.service.client, "list_markets", return_value=[]
+        ):
+            with patch.object(self.service, "fetch_wallet_snapshot", side_effect=snapshots):
+                dashboard = self.service.dashboard()
+
+        quality = dashboard["totals"]["dataQuality"]
+        self.assertEqual(quality["fillsFetchFailedWallets"], 3)
+        self.assertEqual(quality["fillsServedFromCacheWallets"], 2)
+        self.assertEqual(quality["fillsUnusableWallets"], 1)
+
+
+class ShadowSignalSamplingTests(unittest.TestCase):
+    """The shadow control group must grow without stacking duplicate samples."""
+
+    # Deliberately hard-coded rather than imported: a test that reads the same
+    # constants as the implementation passes even if they are zeroed out.
+    MIN_GAP_MS = 2 * 60 * 60 * 1000
+    RESTART_MS = 24 * 60 * 60 * 1000
+
+    def setUp(self) -> None:
+        self.service = WalletTrackerService(WalletStore(Path(ALERTS_FILE)), HyperliquidClient())
+        self.started_at = 1_700_000_000_000
+
+    def consensus_item(self, **overrides: Any) -> dict[str, Any]:
+        item = {
+            "coin": "ETH",
+            "side": "long",
+            "markPrice": 100.0,
+            "freshAddVwap": 99.0,
+            "convictionScore": 50.0,
+            "walletCount": 2,
+            "totalValue": 1_000_000.0,
+            "freshAddLatestTime": self.started_at - 60_000,
+            "verifiedFreshIndependentWalletCount": 1,
+            "wallets": [
+                {"address": "0xaaa", "value": 500_000.0},
+                {"address": "0xbbb", "value": 500_000.0},
+            ],
+        }
+        item.update(overrides)
+        return item
+
+    def summary(self, item: dict[str, Any]) -> dict[str, Any]:
+        return {"signals": [], "consensus": [item], "positionMarks": []}
+
+    def sample(self, previous: dict[str, Any], item: dict[str, Any], at_ms: int) -> dict[str, Any]:
+        return self.service.update_shadow_signal_outcomes(previous, self.summary(item), now_ms=at_ms)
+
+    def newest(self, records: dict[str, Any]) -> dict[str, Any]:
+        return max(records.values(), key=lambda record: int(record["startedAt"]))
+
+    def test_first_observation_is_recorded_with_its_fingerprint(self) -> None:
+        records = self.sample({}, self.consensus_item(), self.started_at)
+
+        self.assertEqual(len(records), 1)
+        record = self.newest(records)
+        self.assertEqual(record["sampleReason"], "initial")
+        self.assertTrue(record["independentSample"])
+        self.assertEqual(record["previousSampleAt"], 0)
+        self.assertEqual(record["sampleIndex"], 1)
+        self.assertEqual(record["consensusFingerprint"]["walletAddresses"], ["0xaaa", "0xbbb"])
+        self.assertEqual(record["consensusFingerprint"]["totalValue"], 1_000_000.0)
+
+    def test_an_unchanged_position_is_not_resampled(self) -> None:
+        item = self.consensus_item()
+        records = self.sample({}, item, self.started_at)
+
+        for offset in (self.MIN_GAP_MS, self.MIN_GAP_MS * 2, self.RESTART_MS - 60_000):
+            records = self.sample(records, item, self.started_at + offset)
+            self.assertEqual(len(records), 1, f"resampled an unchanged position at +{offset}ms")
+
+    def test_a_changed_wallet_set_creates_a_new_sample(self) -> None:
+        records = self.sample({}, self.consensus_item(), self.started_at)
+        joined = self.consensus_item(
+            walletCount=3,
+            wallets=[
+                {"address": "0xaaa", "value": 500_000.0},
+                {"address": "0xbbb", "value": 500_000.0},
+                {"address": "0xccc", "value": 500_000.0},
+            ],
+        )
+
+        records = self.sample(records, joined, self.started_at + self.MIN_GAP_MS)
+
+        self.assertEqual(len(records), 2)
+        record = self.newest(records)
+        self.assertEqual(record["sampleReason"], "walletSetChanged")
+        self.assertTrue(record["independentSample"])
+        self.assertEqual(record["previousSampleAt"], self.started_at)
+        self.assertEqual(record["msSincePreviousSample"], self.MIN_GAP_MS)
+        self.assertEqual(record["sampleIndex"], 2)
+        self.assertEqual(
+            record["consensusFingerprint"]["walletAddresses"], ["0xaaa", "0xbbb", "0xccc"]
+        )
+
+    def test_a_fresh_add_creates_a_new_sample(self) -> None:
+        records = self.sample({}, self.consensus_item(), self.started_at)
+        added = self.consensus_item(freshAddLatestTime=self.started_at + self.MIN_GAP_MS - 1_000)
+
+        records = self.sample(records, added, self.started_at + self.MIN_GAP_MS)
+
+        self.assertEqual(len(records), 2)
+        self.assertEqual(self.newest(records)["sampleReason"], "freshAdd")
+
+    def test_a_large_size_change_creates_a_new_sample_but_drift_does_not(self) -> None:
+        records = self.sample({}, self.consensus_item(), self.started_at)
+
+        # 10% is ordinary mark drift on an untouched position.
+        drifted = self.consensus_item(totalValue=1_100_000.0)
+        records = self.sample(records, drifted, self.started_at + self.MIN_GAP_MS)
+        self.assertEqual(len(records), 1)
+
+        # Doubling the position is a different setup.
+        doubled = self.consensus_item(totalValue=2_000_000.0)
+        records = self.sample(records, doubled, self.started_at + self.MIN_GAP_MS * 2)
+        self.assertEqual(len(records), 2)
+        self.assertEqual(self.newest(records)["sampleReason"], "sizeChanged")
+
+    def test_material_changes_inside_the_minimum_gap_are_suppressed(self) -> None:
+        records = self.sample({}, self.consensus_item(), self.started_at)
+        churned = self.consensus_item(wallets=[{"address": "0xzzz", "value": 1_000_000.0}])
+
+        for offset in (60_000, 30 * 60_000, self.MIN_GAP_MS - 1_000):
+            records = self.sample(records, churned, self.started_at + offset)
+            self.assertEqual(len(records), 1, f"sampled twice inside the min gap at +{offset}ms")
+
+        records = self.sample(records, churned, self.started_at + self.MIN_GAP_MS)
+        self.assertEqual(len(records), 2)
+
+    def test_a_static_consensus_still_yields_one_flagged_periodic_sample_per_day(self) -> None:
+        item = self.consensus_item()
+        records = self.sample({}, item, self.started_at)
+
+        records = self.sample(records, item, self.started_at + self.RESTART_MS)
+
+        self.assertEqual(len(records), 2)
+        record = self.newest(records)
+        self.assertEqual(record["sampleReason"], "periodic")
+        self.assertFalse(record["independentSample"])
+
+    def test_records_written_before_fingerprints_existed_are_resampled_once(self) -> None:
+        legacy = {
+            "shadow:ETH:long:1": {
+                "coin": "ETH",
+                "side": "long",
+                "signalKey": "ETH:long",
+                "startedAt": self.started_at,
+                "entryPrice": 100.0,
+                "rawProbabilityScore": 50.0,
+                "shadow": True,
+                "published": False,
+                "outcomes": {},
+            }
+        }
+
+        records = self.sample(legacy, self.consensus_item(), self.started_at + self.MIN_GAP_MS)
+
+        self.assertEqual(len(records), 2)
+        record = self.newest(records)
+        self.assertEqual(record["sampleReason"], "unknownPriorFingerprint")
+        self.assertFalse(record["independentSample"])
+
+    def test_published_signals_are_still_excluded_from_the_control_group(self) -> None:
+        summary = {
+            "signals": [{"coin": "ETH", "side": "long"}],
+            "consensus": [self.consensus_item()],
+            "positionMarks": [],
+        }
+
+        records = self.service.update_shadow_signal_outcomes({}, summary, now_ms=self.started_at)
+
+        self.assertEqual(records, {})
 
 
 if __name__ == "__main__":
