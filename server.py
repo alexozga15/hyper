@@ -97,7 +97,11 @@ WALLET_SIGNAL_MAX_ENTRY_DISTANCE_PCT = 4.0
 WALLET_SIGNAL_MAJOR_ASSET_MAX_ENTRY_DISTANCE_PCT = 1.5
 WALLET_SIGNAL_HIGH_BETA_MAX_ENTRY_DISTANCE_PCT = 2.5
 WALLET_CORRELATION_MIN_SHARED_EVENTS = 3
-WALLET_CORRELATION_MIN_JACCARD = 0.8
+# Overlap coefficient (shared / smaller fingerprint) instead of Jaccard: two
+# addresses run by one operator mirror each other on the coins they share, but
+# the busier address also trades elsewhere, which made the Jaccard union explode
+# and put every real pair far below any usable threshold.
+WALLET_CORRELATION_MIN_OVERLAP = 0.5
 ASSET_QUALITY_MIN_CLOSED_TRADES = 5
 WALLET_QUARANTINE_MIN_7D_RETURN_PCT = -10.0
 WALLET_QUARANTINE_MAX_7D_WIN_RATE = 35.0
@@ -1329,15 +1333,17 @@ class WalletTrackerService:
         fills_result = futures["fills"].result()
         recent_fills_result = futures["recentFills"].result()
         cached = cached_snapshot if isinstance(cached_snapshot, dict) else {}
+        orders_fetched = "orders" in futures
+        portfolio_fetched = "portfolio" in futures
         orders_result = (
             futures["orders"].result()
-            if "orders" in futures
+            if orders_fetched
             else {"ok": True, "data": cached.get("openOrders", []), "error": ""}
         )
         role = futures["role"].result() if "role" in futures else str(cached.get("role") or "unknown")
         portfolio_result = (
             futures["portfolio"].result()
-            if "portfolio" in futures
+            if portfolio_fetched
             else {"ok": True, "data": cached.get("portfolio", {}), "error": ""}
         )
         open_orders = orders_result.get("data", []) if isinstance(orders_result, dict) else []
@@ -1587,16 +1593,27 @@ class WalletTrackerService:
             "recentWinRateRank": recent_win_rate_rank,
             "assetQuality": asset_quality,
             "dataQuality": {
+                # Every flag in this block describes a request issued during the
+                # current cycle. Anything reused from the quality cache lives
+                # under "cachedQuality" so it can never be read as a live result.
                 "fillsOk": fills_ok,
-                "portfolioOk": portfolio_ok,
-                "ordersOk": orders_ok,
+                "portfolioOk": portfolio_ok if portfolio_fetched else None,
+                "portfolioFetched": portfolio_fetched,
+                "ordersOk": orders_ok if orders_fetched else None,
+                "ordersFetched": orders_fetched,
                 "recentFillsOk": recent_fills_ok,
                 "recentFillsError": (
                     recent_fills_result.get("error", "") if isinstance(recent_fills_result, dict) else ""
                 ),
                 "fillsError": fills_result.get("error", "") if isinstance(fills_result, dict) else "",
-                "portfolioError": portfolio_result.get("error", "") if isinstance(portfolio_result, dict) else "",
-                "ordersError": orders_result.get("error", "") if isinstance(orders_result, dict) else "",
+                "portfolioError": (
+                    portfolio_result.get("error", "")
+                    if portfolio_fetched and isinstance(portfolio_result, dict)
+                    else ""
+                ),
+                "ordersError": (
+                    orders_result.get("error", "") if orders_fetched and isinstance(orders_result, dict) else ""
+                ),
                 "fillsDegraded": False,
             },
             "openOrderCount": len(open_orders),
@@ -1639,11 +1656,14 @@ class WalletTrackerService:
         )[:WALLET_RECENT_FILL_CACHE_LIMIT]
 
         quality_refresh_succeeded = full_quality_refresh and fills_ok and portfolio_ok
-        use_cached_quality = bool(cached) and not quality_refresh_succeeded
+        has_cached_quality = any(field in cached for field in WALLET_CACHED_QUALITY_FIELDS)
+        use_cached_quality = has_cached_quality and not quality_refresh_succeeded
+        cached_fields_used: list[str] = []
         if use_cached_quality:
             for field in WALLET_CACHED_QUALITY_FIELDS:
                 if field in cached:
                     snapshot[field] = cached[field]
+                    cached_fields_used.append(field)
         if recent_fills:
             latest_live_fill_ms = max(int(to_float(fill.get("time"))) for fill in recent_fills)
             snapshot["holdingOnly30d"] = False
@@ -1654,17 +1674,35 @@ class WalletTrackerService:
                 "qualityRefreshSucceeded": quality_refresh_succeeded,
                 "qualityCacheHit": use_cached_quality,
                 "qualityRefreshedAt": cached.get("qualityRefreshedAt", "") if use_cached_quality else snapshot["fetchedAt"],
+                # Currency proof for the flags above: they belong to this fetch.
+                "fillsCheckedAt": snapshot["fetchedAt"],
+                "cachedQuality": {
+                    "used": use_cached_quality,
+                    "fields": cached_fields_used,
+                    "refreshedAt": str(cached.get("qualityRefreshedAt", "")) if use_cached_quality else "",
+                },
             }
         )
         return snapshot
 
     def cached_wallet_quality_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+        refreshed_at_ms = current_time_ms()
         return {
             **{field: snapshot.get(field) for field in WALLET_CACHED_QUALITY_FIELDS if field in snapshot},
             "recentFills": snapshot.get("recentFills", []),
             "qualityRefreshedAt": snapshot.get("fetchedAt", now_iso()),
-            "refreshedAtMs": current_time_ms(),
+            "refreshedAtMs": refreshed_at_ms,
+            "refreshAttemptedAtMs": refreshed_at_ms,
         }
+
+    def wallet_quality_attempt_age_ms(self, entry: Any) -> int:
+        """Last time a full refresh was *attempted*, successful or not."""
+        if not isinstance(entry, dict):
+            return 0
+        return max(
+            int(to_float(entry.get("refreshedAtMs"))),
+            int(to_float(entry.get("refreshAttemptedAtMs"))),
+        )
 
     def wallet_quality_refresh_addresses(
         self,
@@ -1678,7 +1716,7 @@ class WalletTrackerService:
             addresses,
             key=lambda address: (
                 address in cached_wallets,
-                int(to_float(cached_wallets.get(address, {}).get("refreshedAtMs"))),
+                self.wallet_quality_attempt_age_ms(cached_wallets.get(address, {})),
             ),
         )
         return set(ordered[:WALLET_QUALITY_REFRESH_BATCH_SIZE])
@@ -1746,6 +1784,20 @@ class WalletTrackerService:
             quality = snapshot.get("dataQuality", {}) if isinstance(snapshot.get("dataQuality"), dict) else {}
             if address and quality.get("qualityRefreshSucceeded"):
                 cached_wallets[address] = self.cached_wallet_quality_snapshot(snapshot)
+                cache_changed = True
+            elif address and quality.get("qualityRefreshAttempted"):
+                # A failed full refresh still counts as an attempt. Without this
+                # the wallet stays absent from the cache, sorts to the front of
+                # the rotation forever, permanently re-runs the expensive 30d
+                # fills fetch that is failing, and starves every other wallet of
+                # its refresh slot.
+                entry = cached_wallets.get(address)
+                if not isinstance(entry, dict):
+                    entry = {}
+                    cached_wallets[address] = entry
+                entry["refreshAttemptedAtMs"] = current_time_ms()
+                if snapshot.get("recentFills"):
+                    entry["recentFills"] = snapshot.get("recentFills", [])
                 cache_changed = True
             elif address in cached_wallets and snapshot.get("recentFills"):
                 cached_wallets[address]["recentFills"] = snapshot.get("recentFills", [])
@@ -2220,6 +2272,19 @@ class WalletTrackerService:
             return True
         return bool(quality.get("fillsOk", True)) and not bool(quality.get("fillsDegraded"))
 
+    def wallet_has_fills_in_window(
+        self,
+        wallet: dict[str, Any],
+        *,
+        now_ms: int,
+        window_ms: int = RANKING_WINDOW_MS,
+    ) -> bool:
+        fills = wallet.get("recentFills")
+        if not isinstance(fills, list):
+            return False
+        cutoff = now_ms - window_ms
+        return any(int(to_float(fill.get("time"))) >= cutoff for fill in fills if isinstance(fill, dict))
+
     def should_count_wallet_for_conviction(self, wallet: dict[str, Any]) -> bool:
         quality_age_ms = self.wallet_quality_age_ms(wallet)
         if quality_age_ms is not None and quality_age_ms > WALLET_QUALITY_HARD_TTL_MS:
@@ -2414,8 +2479,12 @@ class WalletTrackerService:
                 if left >= right:
                     continue
                 shared = len(left_events & right_events)
-                union = len(left_events | right_events)
-                if shared >= WALLET_CORRELATION_MIN_SHARED_EVENTS and union and shared / union >= WALLET_CORRELATION_MIN_JACCARD:
+                smaller = min(len(left_events), len(right_events))
+                if (
+                    shared >= WALLET_CORRELATION_MIN_SHARED_EVENTS
+                    and smaller
+                    and shared / smaller >= WALLET_CORRELATION_MIN_OVERLAP
+                ):
                     parents[find(right)] = find(left)
 
         return {address: find(address) for address in fingerprints}
@@ -2577,6 +2646,18 @@ class WalletTrackerService:
             top_wallet_addresses if top_wallet_addresses is not None else self.top_conviction_wallet_addresses(snapshots)
         )
         correlation_groups = self.build_wallet_correlation_groups(snapshots)
+        fill_quality_unknown_wallets = {
+            str(snapshot.get("address") or "").lower()
+            for snapshot in snapshots
+            if not self.wallet_fill_data_reliable(snapshot)
+        }
+        fill_quality_unknown_wallets.discard("")
+        dormant_wallets = {
+            str(snapshot.get("address") or "").lower()
+            for snapshot in snapshots
+            if not self.wallet_has_fills_in_window(snapshot, now_ms=now_ms, window_ms=RANKING_WINDOW_MS)
+        }
+        dormant_wallets.discard("")
 
         for snapshot in snapshots:
             if not self.should_count_wallet_for_conviction(snapshot):
@@ -2933,6 +3014,9 @@ class WalletTrackerService:
             "longWalletCount": long_wallet_count,
             "shortWalletCount": short_wallet_count,
             "walletCount": len(snapshots),
+            "fillQualityUnknownWalletCount": len(fill_quality_unknown_wallets),
+            "fillQualityUnknownWalletAddresses": sorted(fill_quality_unknown_wallets),
+            "dormantWalletCount": len(dormant_wallets),
         }
 
     def build_large_position_snapshot(
@@ -3903,6 +3987,12 @@ class WalletTrackerService:
             f'Tracking: {summary.get("walletCount", 0)} wallets',
             f"Agreement required: {min_wallets} wallets",
         ]
+        fill_quality_unknown = int(to_float(summary.get("fillQualityUnknownWalletCount")))
+        if fill_quality_unknown > 0:
+            lines.append(f"Fill data unavailable this cycle: {fill_quality_unknown} wallets")
+        dormant_wallets = int(to_float(summary.get("dormantWalletCount")))
+        if dormant_wallets > 0:
+            lines.append(f"No fills in the last 7 days: {dormant_wallets} wallets")
         if include_signals:
             lines.append(
                 f'Signals ready to act on: {summary.get("signalCount", len(summary.get("signals", [])))}'
