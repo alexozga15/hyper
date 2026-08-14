@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+import os
+import subprocess
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from scripts.run_health_monitor import detect_health_issues
+from scripts.run_health_monitor import (
+    detect_health_issues,
+    detect_signal_drought,
+    dirty_checkout_paths,
+)
+from scripts.run_health_monitor import main as run_health_monitor_main
 from scripts.run_wallet_review import evaluate_wallets
 from server import (
     SIGNAL_CALIBRATION_MIN_SAMPLE,
@@ -12,6 +21,14 @@ from server import (
     RequestRateLimiter,
     WalletTrackerService,
 )
+
+
+HOUR_MS = 60 * 60 * 1000
+NOW_MS = 2_000_000_000_000
+
+
+def ms_to_iso(value: int) -> str:
+    return datetime.fromtimestamp(value / 1000, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 class OperationalControlTests(unittest.TestCase):
@@ -112,6 +129,85 @@ class OperationalControlTests(unittest.TestCase):
         )
         self.assertIn("sentiment check stale >10m", issues)
         self.assertIn("wallet quality cache coverage <80%", issues)
+
+    def test_signal_drought_stays_quiet_before_the_first_check(self) -> None:
+        self.assertEqual(detect_signal_drought({}, now_ms=NOW_MS), [])
+        self.assertEqual(
+            detect_signal_drought({"shadowSignalOutcomes": {}}, now_ms=NOW_MS), []
+        )
+
+    def test_live_shadow_flow_only_flags_the_published_drought(self) -> None:
+        issues = detect_signal_drought(
+            {
+                "lastCheckedAt": ms_to_iso(NOW_MS),
+                "shadowSignalOutcomes": {"BTC:long:1": {"startedAt": NOW_MS - HOUR_MS}},
+            },
+            now_ms=NOW_MS,
+        )
+        self.assertEqual(issues, ["no published or candidate signal in >7d"])
+
+    def test_silent_pipeline_flags_both_horizons(self) -> None:
+        issues = detect_signal_drought(
+            {
+                "lastCheckedAt": ms_to_iso(NOW_MS),
+                "shadowSignalOutcomes": {"BTC:long:1": {"startedAt": NOW_MS - 40 * HOUR_MS}},
+            },
+            now_ms=NOW_MS,
+        )
+        self.assertEqual(
+            issues,
+            ["no signal of any tier in >24h", "no published or candidate signal in >7d"],
+        )
+
+    def test_recent_candidate_signal_clears_the_drought(self) -> None:
+        issues = detect_signal_drought(
+            {
+                "lastCheckedAt": ms_to_iso(NOW_MS),
+                "shadowSignalOutcomes": {"BTC:long:1": {"startedAt": NOW_MS - 40 * HOUR_MS}},
+                "candidateSignalOutcomes": {"ETH:short:2": {"startedAt": NOW_MS - HOUR_MS}},
+            },
+            now_ms=NOW_MS,
+        )
+        self.assertEqual(issues, [])
+
+    def test_health_check_reports_the_signal_drought(self) -> None:
+        issues = detect_health_issues(
+            {"state": {"lastCheckedAt": ms_to_iso(NOW_MS)}},
+            {"cacheCoverage": 1.0},
+            now_ms=NOW_MS,
+            disk_free_pct=50,
+        )
+        self.assertIn("no signal of any tier in >24h", issues)
+
+    def test_dirty_checkout_is_reported_and_clean_one_is_not(self) -> None:
+        modified = subprocess.CompletedProcess([], 0, stdout=" M data/alerts.json\n", stderr="")
+        with patch("scripts.run_health_monitor.subprocess.run", return_value=modified):
+            self.assertEqual(dirty_checkout_paths(Path("/repo")), ["data/alerts.json"])
+        clean = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with patch("scripts.run_health_monitor.subprocess.run", return_value=clean):
+            self.assertEqual(dirty_checkout_paths(Path("/repo")), [])
+
+    def test_missing_git_does_not_become_a_health_issue(self) -> None:
+        with patch("scripts.run_health_monitor.subprocess.run", side_effect=FileNotFoundError):
+            self.assertEqual(dirty_checkout_paths(Path("/repo")), [])
+        failed = subprocess.CompletedProcess([], 128, stdout="", stderr="not a git repository")
+        with patch("scripts.run_health_monitor.subprocess.run", return_value=failed):
+            self.assertEqual(dirty_checkout_paths(Path("/repo")), [])
+
+    def test_detected_issues_do_not_fail_the_monitor_process(self) -> None:
+        with (
+            patch("scripts.run_health_monitor.load_json_file", return_value={}),
+            patch("scripts.run_health_monitor.save_json_file") as save,
+            patch("scripts.run_health_monitor.dirty_checkout_paths", return_value=[]),
+            patch(
+                "scripts.run_health_monitor.shutil.disk_usage",
+                return_value=SimpleNamespace(total=100, used=50, free=50),
+            ),
+            patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": ""}, clear=False),
+        ):
+            exit_code = run_health_monitor_main()
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(save.call_args.args[1]["healthy"])
 
     def test_rate_limiter_spaces_requests(self) -> None:
         limiter = RequestRateLimiter(2)

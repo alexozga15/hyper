@@ -110,6 +110,9 @@ sudo systemctl enable --now hyper-sentiment.timer
 The GitHub `Sentiment Alerts` workflow remains available for manual recovery runs,
 but has no schedule once the EC2 timer is active. Do not schedule both runners at the
 same time because they keep separate alert baselines and can send duplicate alerts.
+That workflow now starts from an empty baseline every time, since alert state is no
+longer tracked in Git, so a manual run treats every open position as new and is worth
+firing only when EC2 is actually down.
 
 Automatic Telegram updates observe quiet hours from `23:00` to `07:00` in
 `Europe/Warsaw`. Checks continue during that window and acknowledge state changes
@@ -137,7 +140,45 @@ If you want on-demand bot replies, enable [`.github/workflows/telegram-commands.
 
 For near-real-time replies, deploy the Cloudflare Worker bridge in [`worker/`](worker/) and connect Telegram webhooks to it. The worker triggers `repository_dispatch` with the full Telegram update so the workflow runs right away when you message the bot.
 
-The Telegram command cursor is stored in [`data/telegram_bot_state.json`](data/telegram_bot_state.json), so the bot only answers new messages once.
+The Telegram command cursor is stored in `data/telegram_bot_state.json` under `DATA_DIR`, so the bot only answers new messages once.
+
+### Runtime state is never tracked in Git
+
+`data/alerts.json` and `data/telegram_bot_state.json` are rewritten on every run and
+are therefore ignored, not tracked. Tracking them left the EC2 checkout permanently
+dirty, and because each unit updates itself with `git pull --ff-only` under
+`ExecStartPre=-`, the refused fast-forward was swallowed and deploys silently stopped
+landing. A checkout that already carries modified copies needs them cleared once,
+after confirming the live state under `DATA_DIR` (`/home/ubuntu/hyper-state`) is
+untouched:
+
+```bash
+git -C /home/ubuntu/hyper-alerts checkout -- data/alerts.json data/telegram_bot_state.json && git -C /home/ubuntu/hyper-alerts pull --ff-only
+```
+
+The health monitor now reports `deploy checkout dirty` so the same freeze cannot go
+unnoticed again.
+
+### Health monitor
+
+`hyper-health-monitor.timer` runs [`scripts/run_health_monitor.py`](scripts/run_health_monitor.py)
+every ten minutes. It writes `data/health_monitor_state.json` and messages Telegram
+only when the issue list changes, so a standing problem is reported once rather than
+every ten minutes. It always exits `0`: a detected issue is a finding, not a failure
+of the script, and the old non-zero exit made systemd mark the unit failed on every
+unhealthy run — which is why real crashes were indistinguishable from a monitor doing
+its job.
+
+Alongside stale checks, cache coverage, degraded fills, disk space, and a persistent
+HTTP 429, it watches for a signal pipeline that has gone quiet:
+
+| Issue | Meaning | Tuned by |
+| --- | --- | --- |
+| `no signal of any tier in >24h` | Not even a shadow record was written. Shadow sampling fires whenever consensus moves, so this means the machinery broke. | `SIGNAL_PIPELINE_SILENCE_HOURS` |
+| `no published or candidate signal in >7d` | The pipeline runs but never clears its gates. This is about thresholds being too tight, not breakage. | `PUBLISHED_SIGNAL_DROUGHT_DAYS` |
+
+Neither fires before the first sentiment check has run, so a fresh install stays
+quiet until it has had a chance to produce something.
 
 ## Wallet Signal Backtest
 

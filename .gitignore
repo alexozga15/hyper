@@ -9,5 +9,10 @@ data/runtime_health.json
 data/dashboard_snapshot.json
 data/health_monitor_state.json
 data/wallet_review.json
+# Rewritten by every sentiment run and by the Telegram poller. Tracking these
+# left the EC2 checkout permanently dirty, which made `git pull --ff-only`
+# refuse to fast-forward and silently froze deploys.
+data/alerts.json
+data/telegram_bot_state.json
 # flock sidecars created by locked_path(); pure runtime coordination state.
 data/*.lock

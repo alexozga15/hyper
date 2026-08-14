@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: bot-state
@@ -49,10 +49,13 @@ jobs:
       # `git rebase origin/main` here could resurrect this run's stale
       # snapshot over state EC2 wrote after checkout. Upload it as an
       # artifact instead so the run's state is still inspectable, without
-      # ever pushing it back as the source of truth.
+      # ever pushing it back as the source of truth. The file is not tracked at
+      # all now, so this run always starts from a cold baseline and the step
+      # must tolerate the check bailing out before writing anything.
       - name: Upload alert state artifact
         uses: actions/upload-artifact@v4
         with:
           name: alert-state-${{ github.run_id }}
           path: data/alerts.json
+          if-no-files-found: ignore
           retention-days: 7
