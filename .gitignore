@@ -9,3 +9,5 @@ data/runtime_health.json
 data/dashboard_snapshot.json
 data/health_monitor_state.json
 data/wallet_review.json
+# flock sidecars created by locked_path(); pure runtime coordination state.
+data/*.lock

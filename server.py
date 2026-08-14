@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
 import os
@@ -9,6 +10,7 @@ import re
 import socket
 import ssl
 import struct
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -22,6 +24,11 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - fcntl is unavailable on Windows
+    fcntl = None  # type: ignore[assignment]
 
 from coinmarketman import CoinMarketManApiError, CoinMarketManClient
 from moni import MoniApiError, MoniClient
@@ -69,18 +76,31 @@ SIGNAL_OUTCOME_HORIZONS_MS = {
     "12h": 12 * 60 * 60 * 1000,
     "24h": 24 * 60 * 60 * 1000,
 }
-ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD = 70.0
+# Observed tracked-wallet co-adds on the same coin:side land hours apart, never
+# inside a shared 15-minute window, so the "fresh flow" window and the
+# actionable thresholds below need to be retunable without a code change.
+# WALLET_SIGNAL_ACTIVITY_WINDOW_MS is the main lever - the 15-minute default is
+# far tighter than the hours-wide spacing production data actually shows.
+ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD = float(
+    os.environ.get("ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD", "70.0")
+)
 EXTREME_SIGNAL_PROBABILITY_THRESHOLD = 85.0
 ACTIONABLE_SIGNAL_MIN_WALLETS = 4
 ACTIONABLE_SIGNAL_MIN_NET_WALLETS = 2
 ACTIONABLE_SIGNAL_MIN_QNET = 1.5
 ACTIONABLE_SIGNAL_MIN_INDEPENDENT_WALLETS = 4
 ACTIONABLE_SIGNAL_MIN_INDEPENDENT_NET_WALLETS = 3
-ACTIONABLE_SIGNAL_MIN_VERIFIED_FRESH_WALLETS = 3
-ACTIONABLE_SIGNAL_MIN_FRESH_NET_WALLETS = 3
+ACTIONABLE_SIGNAL_MIN_VERIFIED_FRESH_WALLETS = int(
+    os.environ.get("ACTIONABLE_SIGNAL_MIN_VERIFIED_FRESH_WALLETS", "3")
+)
+ACTIONABLE_SIGNAL_MIN_FRESH_NET_WALLETS = int(
+    os.environ.get("ACTIONABLE_SIGNAL_MIN_FRESH_NET_WALLETS", "3")
+)
 ACTIONABLE_SIGNAL_MAX_OPPOSITE_FRESH_WALLETS = 1
-ACTIONABLE_SIGNAL_MIN_TOP_WALLETS = 2
-WALLET_SIGNAL_ACTIVITY_WINDOW_MS = 15 * 60 * 1000
+ACTIONABLE_SIGNAL_MIN_TOP_WALLETS = int(os.environ.get("ACTIONABLE_SIGNAL_MIN_TOP_WALLETS", "2"))
+WALLET_SIGNAL_ACTIVITY_WINDOW_MS = int(
+    float(os.environ.get("WALLET_SIGNAL_ACTIVITY_WINDOW_MS", 15 * 60 * 1000))
+)
 CANDIDATE_SIGNAL_MIN_INDEPENDENT_WALLETS = 3
 CANDIDATE_SIGNAL_MIN_FRESH_NOTIONAL = 500_000
 CANDIDATE_SIGNAL_MIN_WATCH_TOP_WALLETS = 1
@@ -119,6 +139,15 @@ SHADOW_SIGNAL_OUTCOME_MIN_GAP_MS = SIGNAL_LIFETIME_MS
 SHADOW_SIGNAL_OUTCOME_MIN_SIZE_CHANGE_PCT = 25.0
 SIGNAL_CALIBRATION_PRIOR_WEIGHT = 6.0
 SIGNAL_CALIBRATION_MIN_SAMPLE = 20
+# "periodic" shadow records are re-samples of a coin:side that never actually
+# moved - a static consensus sitting through the retention window emits one
+# every SHADOW_SIGNAL_OUTCOME_RESTART_MS. Counting them as independent
+# observations is pseudo-replication: it inflates sample size without adding
+# information, which both trips SIGNAL_CALIBRATION_MIN_SAMPLE prematurely and
+# makes wilson_score_interval report a confidence band far narrower than the
+# evidence supports. Kept switchable in case the narrower behaviour is ever
+# wanted back without a code change.
+SIGNAL_CALIBRATION_REQUIRE_INDEPENDENT_SAMPLES = True
 WALLET_SIGNAL_MAX_ENTRY_DISTANCE_PCT = 4.0
 WALLET_SIGNAL_MAJOR_ASSET_MAX_ENTRY_DISTANCE_PCT = 1.5
 WALLET_SIGNAL_HIGH_BETA_MAX_ENTRY_DISTANCE_PCT = 2.5
@@ -128,6 +157,12 @@ WALLET_CORRELATION_MIN_SHARED_EVENTS = 3
 # the busier address also trades elsewhere, which made the Jaccard union explode
 # and put every real pair far below any usable threshold.
 WALLET_CORRELATION_MIN_OVERLAP = 0.5
+# Guard against the overlap coefficient alone: it merges a tiny fingerprint
+# into a huge one at overlap 1.0 whenever every one of the small wallet's few
+# events happens to also appear in the big wallet's history. Jaccard (shared /
+# union) stays small in that case, so requiring both keeps that merge from
+# happening while still catching genuine mirrored-address pairs.
+WALLET_CORRELATION_MIN_JACCARD = float(os.environ.get("WALLET_CORRELATION_MIN_JACCARD", "0.15"))
 ASSET_QUALITY_MIN_CLOSED_TRADES = 5
 WALLET_QUARANTINE_MIN_7D_RETURN_PCT = -10.0
 WALLET_QUARANTINE_MAX_7D_WIN_RATE = 35.0
@@ -188,7 +223,7 @@ MONI_SOCIAL_PROJECT_HANDLES = {
 }
 POSITION_GROUP_DISPLAY_MIN_VALUE = 1_000_000
 MIN_POSITION_MESSAGE_WALLETS = 3
-FRESH_WALLET_FLOW_MIN_VALUE = 500_000
+FRESH_WALLET_FLOW_MIN_VALUE = int(os.environ.get("FRESH_WALLET_FLOW_MIN_VALUE", "500000"))
 LARGE_POSITION_ALERT_MIN_VALUE = 1_000_000
 MIN_POSITION_MESSAGE_VALUE = POSITION_GROUP_DISPLAY_MIN_VALUE
 NEW_POSITION_ALERT_MIN_VALUE = LARGE_POSITION_ALERT_MIN_VALUE
@@ -201,7 +236,7 @@ CLUSTERED_OPEN_ALERT_WINDOW_MS = OPEN_POSITION_ALERT_WINDOW_MS
 COUNTED_POSITION_MAX_UNREALIZED_LOSS = -1_000_000
 RECENT_ADD_POSITION_MIN_PCT = 0.20
 POSITION_RECENT_ADD_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
-RECENT_FILL_ALERT_LIMIT = 100
+RECENT_FILL_ALERT_LIMIT = int(os.environ.get("RECENT_FILL_ALERT_LIMIT", "100"))
 CONSENSUS_SIZE_ALERT_MIN_DELTA = 2
 CONSENSUS_SIZE_ALERT_MIN_PCT = 0.5
 HYPERLIQUID_DASHBOARD_WORKERS = 3
@@ -770,18 +805,70 @@ def current_time_ms() -> int:
     return int(time.time() * 1000)
 
 
-def load_json_file(path: Path, default: Any) -> Any:
-    if not path.exists():
-        return default
+@contextlib.contextmanager
+def locked_path(path: Path, *, exclusive: bool):
+    """Hold an flock on a sidecar `<name>.lock` file next to `path`.
+
+    The lock file is separate from the data file itself so acquiring/releasing
+    it never races with the `os.replace()` that atomically swaps the data
+    file's contents. Degrades to a no-op when `fcntl` is unavailable (e.g. on
+    Windows) so the module still imports and runs everywhere, just without
+    cross-process locking.
+    """
+    if fcntl is None:
+        yield
+        return
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.parent / f"{path.name}.lock"
+    lock_file = open(lock_path, "a+")
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (ValueError, OSError):
-        return default
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    finally:
+        lock_file.close()
+
+
+def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None:
+    """Write `text` to `path` via a same-directory temp file + `os.replace`.
+
+    This guarantees a concurrent reader either sees the previous complete
+    contents or the new complete contents, never a truncated/partial file,
+    and a crash mid-write never leaves `path` truncated.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding=encoding) as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp_path.unlink()
+        raise
+
+
+def load_json_file(path: Path, default: Any) -> Any:
+    with locked_path(path, exclusive=False):
+        if not path.exists():
+            return default
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            return default
 
 
 def save_json_file(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    with locked_path(path, exclusive=True):
+        atomic_write_text(path, json.dumps(payload, indent=2) + "\n")
 
 
 def build_dashboard_snapshot(dashboard: dict[str, Any]) -> dict[str, Any]:
@@ -891,7 +978,7 @@ class WalletStore:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
-            self.path.write_text("[]\n", encoding="utf-8")
+            atomic_write_text(self.path, "[]\n")
 
     def list_wallets(self) -> list[TrackedWallet]:
         raw = json.loads(self.path.read_text(encoding="utf-8"))
@@ -907,7 +994,7 @@ class WalletStore:
 
     def save_wallets(self, wallets: list[TrackedWallet]) -> None:
         payload = [wallet.to_dict() for wallet in wallets]
-        self.path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        save_json_file(self.path, payload)
 
     def upsert_wallet(self, address: str, alias: str, notes: str) -> tuple[TrackedWallet, bool]:
         wallets = self.list_wallets()
@@ -1543,6 +1630,22 @@ class WalletTrackerService:
             key=lambda item: int(to_float(item.get("time"))),
             reverse=True,
         )[:RECENT_FILL_ALERT_LIMIT]
+        # RECENT_FILL_ALERT_LIMIT keeps only the newest fills, so a busy wallet
+        # can have its retained history span far less than the multi-day windows
+        # consumers like has_recent_position_fill actually ask about. Record how
+        # far back the retained fills really reach so "no fill found" can be
+        # told apart from "we only have a few hours of data" - see
+        # wallet_fill_window_covered.
+        recent_fills_truncated = len(recent_fill_entries) > RECENT_FILL_ALERT_LIMIT
+        oldest_retained_fill_ms = min(
+            (int(to_float(fill.get("time"))) for fill in recent_fills),
+            default=0,
+        )
+        fill_coverage_ms = (
+            (now_ms - oldest_retained_fill_ms)
+            if recent_fills_truncated and oldest_retained_fill_ms > 0
+            else (now_ms - fills_start_ms)
+        )
 
         normalized_orders = []
         for order in open_orders[:25]:
@@ -1681,6 +1784,9 @@ class WalletTrackerService:
                     orders_result.get("error", "") if orders_fetched and isinstance(orders_result, dict) else ""
                 ),
                 "fillsDegraded": False,
+                "recentFillsTruncated": recent_fills_truncated,
+                "oldestFillTime": oldest_retained_fill_ms,
+                "fillCoverageMs": fill_coverage_ms,
             },
             "openOrderCount": len(open_orders),
             "positions": positions,
@@ -2149,22 +2255,37 @@ class WalletTrackerService:
         return config
 
     def update_alert_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
-        raw = load_json_file(self.alerts_path, {})
-        config = raw.get("config", {}) if isinstance(raw, dict) else {}
-        state = raw.get("state", {}) if isinstance(raw, dict) else {}
+        # Hold the exclusive lock across the full read-modify-write so a
+        # concurrent check_alerts() save can't land between our load and our
+        # save and have its freshest `state` (alertDedupe/signalOutcomes,
+        # which gate re-sending already-sent Telegram alerts) silently
+        # discarded by our write.
+        with locked_path(self.alerts_path, exclusive=True):
+            try:
+                raw = (
+                    json.loads(self.alerts_path.read_text(encoding="utf-8"))
+                    if self.alerts_path.exists()
+                    else {}
+                )
+            except (ValueError, OSError):
+                raw = {}
+            config = raw.get("config", {}) if isinstance(raw, dict) else {}
+            state = raw.get("state", {}) if isinstance(raw, dict) else {}
 
-        if "enabled" in payload:
-            config["enabled"] = bool(payload.get("enabled"))
-        if "botToken" in payload:
-            config["botToken"] = str(payload.get("botToken", "")).strip()
-        if "chatId" in payload:
-            config["chatId"] = str(payload.get("chatId", "")).strip()
-        if "minConsensusWallets" in payload:
-            config["minConsensusWallets"] = max(1, int(payload.get("minConsensusWallets", DEFAULT_CONSENSUS_THRESHOLD)))
-        if "trackHip3" in payload:
-            config["trackHip3"] = bool(payload.get("trackHip3"))
+            if "enabled" in payload:
+                config["enabled"] = bool(payload.get("enabled"))
+            if "botToken" in payload:
+                config["botToken"] = str(payload.get("botToken", "")).strip()
+            if "chatId" in payload:
+                config["chatId"] = str(payload.get("chatId", "")).strip()
+            if "minConsensusWallets" in payload:
+                config["minConsensusWallets"] = max(
+                    1, int(payload.get("minConsensusWallets", DEFAULT_CONSENSUS_THRESHOLD))
+                )
+            if "trackHip3" in payload:
+                config["trackHip3"] = bool(payload.get("trackHip3"))
 
-        save_json_file(self.alerts_path, {"config": config, "state": state})
+            atomic_write_text(self.alerts_path, json.dumps({"config": config, "state": state}, indent=2) + "\n")
         return self.get_alert_settings()
 
     def top_conviction_wallet_addresses(self, wallets: list[dict[str, Any]], *, limit: int = TOP_CONVICTION_WALLET_COUNT) -> set[str]:
@@ -2424,6 +2545,25 @@ class WalletTrackerService:
         cutoff = now_ms - window_ms
         return any(int(to_float(fill.get("time"))) >= cutoff for fill in fills if isinstance(fill, dict))
 
+    def wallet_fill_window_covered(self, wallet: dict[str, Any], *, now_ms: int, window_ms: int) -> bool:
+        """Do this wallet's retained recentFills actually reach back window_ms?
+
+        RECENT_FILL_ALERT_LIMIT bounds how many fills fetch_wallet_snapshot
+        keeps. A busy wallet's newest RECENT_FILL_ALERT_LIMIT fills can span a
+        few hours, not the multi-day window callers like has_recent_position_fill
+        ask about - in that case "no fill found" is indistinguishable from "no
+        data this far back" without this check. Missing/absent coverage
+        metadata (snapshots taken before this field existed) is treated as
+        covered, matching the previous, permissive behaviour.
+        """
+        quality = wallet.get("dataQuality")
+        if not isinstance(quality, dict) or not quality.get("recentFillsTruncated"):
+            return True
+        oldest_fill_time = int(to_float(quality.get("oldestFillTime")))
+        if oldest_fill_time <= 0:
+            return True
+        return oldest_fill_time <= now_ms - window_ms
+
     def dormant_wallet_max_idle_ms(self) -> int:
         """Idle window after which a wallet stops counting towards consensus."""
         return env_int("DORMANT_WALLET_MAX_IDLE_MS", DORMANT_WALLET_MAX_IDLE_MS)
@@ -2441,7 +2581,10 @@ class WalletTrackerService:
         question. A wallet whose fills are unusable, or that carries no fill
         record at all, is *unassessable* rather than dormant and keeps counting
         exactly as before - a bad API cycle must never silently delete real
-        wallets from the consensus.
+        wallets from the consensus. The same applies when the retained fills
+        are truncated short of `window`: wallet_fill_window_covered catches
+        that case so a wallet is never marked dormant just because we only
+        have a few hours of its history.
         """
         window = self.dormant_wallet_max_idle_ms() if window_ms is None else int(window_ms)
         if window <= 0:
@@ -2449,6 +2592,8 @@ class WalletTrackerService:
         if not self.wallet_fill_data_reliable(wallet):
             return False
         if not isinstance(wallet.get("recentFills"), list):
+            return False
+        if not self.wallet_fill_window_covered(wallet, now_ms=now_ms, window_ms=window):
             return False
         return not self.wallet_has_fills_in_window(wallet, now_ms=now_ms, window_ms=window)
 
@@ -2647,10 +2792,13 @@ class WalletTrackerService:
                     continue
                 shared = len(left_events & right_events)
                 smaller = min(len(left_events), len(right_events))
+                union = len(left_events | right_events)
                 if (
                     shared >= WALLET_CORRELATION_MIN_SHARED_EVENTS
                     and smaller
                     and shared / smaller >= WALLET_CORRELATION_MIN_OVERLAP
+                    and union
+                    and shared / union >= WALLET_CORRELATION_MIN_JACCARD
                 ):
                     parents[find(right)] = find(left)
 
@@ -3009,6 +3157,7 @@ class WalletTrackerService:
                 "excludedDormantWalletCount": len(bucket["dormantWalletAddresses"]),
                 "excludedDormantWalletValue": round(bucket["dormantWalletValue"], 2),
                 "totalValue": round(bucket["totalValue"], 2),
+                "totalSize": round(bucket["totalSize"], 8),
                 "markPrice": round(bucket["totalValue"] / bucket["totalSize"], 8)
                 if bucket["totalSize"] > 0
                 else 0.0,
@@ -6018,10 +6167,24 @@ class WalletTrackerService:
         if not addresses:
             fresh = item.get("freshWalletAddresses")
             addresses = sorted({str(entry).lower() for entry in fresh if entry} if isinstance(fresh, list) else set())
+        wallet_count = item.get("walletCount")
+        if wallet_count in (None, ""):
+            wallet_count_value = len(addresses)
+        else:
+            try:
+                # Explicit presence check: a real walletCount of 0 must stay 0
+                # rather than falling back to len(addresses), which "or" did.
+                wallet_count_value = int(float(wallet_count))
+            except (TypeError, ValueError):
+                wallet_count_value = len(addresses)
         return {
             "walletAddresses": addresses,
-            "walletCount": int(to_float(item.get("walletCount"))) or len(addresses),
+            "walletCount": wallet_count_value,
             "totalValue": round(to_float(item.get("totalValue")), 2),
+            # Notional in coin units, unaffected by mark-price moves. Kept
+            # alongside totalValue (still useful context, and the only field
+            # older records have) so size-change detection can prefer it.
+            "totalSize": round(to_float(item.get("totalSize")), 8),
             "freshAddLatestTime": int(to_float(item.get("freshAddLatestTime"))),
         }
 
@@ -6053,9 +6216,18 @@ class WalletTrackerService:
         fresh_at = int(to_float(fingerprint.get("freshAddLatestTime")))
         if fresh_at > 0 and fresh_at > int(to_float(previous_fingerprint.get("freshAddLatestTime"))):
             return "freshAdd"
-        previous_value = to_float(previous_fingerprint.get("totalValue"))
-        value = to_float(fingerprint.get("totalValue"))
-        change_pct = abs(value - previous_value) / max(abs(previous_value), 1.0) * 100.0
+        previous_size = to_float(previous_fingerprint.get("totalSize"))
+        size = to_float(fingerprint.get("totalSize"))
+        if previous_size > 0 and size > 0:
+            # totalSize is coin-denominated notional, immune to mark-price
+            # drift. Prefer it over totalValue (size x price) so a pure price
+            # move on a static position is not mistaken for a size change.
+            previous_measure, measure = previous_size, size
+        else:
+            # Older records only carry totalValue.
+            previous_measure = to_float(previous_fingerprint.get("totalValue"))
+            measure = to_float(fingerprint.get("totalValue"))
+        change_pct = abs(measure - previous_measure) / max(abs(previous_measure), 1.0) * 100.0
         if change_pct >= SHADOW_SIGNAL_OUTCOME_MIN_SIZE_CHANGE_PCT:
             return "sizeChanged"
         if elapsed_ms >= SHADOW_SIGNAL_OUTCOME_RESTART_MS:
@@ -6064,6 +6236,37 @@ class WalletTrackerService:
             # exclude these when it needs strictly independent observations.
             return "periodic"
         return ""
+
+    def shadow_record_is_in_flight(self, record: dict[str, Any], *, now_ms: int) -> bool:
+        """Whether a shadow record still has measurements pending."""
+        started_at = int(to_float(record.get("startedAt")))
+        if now_ms - started_at > SHADOW_SIGNAL_OUTCOME_RETENTION_MS:
+            return False
+        outcomes = record.get("outcomes")
+        outcomes = outcomes if isinstance(outcomes, dict) else {}
+        return any(label not in outcomes for label in SIGNAL_OUTCOME_HORIZONS_MS)
+
+    def shadow_record_retention_rank(self, record: dict[str, Any], *, now_ms: int) -> tuple[int, int, int]:
+        """Eviction priority for a shadow record: the higher tuple survives.
+
+        A measured outcome is irreplaceable - the price at a past horizon
+        cannot be recovered once the record is gone. An unmeasured record is
+        the opposite: the next cycle re-derives it from consensus for free.
+        So anything carrying at least one measured horizon outranks anything
+        carrying none, a record still in flight outranks a fully retired one,
+        and recency only breaks ties inside each class.
+
+        Sorting on ``startedAt`` alone is what made "measure before trim" a
+        no-op: measurement never changes ``startedAt``, so a record could be
+        measured and discarded in the same call and the measurement was lost.
+        """
+        outcomes = record.get("outcomes")
+        outcomes = outcomes if isinstance(outcomes, dict) else {}
+        return (
+            1 if outcomes else 0,
+            1 if self.shadow_record_is_in_flight(record, now_ms=now_ms) else 0,
+            int(to_float(record.get("startedAt"))),
+        )
 
     def update_shadow_signal_outcomes(
         self,
@@ -6143,11 +6346,21 @@ class WalletTrackerService:
             records[f"shadow:{signal_key}:{now_ms}"] = record
             latest_records[signal_key] = record
             sample_counts[signal_key] = sample_counts.get(signal_key, 0) + 1
-        if len(records) > SHADOW_SIGNAL_OUTCOME_MAX_RECORDS:
-            records = dict(sorted(records.items(), key=lambda row: int(to_float(row[1].get("startedAt"))), reverse=True)[:SHADOW_SIGNAL_OUTCOME_MAX_RECORDS])
-        return self.measure_signal_outcome_records(
+        # Measure before trimming: a record that just became due for a long
+        # horizon must be measured in this cycle, or eviction could discard it
+        # the moment it becomes actionable and it would never be measured.
+        measured = self.measure_signal_outcome_records(
             records, marks_by_key=marks_by_key, marks_by_coin=marks_by_coin, now_ms=now_ms
         )
+        if len(measured) > SHADOW_SIGNAL_OUTCOME_MAX_RECORDS:
+            measured = dict(
+                sorted(
+                    measured.items(),
+                    key=lambda row: self.shadow_record_retention_rank(row[1], now_ms=now_ms),
+                    reverse=True,
+                )[:SHADOW_SIGNAL_OUTCOME_MAX_RECORDS]
+            )
+        return measured
 
     def signal_calibration_group(self, coin: Any) -> str:
         normalized = normalize_position_coin(coin)
@@ -6174,9 +6387,13 @@ class WalletTrackerService:
         horizon: str = "4h",
         shadow_records: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        require_independent = env_flag(
+            "SIGNAL_CALIBRATION_REQUIRE_INDEPENDENT_SAMPLES", SIGNAL_CALIBRATION_REQUIRE_INDEPENDENT_SAMPLES
+        )
         buckets: dict[str, dict[str, list[dict[str, Any]]]] = {}
         shadow_counts: dict[str, dict[str, int]] = {}
         degraded_counts: dict[str, dict[str, int]] = {}
+        dependent_counts: dict[str, dict[str, int]] = {}
         for source_records, is_shadow in ((records, False), (shadow_records or {}, True)):
             for record in source_records.values() if isinstance(source_records, dict) else []:
                 if not isinstance(record, dict):
@@ -6193,11 +6410,29 @@ class WalletTrackerService:
                 if outcome.get("degraded"):
                     degraded_counts.setdefault(group, {})[bucket] = degraded_counts.setdefault(group, {}).get(bucket, 0) + 1
                     continue
+                # Records with no "independentSample" key predate this field and
+                # must keep counting as independent for backward compatibility.
+                # Records that do have the key and it is falsy (pseudo-replicated
+                # "periodic"/"unknownPriorFingerprint" samples) are pulled out of
+                # the pool that drives empiricalProbability/calibratedProbability/
+                # the Wilson interval and the group base_rate, but the fact that
+                # they exist is still surfaced via dependentSample.
+                if require_independent and "independentSample" in record and not record.get("independentSample"):
+                    dependent_counts.setdefault(group, {})[bucket] = dependent_counts.setdefault(group, {}).get(bucket, 0) + 1
+                    continue
                 buckets.setdefault(group, {}).setdefault(bucket, []).append(outcome)
                 if is_shadow:
                     shadow_counts.setdefault(group, {})[bucket] = shadow_counts.setdefault(group, {}).get(bucket, 0) + 1
 
-        result: dict[str, Any] = {"horizon": horizon, "groups": {}, "baseRates": {}, "priorWeight": SIGNAL_CALIBRATION_PRIOR_WEIGHT, "minSample": SIGNAL_CALIBRATION_MIN_SAMPLE, "roundTripCostPct": SIGNAL_ROUND_TRIP_COST_PCT}
+        result: dict[str, Any] = {
+            "horizon": horizon,
+            "groups": {},
+            "baseRates": {},
+            "priorWeight": SIGNAL_CALIBRATION_PRIOR_WEIGHT,
+            "minSample": SIGNAL_CALIBRATION_MIN_SAMPLE,
+            "roundTripCostPct": SIGNAL_ROUND_TRIP_COST_PCT,
+            "requireIndependentSamples": require_independent,
+        }
         for group, group_buckets in buckets.items():
             group_sample = sum(len(outcomes) for outcomes in group_buckets.values())
             group_wins = sum(1 for outcomes in group_buckets.values() for outcome in outcomes if self.signal_outcome_net_return_pct(outcome) > 0)
@@ -6220,6 +6455,7 @@ class WalletTrackerService:
                     "confidenceHigh": round(high, 1),
                     "shadowSample": int(shadow_counts.get(group, {}).get(bucket, 0)),
                     "degradedSample": int(degraded_counts.get(group, {}).get(bucket, 0)),
+                    "dependentSample": int(dependent_counts.get(group, {}).get(bucket, 0)),
                 }
         # A bucket containing only delayed measurements has no normal outcome
         # entry above. Keep that fact visible instead of presenting an empty
@@ -6239,6 +6475,7 @@ class WalletTrackerService:
                         "confidenceHigh": 100.0,
                         "shadowSample": 0,
                         "degradedSample": int(count),
+                        "dependentSample": 0,
                     },
                 )
         return result

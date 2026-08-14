@@ -49,13 +49,13 @@ COINMARKETMAN_API_TOKEN=...
 Notes:
 
 - Use persistent storage for `DATA_DIR` so tracked wallets and alert settings survive restarts.
-- The included [`render.yaml`](/Users/alexozga/Documents/New%20project%204/render.yaml) mounts a persistent disk at `/var/data`.
-- The included [`Dockerfile`](/Users/alexozga/Documents/New%20project%204/Dockerfile) is enough for Docker-based platforms like Render or Railway.
+- The included [`render.yaml`](render.yaml) mounts a persistent disk at `/var/data`.
+- The included [`Dockerfile`](Dockerfile) is enough for Docker-based platforms like Render or Railway.
 - Set Telegram alert credentials through `POST /api/alerts/config` after deployment.
 
 ## CoinMarketMan HyperTracker API
 
-The helper in [`coinmarketman.py`](/Users/alexozga/Documents/New%20project%204/coinmarketman.py) reads the API key from `COINMARKETMAN_API_TOKEN`. Do not commit the token.
+The helper in [`coinmarketman.py`](coinmarketman.py) reads the API key from `COINMARKETMAN_API_TOKEN`. Do not commit the token.
 
 Useful commands:
 
@@ -77,7 +77,10 @@ How it works:
 - GitHub Actions checks alerts every 5 minutes and can also be started manually.
 - The periodic Telegram update runs every 4 hours.
 - Telegram secrets stay in GitHub Secrets, not in the repo.
-- Previous alert state is stored in [`data/alerts.json`](/Users/alexozga/Documents/New%20project%204/data/alerts.json) and committed back to the repo so consensus changes are remembered between runs.
+- Previous alert state is stored in [`data/alerts.json`](data/alerts.json). The workflow uploads it as a
+  run artifact rather than committing it back to `main`: the EC2 timer rewrites that same file
+  continuously, and a `git rebase` inside CI could resurrect a stale snapshot over live state.
+  Use the EC2 runner if you need state remembered across runs.
 
 Required GitHub repository secrets:
 
@@ -114,7 +117,7 @@ without sending, so stale overnight alerts are not delivered in the morning. Tel
 commands remain available at all times. Configure the window with
 `QUIET_HOURS_TIMEZONE`, `QUIET_HOURS_START`, and `QUIET_HOURS_END`.
 
-If you want to verify Telegram delivery without waiting for a real sentiment change, run [`.github/workflows/telegram-test.yml`](/Users/alexozga/Documents/New%20project%204/.github/workflows/telegram-test.yml). It sends a one-off test message and does not touch the saved alert baseline.
+If you want to verify Telegram delivery without waiting for a real sentiment change, run [`.github/workflows/telegram-test.yml`](.github/workflows/telegram-test.yml). It sends a one-off test message and does not touch the saved alert baseline.
 
 If you want on-demand bot replies, enable [`.github/workflows/telegram-commands.yml`](.github/workflows/telegram-commands.yml).
 
@@ -158,6 +161,6 @@ Alias,0xabc...,notes
 
 ## Notes
 
-- Wallet metadata is saved locally in [`data/tracked_wallets.json`](/Users/alexozga/Documents/New%20project%204/data/tracked_wallets.json)
+- Wallet metadata is saved locally in [`data/tracked_wallets.json`](data/tracked_wallets.json)
 - All-time profitability is sourced from Hyperliquid's official `portfolio` endpoint
 - Discovery works by collecting wallet addresses exposed in Hyperliquid's public `trades` WebSocket feed, then ranking those candidates with live wallet snapshots
