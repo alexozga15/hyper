@@ -43,16 +43,16 @@ jobs:
           QUIET_HOURS_END: "7"
         run: python3 scripts/run_alert_check.py
 
-      - name: Persist alert state
-        run: |
-          if git diff --quiet -- data/alerts.json; then
-            echo "No alert state changes to commit."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/alerts.json
-          git commit -m "Update alert state"
-          git fetch origin main
-          git rebase origin/main
-          git push origin HEAD:main
+      # data/alerts.json is live state that the EC2 box's systemd timers and
+      # the ThreadingHTTPServer are continuously rewriting. Committing this
+      # workflow's snapshot back to main used to race those writers: the
+      # `git rebase origin/main` here could resurrect this run's stale
+      # snapshot over state EC2 wrote after checkout. Upload it as an
+      # artifact instead so the run's state is still inspectable, without
+      # ever pushing it back as the source of truth.
+      - name: Upload alert state artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: alert-state-${{ github.run_id }}
+          path: data/alerts.json
+          retention-days: 7
