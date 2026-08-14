@@ -4,6 +4,7 @@ services:
     env: docker
     plan: starter
     autoDeploy: true
+    healthCheckPath: /api/health
     disk:
       name: hyperwatch-data
       mountPath: /var/data
@@ -13,3 +14,7 @@ services:
         value: /var/data
       - key: ALERT_CHECK_INTERVAL_SECONDS
         value: 900
+      # Required for any /api access from outside the container. Without it the
+      # server refuses remote API requests with HTTP 503.
+      - key: HYPERWATCH_API_TOKEN
+        generateValue: true

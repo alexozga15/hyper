@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import hashlib
+import hmac
 import json
 import os
 import random
@@ -20,10 +21,11 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
+from http.cookies import CookieError, SimpleCookie
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 try:
     import fcntl
@@ -417,6 +419,47 @@ def env_int_csv(name: str, default: tuple[int, ...]) -> list[int]:
         except ValueError:
             continue
     return values or list(default)
+
+
+def env_str(name: str, default: str = "") -> str:
+    return os.environ.get(name, default).strip()
+
+
+# --- HTTP API access control -------------------------------------------------
+# The dashboard exposes wallet data and lets callers rewrite Telegram alert
+# credentials, so every /api route except the health probe is gated. Requests
+# from loopback are trusted by default so `python3 server.py` still works with
+# no configuration; set ALLOW_UNAUTHENTICATED_LOOPBACK=0 to require a token
+# even locally.
+API_TOKEN = env_str("HYPERWATCH_API_TOKEN")
+ALLOW_UNAUTHENTICATED_LOOPBACK = env_flag("ALLOW_UNAUTHENTICATED_LOOPBACK", True)
+MAX_REQUEST_BODY_BYTES = env_int("MAX_REQUEST_BODY_BYTES", 1024 * 1024)
+LOOPBACK_ADDRESSES = frozenset({"127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost"})
+PUBLIC_API_PATHS = frozenset({"/api/health"})
+API_TOKEN_COOKIE = "hw_token"
+# Headers applied to every response, static files included - not just the JSON
+# API. Set in end_headers() so a route cannot forget them.
+SECURITY_HEADERS = (
+    ("X-Content-Type-Options", "nosniff"),
+    ("Referrer-Policy", "no-referrer"),
+    ("Cache-Control", "no-store"),
+)
+_QUERY_TOKEN_RE = re.compile(r"([?&](?:token|api_token)=)[^&\s]*", re.IGNORECASE)
+
+
+def redact_query_token(value: Any) -> Any:
+    """Strip a token value out of anything headed for a log line."""
+    if not isinstance(value, str):
+        return value
+    return _QUERY_TOKEN_RE.sub(r"\1[redacted]", value)
+
+
+class RequestBodyError(ValueError):
+    """Raised when a request body is unreadable, malformed, or oversized."""
+
+    def __init__(self, message: str, status: int = HTTPStatus.BAD_REQUEST) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 def to_float(value: Any) -> float:
@@ -7437,14 +7480,104 @@ class AppHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, directory=str(STATIC_DIR), **kwargs)
 
+    def end_headers(self) -> None:
+        """Attach the security headers to every response, static ones included."""
+        sent = b"".join(getattr(self, "_headers_buffer", []) or []).lower()
+        for name, value in SECURITY_HEADERS:
+            if name.lower().encode("latin-1") + b":" not in sent:
+                self.send_header(name, value)
+        super().end_headers()
+
     def log_message(self, format: str, *args: Any) -> None:
         if os.environ.get("QUIET_HTTP") == "1":
             return
-        super().log_message(format, *args)
+        # The request line reaches the access log verbatim, and /api/session
+        # carries the API token in its query string. Redact it so a login does
+        # not write the credential to stdout, journald, or a platform log
+        # aggregator on every call.
+        super().log_message(format, *(redact_query_token(arg) for arg in args))
+
+    # --- access control -----------------------------------------------------
+
+    def client_is_loopback(self) -> bool:
+        try:
+            return str(self.client_address[0]) in LOOPBACK_ADDRESSES
+        except (IndexError, TypeError):
+            return False
+
+    def presented_token(self) -> str:
+        header = self.headers.get("Authorization", "")
+        if header.lower().startswith("bearer "):
+            return header[7:].strip()
+
+        direct = self.headers.get("X-Api-Token", "").strip()
+        if direct:
+            return direct
+
+        cookies = SimpleCookie()
+        try:
+            cookies.load(self.headers.get("Cookie", ""))
+        except CookieError:
+            return ""
+        morsel = cookies.get(API_TOKEN_COOKIE)
+        return morsel.value.strip() if morsel else ""
+
+    def is_authorized(self, path: str) -> bool:
+        if path in PUBLIC_API_PATHS:
+            return True
+        if API_TOKEN:
+            return hmac.compare_digest(self.presented_token(), API_TOKEN)
+        return ALLOW_UNAUTHENTICATED_LOOPBACK and self.client_is_loopback()
+
+    def reject_unauthorized(self, path: str) -> bool:
+        """Send an error response when the caller may not touch `path`.
+
+        Returns True when the request was rejected and the caller should stop.
+        """
+        if self.is_authorized(path):
+            return False
+
+        if API_TOKEN:
+            self.send_json(
+                {"error": "Unauthorized. Supply the API token via Authorization: Bearer <token>."},
+                HTTPStatus.UNAUTHORIZED,
+            )
+        else:
+            self.send_json(
+                {
+                    "error": (
+                        "This server is reachable from the network but HYPERWATCH_API_TOKEN "
+                        "is not set, so remote API access is refused. Set HYPERWATCH_API_TOKEN "
+                        "and retry with Authorization: Bearer <token>."
+                    )
+                },
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        return True
+
+    # --- routing --------------------------------------------------------------
 
     def do_GET(self) -> None:
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
 
+        if path == "/api/session" or path == "/login":
+            self.handle_token_login(parsed)
+            return
+
+        if not path.startswith("/api/"):
+            super().do_GET()
+            return
+
+        if self.reject_unauthorized(path):
+            return
+
+        try:
+            self.route_get(path)
+        except Exception as exc:  # noqa: BLE001 - surface a clean 500, not a traceback
+            self.send_server_error(exc)
+
+    def route_get(self, path: str) -> None:
         if path == "/api/health":
             self.send_json({"ok": True, "timestamp": now_iso()})
             return
@@ -7469,11 +7602,23 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json({"markets": self.service.client.list_markets()[:60]})
             return
 
-        super().do_GET()
+        status, body = format_error("Route not found.", HTTPStatus.NOT_FOUND)
+        self.send_json(body, status)
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
+        if self.reject_unauthorized(path):
+            return
 
+        try:
+            self.route_post(path)
+        except RequestBodyError as exc:
+            status, body = format_error(str(exc), exc.status)
+            self.send_json(body, status)
+        except Exception as exc:  # noqa: BLE001
+            self.send_server_error(exc)
+
+    def route_post(self, path: str) -> None:
         if path == "/api/wallets":
             payload = self.read_json_body()
             address = normalize_address(str(payload.get("address", "")).strip())
@@ -7497,9 +7642,23 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         if path == "/api/discovery/scan":
             payload = self.read_json_body()
+            addresses = payload.get("addresses", [])
+            if not isinstance(addresses, list):
+                status, body = format_error("`addresses` must be a list.")
+                self.send_json(body, status)
+                return
+
+            limit = payload.get("limit", 15)
+            try:
+                limit = int(limit)
+            except (TypeError, ValueError):
+                status, body = format_error("`limit` must be an integer.")
+                self.send_json(body, status)
+                return
+
             result = self.service.scan_discovery_candidates(
-                addresses=payload.get("addresses", []),
-                limit=int(payload.get("limit", 15)),
+                addresses=addresses,
+                limit=max(1, min(limit, MAX_DISCOVERY_BATCH)),
                 min_account_value=to_float(payload.get("minAccountValue")),
                 min_realized_pnl=to_float(payload.get("minRealizedPnl")),
             )
@@ -7520,9 +7679,18 @@ class AppHandler(SimpleHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         path = urlparse(self.path).path
+        if self.reject_unauthorized(path):
+            return
+
+        try:
+            self.route_delete(path)
+        except Exception as exc:  # noqa: BLE001
+            self.send_server_error(exc)
+
+    def route_delete(self, path: str) -> None:
         prefix = "/api/wallets/"
         if path.startswith(prefix):
-            address = normalize_address(path[len(prefix) :])
+            address = normalize_address(unquote(path[len(prefix) :]))
             if not address:
                 status, body = format_error("Wallet address must be a valid 42-character hex string.")
                 self.send_json(body, status)
@@ -7540,24 +7708,102 @@ class AppHandler(SimpleHTTPRequestHandler):
         status, body = format_error("Route not found.", HTTPStatus.NOT_FOUND)
         self.send_json(body, status)
 
-    def read_json_body(self) -> dict[str, Any]:
-        content_length = int(self.headers.get("Content-Length", "0"))
-        raw = self.rfile.read(content_length).decode("utf-8") if content_length else "{}"
-        return json.loads(raw or "{}")
+    # --- helpers ----------------------------------------------------------
 
-    def send_json(self, payload: dict[str, Any], status: int = HTTPStatus.OK) -> None:
+    def handle_token_login(self, parsed: Any) -> None:
+        """Exchange `?token=...` for a session cookie so the static dashboard
+        can call the API from a browser on a remote deployment."""
+        if not API_TOKEN:
+            status, body = format_error(
+                "Token login is unavailable because HYPERWATCH_API_TOKEN is not set.",
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            self.send_json(body, status)
+            return
+
+        supplied = parse_qs(parsed.query).get("token", [""])[0].strip()
+        if not hmac.compare_digest(supplied, API_TOKEN):
+            status, body = format_error("Invalid token.", HTTPStatus.UNAUTHORIZED)
+            self.send_json(body, status)
+            return
+
+        cookie = (
+            f"{API_TOKEN_COOKIE}={API_TOKEN}; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800"
+        )
+        self.send_json({"ok": True}, extra_headers=(("Set-Cookie", cookie),))
+
+    def list_directory(self, path: str) -> None:  # type: ignore[override]
+        """Never expose a browsable index of the static directory."""
+        self.send_error(HTTPStatus.NOT_FOUND, "File not found")
+        return None
+
+    def send_server_error(self, exc: Exception) -> None:
+        self.log_error("Unhandled error on %s: %r", self.path, exc)
+        status, body = format_error("Internal server error.", HTTPStatus.INTERNAL_SERVER_ERROR)
+        self.send_json(body, status)
+
+    def read_json_body(self) -> dict[str, Any]:
+        try:
+            content_length = int(self.headers.get("Content-Length", "0") or "0")
+        except ValueError:
+            raise RequestBodyError("Invalid Content-Length header.") from None
+
+        if content_length < 0:
+            raise RequestBodyError("Invalid Content-Length header.")
+        if content_length > MAX_REQUEST_BODY_BYTES:
+            raise RequestBodyError(
+                f"Request body exceeds the {MAX_REQUEST_BODY_BYTES} byte limit.",
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            )
+        if not content_length:
+            return {}
+
+        raw = self.rfile.read(content_length)
+        try:
+            decoded = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            raise RequestBodyError("Request body must be UTF-8 encoded JSON.") from None
+
+        try:
+            payload = json.loads(decoded or "{}")
+        except json.JSONDecodeError:
+            raise RequestBodyError("Request body must be valid JSON.") from None
+
+        if not isinstance(payload, dict):
+            raise RequestBodyError("Request body must be a JSON object.")
+        return payload
+
+    def send_json(
+        self,
+        payload: dict[str, Any],
+        status: int = HTTPStatus.OK,
+        extra_headers: tuple[tuple[str, str], ...] = (),
+    ) -> None:
         body = json.dumps(payload).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            for name, value in extra_headers:
+                self.send_header(name, value)
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            # Client hung up mid-response; nothing useful left to do.
+            pass
 
 
 def main() -> None:
     port = int(os.environ.get("PORT", "8000"))
     host = os.environ.get("HOST", "0.0.0.0")
     alert_interval = int(os.environ.get("ALERT_CHECK_INTERVAL_SECONDS", "0"))
+
+    if not API_TOKEN and host not in LOOPBACK_ADDRESSES:
+        print(
+            "WARNING: binding to "
+            f"{host} without HYPERWATCH_API_TOKEN. Remote /api requests will be "
+            "refused with HTTP 503. Set HYPERWATCH_API_TOKEN to enable remote access."
+        )
 
     server = ThreadingHTTPServer((host, port), AppHandler)
 

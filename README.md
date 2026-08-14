@@ -44,7 +44,19 @@ PORT=8000
 DATA_DIR=/var/data
 ALERT_CHECK_INTERVAL_SECONDS=900
 COINMARKETMAN_API_TOKEN=...
+HYPERWATCH_API_TOKEN=...
 ```
+
+### API access control
+
+Every `/api` route except `/api/health` is authenticated. `HYPERWATCH_API_TOKEN` is what gates it:
+
+- **Token set:** requests must present it as `Authorization: Bearer <token>`, an `X-Api-Token` header, or the `hw_token` cookie. Anything else gets `401`.
+- **Token unset:** only loopback callers are served, so `python3 server.py` keeps working locally with no configuration. Remote requests get `503` with an explanation. Set `ALLOW_UNAUTHENTICATED_LOOPBACK=0` to require a token even on localhost.
+
+To use the dashboard in a browser against a remote deployment, visit `/api/session?token=<token>` once. That sets an `HttpOnly`, `SameSite=Strict` session cookie and the UI works normally from then on.
+
+Until `HYPERWATCH_API_TOKEN` is set, all remote `/api` calls return `503`; the included [`render.yaml`](render.yaml) sets it automatically via `generateValue: true`.
 
 Notes:
 
