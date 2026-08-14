@@ -350,7 +350,11 @@ class TestTokenIsNotLogged:
             "GET /api/session?api_token=s3cr3t-value HTTP/1.1",
         ],
     )
-    def test_query_token_is_redacted(self, capsys, line):
+    def test_query_token_is_redacted(self, capsys, monkeypatch, line):
+        # QUIET_HTTP short-circuits log_message entirely, and CI sets it, so
+        # pin it off here: this test is about what gets written when logging
+        # is on, not about whether the environment happens to enable it.
+        monkeypatch.delenv("QUIET_HTTP", raising=False)
         handler = server.AppHandler.__new__(server.AppHandler)
         handler.client_address = ("127.0.0.1", 1)
         handler.requestline = line
@@ -359,9 +363,18 @@ class TestTokenIsNotLogged:
         assert "s3cr3t-value" not in logged
         assert "[redacted]" in logged
 
-    def test_ordinary_request_lines_are_untouched(self, capsys):
+    def test_ordinary_request_lines_are_untouched(self, capsys, monkeypatch):
+        monkeypatch.delenv("QUIET_HTTP", raising=False)
         handler = server.AppHandler.__new__(server.AppHandler)
         handler.client_address = ("127.0.0.1", 1)
         line = "GET /api/dashboard HTTP/1.1"
         server.AppHandler.log_message(handler, '"%s" %s %s', line, "200", "-")
         assert "/api/dashboard" in capsys.readouterr().err
+
+    def test_quiet_http_suppresses_the_line_entirely(self, capsys, monkeypatch):
+        monkeypatch.setenv("QUIET_HTTP", "1")
+        handler = server.AppHandler.__new__(server.AppHandler)
+        handler.client_address = ("127.0.0.1", 1)
+        line = "GET /api/session?token=s3cr3t-value HTTP/1.1"
+        server.AppHandler.log_message(handler, '"%s" %s %s', line, "200", "-")
+        assert capsys.readouterr().err == ""
