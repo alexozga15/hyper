@@ -27,6 +27,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
+# Re-exported: callers and tests import RequestRateLimiter from server.
+from ratelimit import RequestRateLimiter
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - fcntl is unavailable on Windows
@@ -1105,41 +1108,7 @@ class WalletStore:
         return True
 
 
-class RequestRateLimiter:
-    def __init__(self, requests_per_second: float = HYPERLIQUID_REQUESTS_PER_SECOND) -> None:
-        self.interval = 1.0 / max(0.5, requests_per_second)
-        self.next_request_at = 0.0
-        self.lock = threading.Lock()
-        # Every 429 lands here. Nothing else in the process counts them, which
-        # is why the journal showed no trace of rate limiting while a third of
-        # the wallets were being throttled.
-        self.throttle_events = 0
-        self.throttle_seconds = 0.0
-
-    def wait(self) -> None:
-        with self.lock:
-            now = time.monotonic()
-            delay = max(0.0, self.next_request_at - now)
-            self.next_request_at = max(now, self.next_request_at) + self.interval
-        if delay > 0:
-            time.sleep(delay)
-
-    def penalize(self, seconds: float) -> None:
-        with self.lock:
-            self.throttle_events += 1
-            self.throttle_seconds += max(0.0, seconds)
-            self.next_request_at = max(self.next_request_at, time.monotonic() + max(0.0, seconds))
-
-    def throttle_report(self) -> dict[str, Any]:
-        with self.lock:
-            return {
-                "events": self.throttle_events,
-                "backoffSeconds": round(self.throttle_seconds, 2),
-                "requestsPerSecond": round(1.0 / self.interval, 2),
-            }
-
-
-GLOBAL_HYPERLIQUID_RATE_LIMITER = RequestRateLimiter()
+GLOBAL_HYPERLIQUID_RATE_LIMITER = RequestRateLimiter(HYPERLIQUID_REQUESTS_PER_SECOND)
 
 
 class HyperliquidClient:

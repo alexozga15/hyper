@@ -79,7 +79,38 @@ def detect_health_issues(
     if disk_free_pct < 10:
         issues.append("disk free space <10%")
     issues.extend(detect_signal_drought(state, now_ms=now_ms))
+    issues.extend(detect_external_api_backoff(state, now_ms=now_ms))
     return issues
+
+
+def detect_external_api_backoff(state: dict[str, Any], *, now_ms: int) -> list[str]:
+    """Flag CoinMarketMan or Moni sitting out a self-imposed backoff.
+
+    Both back off for hours after a rate limit or an error, and both keep
+    answering from cache while they do, so the pipeline looks healthy from
+    every other angle. Only these two fields say that the signals being
+    published are being confirmed against hours-old external data.
+    """
+    issues: list[str] = []
+    cmm = state.get("cmmSignals")
+    if isinstance(cmm, dict):
+        until_ms = iso_to_ms(cmm.get("rateLimitedUntil"))
+        if until_ms > now_ms:
+            issues.append(f"CMM rate limited for another {format_hours(until_ms - now_ms)}")
+
+    moni = state.get("moniSocial")
+    # nextFetchAt is also set on success as an ordinary cache TTL, so only an
+    # error alongside it means the wait is a penalty rather than a schedule.
+    if isinstance(moni, dict) and str(moni.get("error") or "").strip():
+        until_ms = iso_to_ms(moni.get("nextFetchAt"))
+        if until_ms > now_ms:
+            issues.append(f"Moni backed off for another {format_hours(until_ms - now_ms)}")
+    return issues
+
+
+def format_hours(duration_ms: int) -> str:
+    hours = duration_ms / (60 * 60 * 1000)
+    return f"{hours:.1f}h" if hours >= 1 else f"{max(1, round(duration_ms / 60000))}m"
 
 
 def dirty_checkout_paths(root: Path) -> list[str]:

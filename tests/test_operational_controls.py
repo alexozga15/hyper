@@ -211,7 +211,7 @@ class OperationalControlTests(unittest.TestCase):
 
     def test_rate_limiter_spaces_requests(self) -> None:
         limiter = RequestRateLimiter(2)
-        with patch("server.time.monotonic", side_effect=[10.0, 10.1]), patch("server.time.sleep") as sleep:
+        with patch("ratelimit.time.monotonic", side_effect=[10.0, 10.1]), patch("ratelimit.time.sleep") as sleep:
             limiter.wait()
             limiter.wait()
         self.assertAlmostEqual(sleep.call_args.args[0], 0.4)
