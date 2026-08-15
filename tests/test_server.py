@@ -11,6 +11,7 @@ from coinmarketman import CoinMarketManApiError
 from server import (
     ALERTS_FILE,
     DORMANT_WALLET_MAX_IDLE_MS,
+    WALLET_SIGNAL_ACTIVITY_WINDOW_MS,
     ELITE_WALLET_OVERRIDES,
     HyperliquidClient,
     POSITION_INCREASE_ALERT_MIN_DELTA,
@@ -1030,11 +1031,15 @@ class AlertSummaryTests(unittest.TestCase):
             ),
         )
 
-    def test_fresh_signal_flow_requires_500k_per_wallet_inside_15_minutes(self) -> None:
+    def test_fresh_signal_flow_requires_500k_per_wallet_inside_the_window(self) -> None:
         now_ms = 1_700_000_000_000
+        # Derived from the window rather than hardcoded: this wallet exists to
+        # sit just outside it, and pinning it to a literal age quietly turns it
+        # into an inside-the-window wallet whenever the window widens.
+        stale_minutes = WALLET_SIGNAL_ACTIVITY_WINDOW_MS // 60_000 + 1
         snapshots = []
         for index, (value, age_minutes) in enumerate(
-            ((500_000.0, 1), (500_000.0, 5), (499_999.0, 2), (500_000.0, 16)),
+            ((500_000.0, 1), (500_000.0, 5), (499_999.0, 2), (500_000.0, stale_minutes)),
             start=1,
         ):
             size = value / 50_000.0
@@ -2406,7 +2411,7 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_signals_message(summary)
 
-        self.assertIn("Fresh candidates from the last 15 minutes", message)
+        self.assertIn("Fresh candidates from the last 2 hours", message)
         self.assertIn("WATCH BUY ETH (LONG)", message)
         self.assertIn("3 wallets added $650K", message)
 

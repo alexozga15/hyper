@@ -81,11 +81,14 @@ SIGNAL_OUTCOME_HORIZONS_MS = {
     "12h": 12 * 60 * 60 * 1000,
     "24h": 24 * 60 * 60 * 1000,
 }
-# Observed tracked-wallet co-adds on the same coin:side land hours apart, never
-# inside a shared 15-minute window, so the "fresh flow" window and the
-# actionable thresholds below need to be retunable without a code change.
-# WALLET_SIGNAL_ACTIVITY_WINDOW_MS is the main lever - the 15-minute default is
-# far tighter than the hours-wide spacing production data actually shows.
+# Observed tracked-wallet co-adds on the same coin:side land hours apart, so
+# the "fresh flow" window and the actionable thresholds below need to be
+# retunable without a code change. WALLET_SIGNAL_ACTIVITY_WINDOW_MS is the main
+# lever. It ran at 15 minutes for a long time and produced nothing: measured
+# against production, the largest cluster of wallets sharing a coin:side inside
+# one window was a single wallet, and the smallest gap between two entries was
+# 29 minutes - just outside the window, so the gate was arithmetically
+# unreachable rather than merely strict.
 ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD = float(
     os.environ.get("ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD", "70.0")
 )
@@ -104,7 +107,7 @@ ACTIONABLE_SIGNAL_MIN_FRESH_NET_WALLETS = int(
 ACTIONABLE_SIGNAL_MAX_OPPOSITE_FRESH_WALLETS = 1
 ACTIONABLE_SIGNAL_MIN_TOP_WALLETS = int(os.environ.get("ACTIONABLE_SIGNAL_MIN_TOP_WALLETS", "2"))
 WALLET_SIGNAL_ACTIVITY_WINDOW_MS = int(
-    float(os.environ.get("WALLET_SIGNAL_ACTIVITY_WINDOW_MS", 15 * 60 * 1000))
+    float(os.environ.get("WALLET_SIGNAL_ACTIVITY_WINDOW_MS", 120 * 60 * 1000))
 )
 CANDIDATE_SIGNAL_MIN_INDEPENDENT_WALLETS = 3
 CANDIDATE_SIGNAL_MIN_FRESH_NOTIONAL = 500_000
@@ -521,6 +524,16 @@ def normalize_position_coin(coin: Any) -> str:
     if separator and prefix in STOCK_POSITION_PREFIXES and suffix and suffix not in NON_STOCK_MARKET_SUFFIXES:
         return suffix
     return label
+
+
+def format_window_minutes(window_ms: int) -> str:
+    """Human phrasing for a freshness window, e.g. "30 minutes" or "2 hours"."""
+    minutes = max(0, int(window_ms)) // 60_000
+    if minutes >= 120 and minutes % 60 == 0:
+        return f"{minutes // 60} hours"
+    if minutes == 60:
+        return "1 hour"
+    return f"{minutes} minute" + ("" if minutes == 1 else "s")
 
 
 def raw_fill_identity(fill: Any) -> tuple[Any, ...]:
@@ -6963,7 +6976,9 @@ class WalletTrackerService:
         ]
         if candidates:
             lines.append("")
-            lines.append("Fresh candidates from the last 15 minutes")
+            # Derived, not spelled out: the window is env-tunable, and a
+            # hardcoded figure here silently misreports it the moment it moves.
+            lines.append(f"Fresh candidates from the last {format_window_minutes(WALLET_SIGNAL_ACTIVITY_WINDOW_MS)}")
             for item in candidates[:10]:
                 top_count = int(to_float(item.get("independentTopWalletCount")))
                 top_verb = "is" if top_count == 1 else "are"

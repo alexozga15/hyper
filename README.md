@@ -13,12 +13,12 @@ Hyperwatch Pro is a lightweight Hyperliquid wallet tracker inspired by Hyperdash
 - Generate high-conviction buy/sell signals from fresh, independent multi-wallet flow scoring 70+/100 probability
 
 Wallet alerts require four independent wallets in the current position consensus plus three net independent wallets
-adding at least $500K each in the same direction during a 15-minute window. Opposite fresh flow from two wallets or a
+adding at least $500K each in the same direction during a 2-hour window. Opposite fresh flow from two wallets or a
 70+ CoinMarketMan signal in the opposite direction vetoes the alert. Signals use the recent-add VWAP, expire after two
 hours without another add, and move through `NEW`, `CONFIRMED`, and `INVALIDATED` states. Alert outcomes are retained
 for 30 days at 15-minute, 1-hour, 4-hour, 12-hour, and 24-hour horizons.
 
-A separate candidate layer watches for three independent wallets adding the same side within 15 minutes with at
+A separate candidate layer watches for three independent wallets adding the same side within 2 hours with at
 least $500K of aggregate fresh notional and no opposite fresh wallet. One current top-10 wallet makes it a `WATCH`;
 two top-10 wallets or a same-direction CMM score of 70+ promotes it to `ACTIONABLE`. Only actionable candidates send
 automatic Telegram alerts. Every candidate, including shadow and blocked cases, snapshots its wallets, top-10 cohort,
@@ -105,7 +105,7 @@ Then enable Actions in GitHub and run the `Sentiment Alerts` workflow once.
 
 ## EC2 Sentiment Alerts
 
-For reliable five-minute checks, install the units in [`deploy/ec2`](deploy/ec2) on an
+For reliable ten-minute checks, install the units in [`deploy/ec2`](deploy/ec2) on an
 Ubuntu EC2 instance. The service keeps mutable alert state outside the Git checkout
 in `/home/ubuntu/hyper-state`, loads secrets from
 `/home/ubuntu/.config/hyper/sentiment-alerts.env`, and updates the checkout from
