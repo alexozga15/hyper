@@ -30,6 +30,15 @@ def cache_entry(*, last_fill_ms: int, fetched_ms: int) -> dict[str, object]:
     }
 
 
+def aged_out_entry(*, idle_days: float, fetched_ms: int) -> dict[str, object]:
+    """A wallet quiet for longer than the recent-fill cache retains.
+
+    Its fills have aged out of the cache, so the only remaining evidence of
+    when it last traded is the cached daysSinceLastFill.
+    """
+    return {"recentFills": [], "daysSinceLastFill": idle_days, "fillFetchedAtMs": fetched_ms}
+
+
 class IdleFillBackoffTests(unittest.TestCase):
     """The idle-wallet backoff decides which wallets skip their fill fetch."""
 
@@ -61,11 +70,35 @@ class IdleFillBackoffTests(unittest.TestCase):
         entry = cache_entry(last_fill_ms=NOW_MS - 5 * DAY_MS, fetched_ms=NOW_MS - 2 * HOUR_MS)
         self.assertEqual(self.skip_for(entry), set())
 
-    def test_wallet_with_no_cached_fills_is_never_skipped(self) -> None:
+    def test_long_idle_wallet_is_skipped_after_its_fills_age_out(self) -> None:
+        """The quietest wallets are the point of the backoff.
+
+        The recent-fill cache only retains a week, so a wallet silent for
+        longer has an empty fill list. Reading idleness from that list alone
+        made exactly these wallets look like wallets with no data, and they
+        were polled every cycle forever.
+        """
+        for idle_days in (8.1, 30.1, 61.4):
+            entry = aged_out_entry(idle_days=idle_days, fetched_ms=NOW_MS - MINUTE_MS)
+            self.assertEqual(self.skip_for(entry), {"0xabc"}, f"idle {idle_days}d")
+
+    def test_known_idle_age_wins_over_the_cached_fill_list(self) -> None:
+        entry = {
+            "recentFills": [{"coin": "BTC", "direction": "Open Long", "time": NOW_MS - HOUR_MS}],
+            "daysSinceLastFill": 9.0,
+            "fillFetchedAtMs": NOW_MS - MINUTE_MS,
+        }
+        self.assertEqual(self.skip_for(entry), {"0xabc"})
+
+    def test_wallet_with_no_evidence_at_all_is_never_skipped(self) -> None:
         """Silence with no data behind it is not evidence of idleness."""
         self.assertEqual(self.skip_for({"recentFills": [], "fillFetchedAtMs": NOW_MS}), set())
         self.assertEqual(self.skip_for({"fillFetchedAtMs": NOW_MS}), set())
         self.assertEqual(self.skip_for(None), set())
+
+    def test_recently_active_wallet_with_aged_out_list_is_not_skipped(self) -> None:
+        entry = aged_out_entry(idle_days=0.5, fetched_ms=NOW_MS - MINUTE_MS)
+        self.assertEqual(self.skip_for(entry), set())
 
     def test_wallet_never_fill_fetched_is_not_skipped(self) -> None:
         entry = {"recentFills": [{"coin": "BTC", "direction": "Open Long", "time": NOW_MS - 5 * DAY_MS}]}
