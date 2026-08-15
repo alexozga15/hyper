@@ -2009,6 +2009,30 @@ class WalletTrackerService:
         )
         return set(ordered[:WALLET_QUALITY_REFRESH_BATCH_SIZE])
 
+    def wallet_cached_idle_age_ms(self, entry: dict[str, Any], *, now_ms: int) -> int:
+        """How long a wallet has been quiet according to cache, or -1 if unknown.
+
+        `daysSinceLastFill` is the primary evidence because it is derived from
+        the raw fill response, so it still describes a wallet that has been
+        silent longer than the recent-fill cache retains. The cached fill list
+        is only a fallback: it drops anything older than
+        WALLET_RECENT_FILL_CACHE_RETENTION_MS, so reading idleness from it alone
+        made the quietest wallets - exactly the ones worth backing off - look
+        indistinguishable from wallets we know nothing about.
+        """
+        days = entry.get("daysSinceLastFill")
+        if isinstance(days, (int, float)) and not isinstance(days, bool) and days >= 0:
+            return int(days * 24 * 60 * 60 * 1000)
+        fills = entry.get("recentFills")
+        if isinstance(fills, list) and fills:
+            newest = max(
+                (int(to_float(fill.get("time"))) for fill in fills if isinstance(fill, dict)),
+                default=0,
+            )
+            if newest > 0:
+                return max(0, now_ms - newest)
+        return -1
+
     def wallet_idle_fill_skip_addresses(
         self,
         wallets: list[TrackedWallet],
@@ -2020,9 +2044,9 @@ class WalletTrackerService:
 
         A wallet qualifies only when all of the following hold, because each one
         is a way to be wrong about it being quiet:
-        - the cache actually holds fills for it, so "idle" is an observation
-          rather than an absence of data;
-        - its newest cached fill is older than WALLET_IDLE_FILL_THRESHOLD_MS;
+        - the cache says something about when it last traded, so "idle" is an
+          observation rather than an absence of data;
+        - that idle age is at least WALLET_IDLE_FILL_THRESHOLD_MS;
         - it was fill-fetched less than WALLET_IDLE_FILL_INTERVAL_MS ago, so
           reactivation is still noticed within one interval.
         """
@@ -2034,14 +2058,8 @@ class WalletTrackerService:
             entry = cached_wallets.get(address)
             if not isinstance(entry, dict):
                 continue
-            fills = entry.get("recentFills")
-            if not isinstance(fills, list) or not fills:
-                continue
-            newest = max(
-                (int(to_float(fill.get("time"))) for fill in fills if isinstance(fill, dict)),
-                default=0,
-            )
-            if newest <= 0 or now_ms - newest < WALLET_IDLE_FILL_THRESHOLD_MS:
+            idle_age_ms = self.wallet_cached_idle_age_ms(entry, now_ms=now_ms)
+            if idle_age_ms < 0 or idle_age_ms < WALLET_IDLE_FILL_THRESHOLD_MS:
                 continue
             fetched_at = int(to_float(entry.get("fillFetchedAtMs")))
             if fetched_at <= 0 or now_ms - fetched_at >= WALLET_IDLE_FILL_INTERVAL_MS:
