@@ -306,13 +306,10 @@ def build_summary_cache(
     return summary
 
 
-def build_cmm_cache(service: WalletTrackerService, *, include_position_entries: bool = False) -> dict[str, Any]:
+def build_cmm_cache(service: WalletTrackerService) -> dict[str, Any]:
     raw = load_json_file(service.alerts_path, {}) if hasattr(service, "alerts_path") else {}
     state = raw.get("state", {}) if isinstance(raw, dict) else {}
-    summary = service.build_cached_cmm_signal_summary(state)
-    if include_position_entries and hasattr(service, "enrich_cmm_signals_with_position_entries"):
-        return service.enrich_cmm_signals_with_position_entries(summary)
-    return summary
+    return service.build_cached_cmm_signal_summary(state)
 
 
 def build_moni_cache(service: WalletTrackerService) -> dict[str, Any]:
@@ -368,7 +365,7 @@ def main() -> int:
 
         cmm_cache = None
         if command in CMM_COMMANDS:
-            cmm_cache = build_cmm_cache(service, include_position_entries=command == "/cmm")
+            cmm_cache = build_cmm_cache(service)
 
         moni_cache = build_moni_cache(service) if command in MONI_COMMANDS else None
         reply = build_reply(
