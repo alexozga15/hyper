@@ -38,6 +38,11 @@ MONITOR_STATE_FILE = DATA_DIR / "health_monitor_state.json"
 SIGNAL_PIPELINE_SILENCE_HOURS = float(os.environ.get("SIGNAL_PIPELINE_SILENCE_HOURS", "24"))
 PUBLISHED_SIGNAL_DROUGHT_DAYS = float(os.environ.get("PUBLISHED_SIGNAL_DROUGHT_DAYS", "7"))
 
+# Must stay comfortably above the sentiment timer's interval, or a single
+# late run reads as an outage. The timer runs every 10 minutes, so this
+# tolerates two consecutive misses before complaining.
+SENTIMENT_STALE_MINUTES = float(os.environ.get("SENTIMENT_STALE_MINUTES", "25"))
+
 
 def latest_signal_start_ms(records: Any) -> int:
     """Newest `startedAt` in a signal-outcome record map, or 0 when there is none."""
@@ -65,8 +70,8 @@ def detect_health_issues(
     if not isinstance(state, dict):
         state = {}
     last_checked = iso_to_ms(state.get("lastCheckedAt"))
-    if last_checked <= 0 or now_ms - last_checked > 10 * 60 * 1000:
-        issues.append("sentiment check stale >10m")
+    if last_checked <= 0 or now_ms - last_checked > SENTIMENT_STALE_MINUTES * 60 * 1000:
+        issues.append(f"sentiment check stale >{SENTIMENT_STALE_MINUTES:g}m")
     if float(runtime.get("cacheCoverage", 0)) < 0.8:
         issues.append("wallet quality cache coverage <80%")
     if runtime.get("fillsGloballyDegraded"):

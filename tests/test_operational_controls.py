@@ -127,7 +127,7 @@ class OperationalControlTests(unittest.TestCase):
             now_ms=2_000_000_000_000,
             disk_free_pct=50,
         )
-        self.assertIn("sentiment check stale >10m", issues)
+        self.assertIn("sentiment check stale >25m", issues)
         self.assertIn("wallet quality cache coverage <80%", issues)
 
     def test_signal_drought_stays_quiet_before_the_first_check(self) -> None:

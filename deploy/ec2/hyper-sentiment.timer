@@ -1,9 +1,14 @@
 [Unit]
-Description=Run Hyper wallet sentiment alerts every 5 minutes
+Description=Run Hyper wallet sentiment alerts every 10 minutes
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=5min
+# Every cycle costs 2 Hyperliquid fill requests per tracked wallet, which is
+# what pushes the account into HTTP 429. The freshness window the signals are
+# built on is 15 minutes, so a 5-minute cycle sampled it three times over and
+# bought nothing but rate-limit pressure. Ten minutes still samples the window
+# faster than it moves.
+OnUnitActiveSec=10min
 AccuracySec=10s
 Persistent=true
 Unit=hyper-sentiment.service
