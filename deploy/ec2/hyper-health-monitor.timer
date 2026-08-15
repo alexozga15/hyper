@@ -4,6 +4,11 @@ Description=Check Hyper runtime health every ten minutes
 [Timer]
 OnBootSec=7min
 OnUnitActiveSec=10min
+# See hyper-telegram-commands.timer: without an anchor tied to the timer's own
+# activation, a timer-only restart can strand this unit in "active (elapsed)"
+# with no future elapse and no error anywhere. A health monitor that dies
+# quietly is worse than no health monitor.
+OnActiveSec=7min
 AccuracySec=30s
 Persistent=true
 Unit=hyper-health-monitor.service
