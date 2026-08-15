@@ -74,6 +74,7 @@ def main() -> int:
             acknowledge_suppressed=True,
         )
         print(json.dumps(results, indent=2))
+        report_throttling(service)
         has_error = any(isinstance(item, dict) and item.get("error") for item in results.values())
         return 1 if has_error else 0
 
@@ -92,8 +93,26 @@ def main() -> int:
         results["changeAlert"] = service.check_alerts(send_notification=True)
 
     print(json.dumps(results, indent=2))
+    report_throttling(service)
     has_error = any(isinstance(item, dict) and item.get("error") for item in results.values())
     return 1 if has_error else 0
+
+
+def report_throttling(service: WalletTrackerService) -> None:
+    """Put rate limiting in the journal.
+
+    Every 429 was absorbed by retry-and-backoff inside the client and never
+    surfaced, so the journal stayed silent while a third of the wallets were
+    being throttled. stdout is discarded by the unit; stderr reaches journald.
+    """
+    report = service.client.rate_limiter.throttle_report()
+    if report.get("events"):
+        print(
+            f"hyperliquid throttled: {report['events']} responses, "
+            f"{report['backoffSeconds']}s total backoff "
+            f"at {report['requestsPerSecond']} req/s",
+            file=sys.stderr,
+        )
 
 
 if __name__ == "__main__":
