@@ -269,6 +269,18 @@ WALLET_IDLE_FILL_THRESHOLD_MS = int(
 WALLET_IDLE_FILL_INTERVAL_MS = int(
     float(os.environ.get("WALLET_IDLE_FILL_INTERVAL_MS", 30 * 60 * 1000))
 )
+# Of the two fill requests, the second one only earns its cost when the first
+# came back at the API's row cap. userFillsByTime returns at most
+# WALLET_WINDOW_FILL_CAP rows ascending from startTime, so only a capped page
+# can be missing the wallet's newest trades - which is the single case
+# userFills was added to cover. An uncapped page already ends at the newest
+# fill, and the union then discards every row userFills returns as a duplicate.
+# WALLET_LIVE_FILL_SKIP_MAX sits below the cap on purpose: a wallet whose fill
+# count is climbing must not be able to cross from uncapped to capped between
+# two cycles while the live request is switched off. Set it to 0 to always
+# issue both requests, as before.
+WALLET_WINDOW_FILL_CAP = int(float(os.environ.get("WALLET_WINDOW_FILL_CAP", 2000)))
+WALLET_LIVE_FILL_SKIP_MAX = int(float(os.environ.get("WALLET_LIVE_FILL_SKIP_MAX", 1600)))
 WALLET_CACHED_QUALITY_FIELDS = (
     "role",
     "realizedPnl",
@@ -530,6 +542,21 @@ def raw_fill_identity(fill: Any) -> tuple[Any, ...]:
         str(fill.get("dir") or ""),
         str(fill.get("oid") or ""),
     )
+
+
+def cached_window_fill_count(entry: Any) -> int | None:
+    """Rows the wallet's last windowed fill page returned, or None if unknown.
+
+    None is a load-bearing answer rather than a default: it is the difference
+    between "the page was comfortably under the cap" and "we have never seen a
+    page", and only the former may switch the live fill request off.
+    """
+    if not isinstance(entry, dict):
+        return None
+    count = entry.get("windowFillCount")
+    if isinstance(count, bool) or not isinstance(count, (int, float)):
+        return None
+    return int(count) if count >= 0 else None
 
 
 def normalize_fill_entry(fill: Any) -> dict[str, Any]:
@@ -1528,6 +1555,7 @@ class WalletTrackerService:
         full_quality_refresh: bool = True,
         cached_snapshot: dict[str, Any] | None = None,
         skip_fill_fetch: bool = False,
+        skip_live_fill_fetch: bool = False,
     ) -> dict[str, Any]:
         now_ms = current_time_ms()
         cutoff_7d_ms = now_ms - RANKING_WINDOW_MS
@@ -1536,6 +1564,7 @@ class WalletTrackerService:
         fills_start_ms = cutoff_30d_ms if full_quality_refresh else now_ms - WALLET_LIVE_FILL_LOOKBACK_MS
         # A full quality refresh needs the 30-day window, so it always fetches.
         skip_fills = bool(skip_fill_fetch) and not full_quality_refresh
+        skip_live_fills = bool(skip_live_fill_fetch) and not full_quality_refresh and not skip_fills
         with ThreadPoolExecutor(max_workers=HYPERLIQUID_SNAPSHOT_WORKERS) as executor:
             futures = {
                 "state": executor.submit(
@@ -1553,7 +1582,8 @@ class WalletTrackerService:
             }
             if not skip_fills:
                 futures["fills"] = executor.submit(self.fetch_fills_result, wallet.address, fills_start_ms)
-                futures["recentFills"] = executor.submit(self.fetch_recent_fills_result, wallet.address)
+                if not skip_live_fills:
+                    futures["recentFills"] = executor.submit(self.fetch_recent_fills_result, wallet.address)
             if full_quality_refresh:
                 futures["orders"] = executor.submit(self.fetch_open_orders_result, wallet.address)
                 futures["role"] = executor.submit(self.fetch_wallet_role, wallet.address)
@@ -1585,6 +1615,13 @@ class WalletTrackerService:
         )
         open_orders = orders_result.get("data", []) if isinstance(orders_result, dict) else []
         fills = fills_result.get("data", []) if isinstance(fills_result, dict) else []
+        # Length of the raw windowed page, before any 30-day filtering, because
+        # it is the page hitting WALLET_WINDOW_FILL_CAP that decides whether the
+        # live request is worth issuing next cycle. A skipped fetch yields an
+        # empty list meaning "not asked", not "no fills", so the cached count is
+        # carried forward instead of being overwritten with a 0 that would read
+        # as a wallet safely under the cap.
+        window_fill_count = len(fills) if not skip_fills else cached_window_fill_count(cached)
         portfolio = portfolio_result.get("data", {}) if isinstance(portfolio_result, dict) else {}
         fills_ok = bool(isinstance(fills_result, dict) and fills_result.get("ok"))
         recent_fills_ok = bool(isinstance(recent_fills_result, dict) and recent_fills_result.get("ok"))
@@ -1921,7 +1958,9 @@ class WalletTrackerService:
         # in the merged list. Keep the per-cycle flags honest and report
         # usability separately.
         merged_fill_list = snapshot["recentFills"]
-        fills_fetch_ok = bool(fills_ok and recent_fills_ok)
+        # A live request that was never issued cannot drag this down; only a
+        # request that was made and failed can.
+        fills_fetch_ok = bool(fills_ok and (recent_fills_ok or skip_live_fills))
         fills_usable = bool(fills_ok) or bool(merged_fill_list)
         fills_served_from_cache = bool(merged_fill_list) and not fills_fetch_ok
         recent_fill_latest_ms = max(
@@ -1957,6 +1996,11 @@ class WalletTrackerService:
                 # idle. Distinct from a failure: no request was made, so there
                 # was nothing to fail.
                 "fillsFetchSkipped": skip_fills,
+                # The live userFills request specifically was not issued: last
+                # cycle's windowed page came back well under the cap, so it
+                # already ended at the newest fill and the union had nothing to
+                # add. Also not a failure - no request, nothing to fail.
+                "recentFillsSkipped": skip_live_fills,
                 # Is there usable recent-fill data at all, live or cached? This
                 # is the eligibility gate.
                 "fillsUsable": fills_usable,
@@ -1971,6 +2015,8 @@ class WalletTrackerService:
                 },
             }
         )
+        if window_fill_count is not None:
+            snapshot["dataQuality"]["windowFillCount"] = window_fill_count
         return snapshot
 
     def cached_wallet_quality_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -2067,6 +2113,30 @@ class WalletTrackerService:
             skip.add(address)
         return skip
 
+    def wallet_live_fill_skip_addresses(
+        self,
+        wallets: list[TrackedWallet],
+        cached_wallets: dict[str, Any],
+    ) -> set[str]:
+        """Addresses that do not need the live userFills request this cycle.
+
+        Only a windowed page that hit WALLET_WINDOW_FILL_CAP can be missing the
+        wallet's newest fills, so a page that came back below
+        WALLET_LIVE_FILL_SKIP_MAX makes the live request pure duplication. A
+        wallet with no recorded count is never skipped: an absent count means
+        the page has never been observed, not that it was small.
+        """
+        if WALLET_LIVE_FILL_SKIP_MAX <= 0:
+            return set()
+        skip: set[str] = set()
+        for wallet in wallets:
+            address = wallet.address.lower()
+            count = cached_window_fill_count(cached_wallets.get(address))
+            if count is None or count >= WALLET_LIVE_FILL_SKIP_MAX:
+                continue
+            skip.add(address)
+        return skip
+
     def build_holding_only_wallets(self, snapshots: list[dict[str, Any]], *, limit: int = 20) -> list[dict[str, Any]]:
         holders = []
         for wallet in snapshots:
@@ -2111,6 +2181,7 @@ class WalletTrackerService:
         skip_fill_addresses = self.wallet_idle_fill_skip_addresses(
             wallets, cached_wallets, now_ms=current_time_ms()
         )
+        skip_live_fill_addresses = self.wallet_live_fill_skip_addresses(wallets, cached_wallets)
 
         def fetch_snapshot(wallet: TrackedWallet) -> dict[str, Any]:
             address = wallet.address.lower()
@@ -2119,6 +2190,7 @@ class WalletTrackerService:
                 full_quality_refresh=address in refresh_addresses,
                 cached_snapshot=cached_wallets.get(address),
                 skip_fill_fetch=address in skip_fill_addresses,
+                skip_live_fill_fetch=address in skip_live_fill_addresses,
             )
 
         with ThreadPoolExecutor(max_workers=min(max(len(wallets), 1), HYPERLIQUID_DASHBOARD_WORKERS)) as executor:
@@ -2159,6 +2231,12 @@ class WalletTrackerService:
                 entry = cached_wallets.get(address)
                 if isinstance(entry, dict):
                     entry["fillFetchedAtMs"] = current_time_ms()
+                    # Carried on the cache entry rather than left in the
+                    # snapshot because next cycle's skip decision is made
+                    # before any request goes out.
+                    window_fill_count = quality.get("windowFillCount")
+                    if isinstance(window_fill_count, int) and not isinstance(window_fill_count, bool):
+                        entry["windowFillCount"] = window_fill_count
                     cache_changed = True
         if cache_changed:
             tracked_addresses = {wallet.address.lower() for wallet in wallets}
@@ -2177,6 +2255,7 @@ class WalletTrackerService:
         fill_ok_count = sum(1 for item in snapshots if item.get("dataQuality", {}).get("fillsOk"))
         fill_fetch_failed_count = sum(1 for item in snapshots if self.wallet_fill_fetch_failed(item))
         fill_fetch_skipped_count = sum(1 for item in snapshots if self.wallet_fill_fetch_skipped(item))
+        live_fill_skipped_count = sum(1 for item in snapshots if self.wallet_live_fill_skipped(item))
         wallets_with_recent_fills = sum(1 for item in snapshots if item.get("recentFills"))
         total_recent_fills = sum(len(item.get("recentFills", [])) for item in snapshots)
         total_positions = sum(len(item.get("positions", [])) for item in snapshots)
@@ -2216,6 +2295,7 @@ class WalletTrackerService:
                 # fill data" are different failures and are counted separately.
                 "fillsFetchFailedWallets": fill_fetch_failed_count,
                 "fillsFetchSkippedWallets": fill_fetch_skipped_count,
+                "liveFillsSkippedWallets": live_fill_skipped_count,
                 "fillsServedFromCacheWallets": fill_cache_served_count,
                 "fillsUnusableWallets": fill_unusable_count,
                 "walletsWithRecentFills": wallets_with_recent_fills,
@@ -2282,6 +2362,7 @@ class WalletTrackerService:
                 "fillsOkWallets": fill_ok_count,
                 "fillsFetchFailedWallets": fill_fetch_failed_count,
                 "fillsFetchSkippedWallets": fill_fetch_skipped_count,
+                "liveFillsSkippedWallets": live_fill_skipped_count,
                 "fillsServedFromCacheWallets": fill_cache_served_count,
                 "fillsUnusableWallets": fill_unusable_count,
                 "cacheCoverage": round(cache_coverage, 4),
@@ -2704,6 +2785,11 @@ class WalletTrackerService:
         """Was this wallet's fill fetch skipped by the idle-wallet backoff?"""
         quality = wallet.get("dataQuality")
         return bool(quality.get("fillsFetchSkipped")) if isinstance(quality, dict) else False
+
+    def wallet_live_fill_skipped(self, wallet: dict[str, Any]) -> bool:
+        """Was only the live userFills request skipped for this wallet?"""
+        quality = wallet.get("dataQuality")
+        return bool(quality.get("recentFillsSkipped")) if isinstance(quality, dict) else False
 
     def wallet_has_fills_in_window(
         self,
