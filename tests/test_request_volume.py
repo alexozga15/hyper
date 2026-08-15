@@ -289,5 +289,22 @@ class StaleThresholdTests(unittest.TestCase):
         self.assertIn("sentiment check stale >25m", issues)
 
 
+class WindowPhrasingTests(unittest.TestCase):
+    """The window is env-tunable, so no message may spell it out by hand."""
+
+    def test_phrasing_tracks_the_constant(self) -> None:
+        from server import WALLET_SIGNAL_ACTIVITY_WINDOW_MS, format_window_minutes
+
+        self.assertEqual(format_window_minutes(WALLET_SIGNAL_ACTIVITY_WINDOW_MS), "2 hours")
+
+    def test_phrasing_handles_the_units(self) -> None:
+        from server import format_window_minutes
+
+        self.assertEqual(format_window_minutes(60_000), "1 minute")
+        self.assertEqual(format_window_minutes(15 * 60_000), "15 minutes")
+        self.assertEqual(format_window_minutes(60 * 60_000), "1 hour")
+        self.assertEqual(format_window_minutes(120 * 60_000), "2 hours")
+
+
 if __name__ == "__main__":
     unittest.main()
