@@ -8,10 +8,27 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
+from ratelimit import RequestRateLimiter
+
 
 COINMARKETMAN_API_BASE_URL = "https://ht-api.coinmarketman.com/api/external"
 COINMARKETMAN_TOKEN_ENV = "COINMARKETMAN_API_TOKEN"
 COINMARKETMAN_BACKUP_TOKEN_ENV = "COINMARKETMAN_API_TOKEN_BACKUP"
+
+# Pacing here is not about throughput - a cycle issues under twenty requests
+# and runs at most once a minute, so the average rate is trivial. It is about
+# the shape of that traffic: the requests go out back to back, and the price of
+# one 429 is six hours of serving stale signals from cache
+# (CMM_RATE_LIMIT_BACKOFF_MINUTES). Spreading a burst over a few seconds is
+# cheap insurance against a penalty measured in hours.
+COINMARKETMAN_REQUESTS_PER_SECOND = float(os.environ.get("COINMARKETMAN_REQUESTS_PER_SECOND", "2"))
+# A rate-limited primary token is retried immediately on the backup one. That
+# retry is the single most likely request to be rate limited in turn, so it
+# waits out at least this long first.
+COINMARKETMAN_RATE_LIMIT_PAUSE_SECONDS = float(
+    os.environ.get("COINMARKETMAN_RATE_LIMIT_PAUSE_SECONDS", "1")
+)
+GLOBAL_COINMARKETMAN_RATE_LIMITER = RequestRateLimiter(COINMARKETMAN_REQUESTS_PER_SECOND)
 
 
 class CoinMarketManApiError(RuntimeError):
@@ -19,11 +36,20 @@ class CoinMarketManApiError(RuntimeError):
 
 
 class CoinMarketManClient:
-    def __init__(self, token: str | None = None, base_url: str | None = None, timeout: int = 30) -> None:
+    def __init__(
+        self,
+        token: str | None = None,
+        base_url: str | None = None,
+        timeout: int = 30,
+        rate_limiter: RequestRateLimiter | None = None,
+    ) -> None:
         self.token = token or os.environ.get(COINMARKETMAN_TOKEN_ENV, "")
         self.backup_token = os.environ.get(COINMARKETMAN_BACKUP_TOKEN_ENV, "")
         self.base_url = (base_url or os.environ.get("COINMARKETMAN_API_BASE_URL") or COINMARKETMAN_API_BASE_URL).rstrip("/")
         self.timeout = timeout
+        # Shared by default so every client in the process paces against the
+        # same budget; the provider limits the account, not the object.
+        self.rate_limiter = rate_limiter or GLOBAL_COINMARKETMAN_RATE_LIMITER
 
     def request(self, path: str, params: dict[str, Any] | None = None) -> Any:
         if not self.token:
@@ -45,11 +71,13 @@ class CoinMarketManClient:
             except CoinMarketManApiError as exc:
                 errors.append(f"{label}: {exc}")
                 if label == "primary" and self.backup_token and self._is_rate_limit_error(exc):
+                    self.rate_limiter.penalize(COINMARKETMAN_RATE_LIMIT_PAUSE_SECONDS)
                     continue
                 raise
         raise CoinMarketManApiError("; ".join(errors) or "CMM API request failed")
 
     def _request_with_token(self, url: str, token: str) -> Any:
+        self.rate_limiter.wait()
         req = urllib.request.Request(
             url,
             headers={
