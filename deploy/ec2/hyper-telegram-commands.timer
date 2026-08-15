@@ -4,6 +4,16 @@ Description=Poll Hyper Telegram commands every 20 seconds
 [Timer]
 OnBootSec=10s
 OnUnitActiveSec=20s
+# Both anchors above can point into the past at once: OnBootSec is measured
+# from boot, and OnUnitActiveSec from the service's last activation. Restart
+# the timer alone - which a deploy or a daemon-reload does - and systemd has no
+# future elapse left to schedule, so the timer parks in "active (elapsed)" with
+# "Trigger: n/a" and never fires again. Nothing fails and nothing is logged;
+# the bot simply stops answering. OnActiveSec is measured from the timer's own
+# activation, so a freshly started timer always has one point in the future,
+# which then re-anchors OnUnitActiveSec on the next run. This happened on
+# 2026-08-15 and cost four hours of dead commands.
+OnActiveSec=20s
 AccuracySec=1s
 Persistent=true
 Unit=hyper-telegram-commands.service

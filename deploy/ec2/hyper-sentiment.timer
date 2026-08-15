@@ -9,6 +9,12 @@ OnBootSec=2min
 # bought nothing but rate-limit pressure. Ten minutes still samples the window
 # faster than it moves.
 OnUnitActiveSec=10min
+# Guarantees an elapse point measured from the timer's own activation. Without
+# it, OnBootSec and OnUnitActiveSec can both sit in the past after a
+# timer-only restart, leaving systemd nothing to schedule and the timer stuck
+# in "active (elapsed)" forever - silently, since no unit fails. See the same
+# comment in hyper-telegram-commands.timer, where exactly that happened.
+OnActiveSec=2min
 AccuracySec=10s
 Persistent=true
 Unit=hyper-sentiment.service
