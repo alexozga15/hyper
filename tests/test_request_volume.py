@@ -6,10 +6,13 @@ from unittest.mock import patch
 from scripts.run_health_monitor import detect_health_issues
 from server import (
     WALLET_IDLE_FILL_THRESHOLD_MS,
+    WALLET_LIVE_FILL_SKIP_MAX,
+    WALLET_WINDOW_FILL_CAP,
     HyperliquidClient,
     RequestRateLimiter,
     TrackedWallet,
     WalletTrackerService,
+    cached_window_fill_count,
     iso_to_ms,
 )
 
@@ -108,6 +111,118 @@ class IdleFillBackoffTests(unittest.TestCase):
         entry = cache_entry(last_fill_ms=NOW_MS - 5 * DAY_MS, fetched_ms=NOW_MS - MINUTE_MS)
         with patch("server.WALLET_IDLE_FILL_INTERVAL_MS", 0):
             self.assertEqual(self.skip_for(entry), set())
+
+
+class LiveFillSkipTests(unittest.TestCase):
+    """The live userFills request is only worth issuing for a capped page."""
+
+    def setUp(self) -> None:
+        self.service = WalletTrackerService(object(), HyperliquidClient(RequestRateLimiter(1000)))
+
+    def skip_for(self, entry: object, address: str = "0xabc") -> set[str]:
+        cache = {address: entry} if entry is not None else {}
+        return self.service.wallet_live_fill_skip_addresses([wallet(address)], cache)
+
+    def test_capped_page_keeps_the_live_request(self) -> None:
+        """A page at the cap is the one case that can be missing newest fills."""
+        self.assertEqual(self.skip_for({"windowFillCount": WALLET_WINDOW_FILL_CAP}), set())
+
+    def test_page_well_under_the_cap_is_skipped(self) -> None:
+        self.assertEqual(self.skip_for({"windowFillCount": 300}), {"0xabc"})
+        self.assertEqual(self.skip_for({"windowFillCount": 0}), {"0xabc"})
+
+    def test_page_inside_the_margin_keeps_the_live_request(self) -> None:
+        """The margin covers a wallet whose fill count climbs between cycles."""
+        self.assertEqual(self.skip_for({"windowFillCount": WALLET_LIVE_FILL_SKIP_MAX}), set())
+        self.assertEqual(self.skip_for({"windowFillCount": WALLET_LIVE_FILL_SKIP_MAX - 1}), {"0xabc"})
+
+    def test_unknown_count_is_never_skipped(self) -> None:
+        """No recorded page is not the same as a small one."""
+        for entry in ({}, {"windowFillCount": None}, {"windowFillCount": "300"}, {"windowFillCount": -1}, None):
+            self.assertEqual(self.skip_for(entry), set(), repr(entry))
+
+    def test_zero_max_disables_the_skip(self) -> None:
+        with patch("server.WALLET_LIVE_FILL_SKIP_MAX", 0):
+            self.assertEqual(self.skip_for({"windowFillCount": 10}), set())
+
+    def test_booleans_are_not_counts(self) -> None:
+        self.assertIsNone(cached_window_fill_count({"windowFillCount": True}))
+
+
+class LiveFillSkipAccountingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.service = WalletTrackerService(object(), HyperliquidClient(RequestRateLimiter(1000)))
+
+    def test_skipped_live_fetch_is_not_a_failure(self) -> None:
+        snapshot = {"dataQuality": {"fillsFetchOk": True, "recentFillsSkipped": True}}
+        self.assertFalse(self.service.wallet_fill_fetch_failed(snapshot))
+        self.assertTrue(self.service.wallet_live_fill_skipped(snapshot))
+
+    def test_full_fetch_skip_is_reported_separately(self) -> None:
+        """The idle backoff and the live-request skip are different states."""
+        snapshot = {"dataQuality": {"fillsFetchSkipped": True, "recentFillsSkipped": False}}
+        self.assertTrue(self.service.wallet_fill_fetch_skipped(snapshot))
+        self.assertFalse(self.service.wallet_live_fill_skipped(snapshot))
+
+
+class WindowFillCountTests(unittest.TestCase):
+    """The recorded page length is what the next cycle's skip decision reads."""
+
+    ADDRESS = "0x1111111111111111111111111111111111111111"
+
+    def setUp(self) -> None:
+        self.service = WalletTrackerService(object(), HyperliquidClient(RequestRateLimiter(1000)))
+
+    def snapshot(self, *, page: list[dict[str, object]], **kwargs: object) -> tuple[dict, object]:
+        tracked = TrackedWallet(address=self.ADDRESS, alias="", notes="", created_at="")
+        state = {"marginSummary": {"accountValue": "1"}, "withdrawable": "1", "assetPositions": []}
+        with patch.object(
+            self.service.client, "safe_subscribe_all_dexs_clearinghouse_state", return_value=state
+        ), patch.object(
+            self.service, "fetch_fills_result", return_value={"ok": True, "data": page, "error": ""}
+        ), patch.object(
+            self.service, "fetch_recent_fills_result", return_value={"ok": True, "data": [], "error": ""}
+        ) as live, patch.object(
+            self.service, "fetch_open_orders_result", return_value={"ok": True, "data": [], "error": ""}
+        ), patch.object(
+            self.service, "fetch_portfolio_result", return_value={"ok": True, "data": {}, "error": ""}
+        ), patch.object(self.service, "fetch_wallet_role", return_value="user"):
+            return self.service.fetch_wallet_snapshot(tracked, **kwargs), live
+
+    def test_raw_page_length_is_recorded(self) -> None:
+        page = [{"coin": "BTC", "dir": "Open Long", "px": "1", "sz": "1", "time": NOW_MS, "tid": i} for i in range(7)]
+        snapshot, _ = self.snapshot(page=page)
+        self.assertEqual(snapshot["dataQuality"]["windowFillCount"], 7)
+
+    def test_idle_skipped_cycle_does_not_clobber_the_cached_count(self) -> None:
+        """The idle backoff sends no request, so its empty page means nothing.
+
+        Recording 0 for it would mark a wallet that sits right below the cap as
+        comfortably under it, and the live request would be dropped on evidence
+        that was never gathered.
+        """
+        snapshot, _ = self.snapshot(
+            page=[],
+            full_quality_refresh=False,
+            skip_fill_fetch=True,
+            cached_snapshot={"windowFillCount": 1900},
+        )
+        self.assertEqual(snapshot["dataQuality"]["windowFillCount"], 1900)
+
+    def test_idle_skipped_cycle_with_no_cached_count_records_nothing(self) -> None:
+        snapshot, _ = self.snapshot(page=[], full_quality_refresh=False, skip_fill_fetch=True)
+        self.assertNotIn("windowFillCount", snapshot["dataQuality"])
+
+    def test_skipping_the_live_request_issues_no_call_and_is_not_a_failure(self) -> None:
+        snapshot, live = self.snapshot(page=[], full_quality_refresh=False, skip_live_fill_fetch=True)
+        live.assert_not_called()
+        self.assertTrue(snapshot["dataQuality"]["recentFillsSkipped"])
+        self.assertTrue(snapshot["dataQuality"]["fillsFetchOk"])
+        self.assertFalse(self.service.wallet_fill_fetch_failed(snapshot))
+
+    def test_full_quality_refresh_always_issues_the_live_request(self) -> None:
+        _, live = self.snapshot(page=[], full_quality_refresh=True, skip_live_fill_fetch=True)
+        live.assert_called_once()
 
 
 class SkippedFetchAccountingTests(unittest.TestCase):
