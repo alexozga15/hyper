@@ -8,9 +8,12 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 from scripts.run_health_monitor import (
+    Issue,
+    detect_external_api_backoff,
     detect_health_issues,
     detect_signal_drought,
     dirty_checkout_paths,
@@ -348,8 +351,10 @@ class OperationalControlTests(unittest.TestCase):
             now_ms=2_000_000_000_000,
             disk_free_pct=50,
         )
-        self.assertIn("sentiment check stale >25m", issues)
-        self.assertIn("wallet quality cache coverage <80%", issues)
+        texts = [issue.text for issue in issues]
+        self.assertIn("sentiment check stale >25m", texts)
+        self.assertIn("wallet quality cache coverage <80%", texts)
+        self.assertIn(Issue("sentiment_stale", "sentiment check stale >25m"), issues)
 
     def test_health_monitor_reports_untrusted_quality_window_wallets(self) -> None:
         """Visibility check: how many tracked wallets currently have an
@@ -363,7 +368,8 @@ class OperationalControlTests(unittest.TestCase):
             now_ms=NOW_MS,
             disk_free_pct=50,
         )
-        self.assertIn("3 wallets with untrusted quality window", issues)
+        self.assertIn("3 wallets with untrusted quality window", [issue.text for issue in issues])
+        self.assertIn("untrusted_quality_window", [issue.key for issue in issues])
 
     def test_health_monitor_stays_quiet_with_no_untrusted_wallets(self) -> None:
         issues = detect_health_issues(
@@ -372,7 +378,37 @@ class OperationalControlTests(unittest.TestCase):
             now_ms=NOW_MS,
             disk_free_pct=50,
         )
-        self.assertFalse(any("untrusted quality window" in issue for issue in issues))
+        self.assertFalse(any("untrusted quality window" in issue.text for issue in issues))
+
+    def test_untrusted_quality_window_key_is_stable_while_the_count_drains(self) -> None:
+        """The Telegram outage this guards against: the wallet count drains
+
+        on its own (8 -> 5 -> 4 -> 3) as wallets refresh, but the condition
+        is unchanged, so the key must not move even though the text does.
+        """
+        keys_and_texts = [
+            (issue.key, issue.text)
+            for count in (8, 5, 4, 3)
+            for issue in detect_health_issues(
+                {"state": {"lastCheckedAt": ms_to_iso(NOW_MS)}},
+                {"cacheCoverage": 1.0, "untrustedQualityWindowWallets": count},
+                now_ms=NOW_MS,
+                disk_free_pct=50,
+            )
+            if issue.key == "untrusted_quality_window"
+        ]
+        keys = {key for key, _ in keys_and_texts}
+        texts = [text for _, text in keys_and_texts]
+        self.assertEqual(keys, {"untrusted_quality_window"})
+        self.assertEqual(
+            texts,
+            [
+                "8 wallets with untrusted quality window",
+                "5 wallets with untrusted quality window",
+                "4 wallets with untrusted quality window",
+                "3 wallets with untrusted quality window",
+            ],
+        )
 
     def test_signal_drought_stays_quiet_before_the_first_check(self) -> None:
         self.assertEqual(detect_signal_drought({}, now_ms=NOW_MS), [])
@@ -388,7 +424,7 @@ class OperationalControlTests(unittest.TestCase):
             },
             now_ms=NOW_MS,
         )
-        self.assertEqual(issues, ["no published or candidate signal in >7d"])
+        self.assertEqual(issues, [Issue("signal_drought_published", "no published or candidate signal in >7d")])
 
     def test_silent_pipeline_flags_both_horizons(self) -> None:
         issues = detect_signal_drought(
@@ -400,7 +436,10 @@ class OperationalControlTests(unittest.TestCase):
         )
         self.assertEqual(
             issues,
-            ["no signal of any tier in >24h", "no published or candidate signal in >7d"],
+            [
+                Issue("signal_pipeline_silent", "no signal of any tier in >24h"),
+                Issue("signal_drought_published", "no published or candidate signal in >7d"),
+            ],
         )
 
     def test_recent_candidate_signal_clears_the_drought(self) -> None:
@@ -421,7 +460,7 @@ class OperationalControlTests(unittest.TestCase):
             now_ms=NOW_MS,
             disk_free_pct=50,
         )
-        self.assertIn("no signal of any tier in >24h", issues)
+        self.assertIn("no signal of any tier in >24h", [issue.text for issue in issues])
 
     def test_dirty_checkout_is_reported_and_clean_one_is_not(self) -> None:
         modified = subprocess.CompletedProcess([], 0, stdout=" M data/alerts.json\n", stderr="")
@@ -452,6 +491,154 @@ class OperationalControlTests(unittest.TestCase):
             exit_code = run_health_monitor_main()
         self.assertEqual(exit_code, 0)
         self.assertFalse(save.call_args.args[1]["healthy"])
+
+    @staticmethod
+    def _fresh_alerts() -> dict[str, Any]:
+        """Alerts state that is fresh by real wall-clock time.
+
+        `main()` calls `current_time_ms()` internally rather than accepting
+        an injected clock, so these full-`main()` tests can't reuse the
+        fixed `NOW_MS` fixture the `detect_*` unit tests use above - a
+        `lastCheckedAt` of `NOW_MS` would already be stale (or, since
+        `NOW_MS` is year-2033, in the future) against the real clock, and an
+        absent signal record would spuriously add its own drought issues.
+        This keeps both signal-drought checks and the staleness check quiet
+        so each test's assertions are about the one condition it varies.
+        """
+        now = datetime.now(timezone.utc)
+        return {
+            "state": {
+                "lastCheckedAt": now.isoformat().replace("+00:00", "Z"),
+                "signalOutcomes": {"seed": {"startedAt": int(now.timestamp() * 1000)}},
+            }
+        }
+
+    def _run_monitor(
+        self,
+        *,
+        alerts: dict[str, Any],
+        runtime: dict[str, Any],
+        prior_state: dict[str, Any],
+    ) -> tuple[dict[str, Any], MagicMock]:
+        """Run `main()` against fixed alerts/runtime/prior state and capture
+
+        both the state it persists and any Telegram send it makes.
+        """
+        loaded = {
+            "alerts.json": alerts,
+            "runtime_health.json": runtime,
+            "health_monitor_state.json": prior_state,
+        }
+
+        def fake_load_json_file(path: Any, default: Any) -> Any:
+            return loaded.get(Path(path).name, default)
+
+        saved: dict[str, Any] = {}
+
+        def fake_save_json_file(path: Any, payload: Any) -> None:
+            saved.update(payload)
+
+        mock_service = MagicMock()
+        with (
+            patch("scripts.run_health_monitor.load_json_file", side_effect=fake_load_json_file),
+            patch("scripts.run_health_monitor.save_json_file", side_effect=fake_save_json_file),
+            patch("scripts.run_health_monitor.dirty_checkout_paths", return_value=[]),
+            patch(
+                "scripts.run_health_monitor.shutil.disk_usage",
+                return_value=SimpleNamespace(total=100, used=10, free=90),
+            ),
+            patch("scripts.run_health_monitor.WalletStore"),
+            patch("scripts.run_health_monitor.HyperliquidClient"),
+            patch("scripts.run_health_monitor.WalletTrackerService", return_value=mock_service),
+            patch.dict(
+                os.environ,
+                {"TELEGRAM_BOT_TOKEN": "tok", "TELEGRAM_CHAT_ID": "chat"},
+                clear=False,
+            ),
+        ):
+            exit_code = run_health_monitor_main()
+        self.assertEqual(exit_code, 0)
+        return saved, mock_service
+
+    def test_a_draining_count_with_the_same_key_does_not_renotify(self) -> None:
+        """The production bug: `untrustedQualityWindowWallets` drains
+
+        (8 -> 5) as wallets refresh, but the condition is the same one, so
+        the second check must not send another Telegram message.
+        """
+        alerts = self._fresh_alerts()
+        first_saved, first_service = self._run_monitor(
+            alerts=alerts,
+            runtime={"cacheCoverage": 1.0, "untrustedQualityWindowWallets": 8},
+            prior_state={"issues": [], "issueKeys": []},
+        )
+        first_service.send_telegram_message.assert_called_once()
+        second_saved, second_service = self._run_monitor(
+            alerts=alerts,
+            runtime={"cacheCoverage": 1.0, "untrustedQualityWindowWallets": 5},
+            prior_state=first_saved,
+        )
+        second_service.send_telegram_message.assert_not_called()
+        self.assertIn("5 wallets with untrusted quality window", second_saved["issues"][0])
+
+    def test_a_genuinely_new_condition_does_notify(self) -> None:
+        alerts = self._fresh_alerts()
+        saved, _service = self._run_monitor(
+            alerts=alerts,
+            runtime={"cacheCoverage": 1.0, "untrustedQualityWindowWallets": 8},
+            prior_state={"issues": [], "issueKeys": []},
+        )
+        _, second_service = self._run_monitor(
+            alerts=alerts,
+            runtime={"cacheCoverage": 1.0, "untrustedQualityWindowWallets": 8, "fillsGloballyDegraded": True},
+            prior_state=saved,
+        )
+        second_service.send_telegram_message.assert_called_once()
+        message = second_service.send_telegram_message.call_args.args[2]
+        self.assertIn("wallet fills globally degraded", message)
+
+    def test_a_resolved_condition_still_sends_the_recovery_message(self) -> None:
+        alerts = self._fresh_alerts()
+        saved, _service = self._run_monitor(
+            alerts=alerts,
+            runtime={"cacheCoverage": 1.0, "untrustedQualityWindowWallets": 3},
+            prior_state={"issues": [], "issueKeys": []},
+        )
+        _, second_service = self._run_monitor(
+            alerts=alerts,
+            runtime={"cacheCoverage": 1.0, "untrustedQualityWindowWallets": 0},
+            prior_state=saved,
+        )
+        second_service.send_telegram_message.assert_called_once_with("tok", "chat", "Wallet monitor recovered")
+
+    def test_rendered_telegram_text_still_contains_the_current_number(self) -> None:
+        _saved, service = self._run_monitor(
+            alerts=self._fresh_alerts(),
+            runtime={"cacheCoverage": 1.0, "untrustedQualityWindowWallets": 8},
+            prior_state={"issues": [], "issueKeys": []},
+        )
+        message = service.send_telegram_message.call_args.args[2]
+        self.assertIn("8 wallets with untrusted quality window", message)
+
+    def test_old_format_prior_state_forces_one_resend_then_settles(self) -> None:
+        """State written by the pre-fix script has `issues` but no
+
+        `issueKeys`. The first run after deploy must not crash and may send
+        one message even if the condition itself is unchanged; every run
+        after that must go quiet again since it now compares keys to keys.
+        """
+        alerts = self._fresh_alerts()
+        runtime = {"cacheCoverage": 1.0, "untrustedQualityWindowWallets": 8}
+        old_format_prior = {"issues": ["8 wallets with untrusted quality window"]}
+        first_saved, first_service = self._run_monitor(
+            alerts=alerts, runtime=runtime, prior_state=old_format_prior
+        )
+        first_service.send_telegram_message.assert_called_once()
+        self.assertIn("issueKeys", first_saved)
+        _second_saved, second_service = self._run_monitor(
+            alerts=alerts, runtime=runtime, prior_state=first_saved
+        )
+        second_service.send_telegram_message.assert_not_called()
 
     def test_rate_limiter_spaces_requests(self) -> None:
         limiter = RequestRateLimiter(2)

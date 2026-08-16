@@ -11,7 +11,7 @@ from coinmarketman import (
 )
 from moni import MoniApiError, MoniClient
 from ratelimit import RequestRateLimiter
-from scripts.run_health_monitor import detect_external_api_backoff, detect_health_issues
+from scripts.run_health_monitor import Issue, detect_external_api_backoff, detect_health_issues
 
 NOW_MS = 2_000_000_000_000
 HOUR_MS = 60 * 60 * 1000
@@ -105,7 +105,7 @@ class ExternalBackoffVisibilityTests(unittest.TestCase):
         issues = detect_external_api_backoff(
             {"cmmSignals": {"rateLimitedUntil": iso(NOW_MS + 5 * HOUR_MS)}}, now_ms=NOW_MS
         )
-        self.assertEqual(issues, ["CMM rate limited for another 5.0h"])
+        self.assertEqual(issues, [Issue("cmm_rate_limited", "CMM rate limited for another 5.0h")])
 
     def test_expired_cmm_rate_limit_is_not_reported(self) -> None:
         issues = detect_external_api_backoff(
@@ -118,7 +118,7 @@ class ExternalBackoffVisibilityTests(unittest.TestCase):
             {"moniSocial": {"error": "HTTP 429", "nextFetchAt": iso(NOW_MS + 2 * HOUR_MS)}},
             now_ms=NOW_MS,
         )
-        self.assertEqual(issues, ["Moni backed off for another 2.0h"])
+        self.assertEqual(issues, [Issue("moni_backoff", "Moni backed off for another 2.0h")])
 
     def test_moni_ordinary_cache_ttl_is_not_a_backoff(self) -> None:
         """nextFetchAt is set on success too; only an error makes it a penalty."""
@@ -145,7 +145,35 @@ class ExternalBackoffVisibilityTests(unittest.TestCase):
             now_ms=NOW_MS,
             disk_free_pct=50,
         )
-        self.assertEqual(issues, ["CMM rate limited for another 6.0h"])
+        self.assertEqual(issues, [Issue("cmm_rate_limited", "CMM rate limited for another 6.0h")])
+
+    def test_backoff_key_is_stable_while_the_countdown_hour_changes(self) -> None:
+        """The other half of the production bug: as a backoff counts down,
+
+        "another 5h" becomes "another 4h" etc. on every check even though
+        it is still the same backoff, so the key must stay put while only
+        the rendered text's hour figure moves.
+        """
+        cmm_issues = [
+            detect_external_api_backoff(
+                {"cmmSignals": {"rateLimitedUntil": iso(NOW_MS + hours * HOUR_MS)}}, now_ms=NOW_MS
+            )[0]
+            for hours in (5, 4, 3)
+        ]
+        self.assertTrue(all(issue.key == "cmm_rate_limited" for issue in cmm_issues))
+        self.assertEqual(
+            [issue.text for issue in cmm_issues],
+            ["CMM rate limited for another 5.0h", "CMM rate limited for another 4.0h", "CMM rate limited for another 3.0h"],
+        )
+
+        moni_issues = [
+            detect_external_api_backoff(
+                {"moniSocial": {"error": "HTTP 429", "nextFetchAt": iso(NOW_MS + hours * HOUR_MS)}},
+                now_ms=NOW_MS,
+            )[0]
+            for hours in (5, 4, 3)
+        ]
+        self.assertTrue(all(issue.key == "moni_backoff" for issue in moni_issues))
 
 
 if __name__ == "__main__":

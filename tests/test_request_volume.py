@@ -403,14 +403,16 @@ class StaleThresholdTests(unittest.TestCase):
     CHECKED_AT = "2033-05-18T03:21:00Z"
 
     def issues_at(self, age_ms: int) -> list[str]:
+        """Rendered text of each detected issue (see `Issue.text`)."""
         checked_ms = iso_to_ms(self.CHECKED_AT)
         self.assertGreater(checked_ms, 0, "fixture timestamp must parse")
-        return detect_health_issues(
+        issues = detect_health_issues(
             {"state": {"lastCheckedAt": self.CHECKED_AT}},
             {"cacheCoverage": 1.0},
             now_ms=checked_ms + age_ms,
             disk_free_pct=50,
         )
+        return [issue.text for issue in issues]
 
     def test_threshold_tolerates_a_missed_ten_minute_run(self) -> None:
         """A 12-minute-old check is one late run, not an outage."""
@@ -426,7 +428,8 @@ class StaleThresholdTests(unittest.TestCase):
             now_ms=NOW_MS,
             disk_free_pct=50,
         )
-        self.assertIn("sentiment check stale >25m", issues)
+        self.assertIn("sentiment_stale", [issue.key for issue in issues])
+        self.assertIn("sentiment check stale >25m", [issue.text for issue in issues])
 
 
 class WindowPhrasingTests(unittest.TestCase):
