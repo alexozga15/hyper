@@ -252,12 +252,26 @@ CLUSTERED_OPEN_ALERT_WINDOW_MS = OPEN_POSITION_ALERT_WINDOW_MS
 COUNTED_POSITION_MAX_UNREALIZED_LOSS = -1_000_000
 RECENT_ADD_POSITION_MIN_PCT = 0.20
 POSITION_RECENT_ADD_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
-# The scheduled cycle runs every 10 minutes; measured on production the
-# busiest wallet produces roughly 47 fills per cycle. Anything past this cap
-# is dropped from the fetched page before it ever reaches the recent-fill
-# cache merge, so it is gone for good - the cap needs real headroom above the
-# observed per-cycle rate, not just enough to cover it exactly.
-RECENT_FILL_ALERT_LIMIT = int(os.environ.get("RECENT_FILL_ALERT_LIMIT", "500"))
+# Anything past this cap is dropped from the fetched page before it ever
+# reaches the recent-fill cache merge, so it is gone for good.
+#
+# This, not WALLET_RECENT_FILL_CACHE_LIMIT, is what actually bounds retained
+# history today: every cycle re-requests the whole seven-day window and slices
+# it to the newest RECENT_FILL_ALERT_LIMIT entries, so the merged cache only
+# grows past this number where older fills fall outside the new page's span.
+# Raising the cache cap alone therefore bought nothing - measured after the
+# first cycle at 500, nine wallets sat pinned exactly here and none came close
+# to the 2000-entry cache cap.
+#
+# Size it against the 2h signal freshness window (WALLET_SIGNAL_ACTIVITY_WINDOW_MS):
+# a cap that spans less than that window cuts history inside the very window
+# the signal gates read. The densest tracked wallet runs at ~263 fills/hour,
+# so it needs ~526 entries just to reach two hours, and 500 left it covering
+# 1.9h. 1500 gives that wallet ~5.7h and leaves room for wallets busier than
+# any currently tracked. It costs no extra requests: the cap is applied to a
+# page the API already returned (userFillsByTime sends no limit and returns up
+# to 2000 rows), so it only decides how much of a paid-for response is kept.
+RECENT_FILL_ALERT_LIMIT = int(os.environ.get("RECENT_FILL_ALERT_LIMIT", "1500"))
 CONSENSUS_SIZE_ALERT_MIN_DELTA = 2
 CONSENSUS_SIZE_ALERT_MIN_PCT = 0.5
 HYPERLIQUID_DASHBOARD_WORKERS = 3
