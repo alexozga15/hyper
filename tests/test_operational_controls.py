@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from scripts.run_health_monitor import (
     detect_health_issues,
@@ -15,6 +17,7 @@ from scripts.run_health_monitor import (
 )
 from scripts.run_health_monitor import main as run_health_monitor_main
 from scripts.run_wallet_review import evaluate_wallets
+from scripts.run_wallet_review import main as run_wallet_review_main
 from server import (
     SIGNAL_CALIBRATION_MIN_SAMPLE,
     HyperliquidClient,
@@ -88,6 +91,88 @@ class OperationalControlTests(unittest.TestCase):
         )
         self.assertEqual(reviews["0xweak"]["weight"], 0.5)
         self.assertIn("negative_30d_pnl", reviews["0xweak"]["reasons"])
+
+    def test_wallet_review_skips_pnl_reasons_for_a_capped_fill_window(self) -> None:
+        """A qualityWindowTruncated wallet's 30d PnL/profit-factor may describe
+        only a couple of hours (userFillsByTime caps at WALLET_WINDOW_FILL_CAP
+        rows with no pagination), so neither PnL-based reason should fire even
+        though the raw numbers look identical to the weak wallet above.
+        """
+        stats: dict[str, int] = {}
+        reviews = evaluate_wallets(
+            [
+                {
+                    "address": "0xcapped",
+                    "closedTrades30d": 8,
+                    "qualityNetPnl30d": -100,
+                    "qualityProfitFactor30d": 0.8,
+                    "qualityWindowTruncated": True,
+                    "positions": [],
+                }
+            ],
+            stats,
+        )
+        self.assertNotIn("0xcapped", reviews)
+        self.assertEqual(stats["skippedCappedWindow"], 1)
+
+    def test_wallet_review_still_flags_inactive_when_capped(self) -> None:
+        """The capped-window flag only silences the PnL reasons, not inactivity -
+        daysSinceLastFill/holdingOnly30d come from a different endpoint and are
+        unaffected by the userFillsByTime cap.
+        """
+        reviews = evaluate_wallets(
+            [
+                {
+                    "address": "0xcappedidle",
+                    "closedTrades30d": 8,
+                    "qualityNetPnl30d": -100,
+                    "qualityProfitFactor30d": 0.8,
+                    "qualityWindowTruncated": True,
+                    "daysSinceLastFill": 45,
+                    "positions": [],
+                }
+            ]
+        )
+        self.assertEqual(reviews["0xcappedidle"]["reasons"], ["inactive"])
+
+    def test_wallet_review_summary_reports_the_skipped_count(self) -> None:
+        """A suppressed PnL check must leave a trace in the payload and the
+
+        Telegram summary, not just silently vanish - otherwise a capped fill
+        window looks identical to a wallet that genuinely passed its checks.
+        """
+        wallets = [
+            {
+                "address": "0xcapped",
+                "closedTrades30d": 8,
+                "qualityNetPnl30d": -100,
+                "qualityProfitFactor30d": 0.8,
+                "qualityWindowTruncated": True,
+                "positions": [],
+            }
+        ]
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            review_file = Path(tmp_dir) / "wallet_review.json"
+            fake_service = MagicMock()
+            fake_service.dashboard.return_value = {"wallets": wallets}
+            with patch(
+                "scripts.run_wallet_review.WalletTrackerService", return_value=fake_service
+            ), patch("scripts.run_wallet_review.WalletStore"), patch(
+                "scripts.run_wallet_review.HyperliquidClient"
+            ), patch(
+                "scripts.run_wallet_review.WALLET_REVIEW_FILE", review_file
+            ), patch.dict(
+                os.environ, {"TELEGRAM_BOT_TOKEN": "token", "TELEGRAM_CHAT_ID": "chat"}
+            ):
+                run_wallet_review_main()
+
+            payload = json.loads(review_file.read_text())
+            self.assertEqual(payload["skippedCappedWindowCount"], 1)
+            self.assertEqual(payload["reviewCount"], 0)
+
+            fake_service.send_telegram_message.assert_called_once()
+            _, _, message = fake_service.send_telegram_message.call_args[0]
+            self.assertIn("Skipped (capped fill window): 1", message)
 
     def test_wallet_review_uses_matching_quality_event_sample(self) -> None:
         reviews = evaluate_wallets(

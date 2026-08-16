@@ -30,12 +30,15 @@ def position_fingerprint(wallet: dict[str, Any]) -> set[str]:
     }
 
 
-def evaluate_wallets(wallets: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+def evaluate_wallets(
+    wallets: list[dict[str, Any]], stats: dict[str, int] | None = None
+) -> dict[str, dict[str, Any]]:
     reviews: dict[str, dict[str, Any]] = {}
     fingerprints = {
         str(wallet.get("address") or "").lower(): position_fingerprint(wallet)
         for wallet in wallets
     }
+    skipped_capped_window = 0
     for wallet in wallets:
         address = str(wallet.get("address") or "").lower()
         reasons: list[str] = []
@@ -49,10 +52,19 @@ def evaluate_wallets(wallets: list[dict[str, Any]]) -> dict[str, dict[str, Any]]
         )
         pnl = to_float(wallet.get("qualityNetPnl30d", wallet.get("realizedPnl30d")))
         profit_factor = to_float(wallet.get("qualityProfitFactor30d"))
-        if closed >= 5 and pnl < 0:
-            reasons.append("negative_30d_pnl")
-        if closed >= 5 and 0 < profit_factor < 1:
-            reasons.append("profit_factor_below_1")
+        # qualityNetPnl30d/qualityProfitFactor30d are computed from a single
+        # userFillsByTime page that caps at WALLET_WINDOW_FILL_CAP rows with no
+        # pagination (server.py fetch_wallet_snapshot). A high-frequency wallet
+        # can exhaust that cap within hours of the 30-day window, so a capped
+        # page's 30d PnL/profit-factor describe only that opening slice - not
+        # 30 days - and must not be trusted to downweight the wallet.
+        if wallet.get("qualityWindowTruncated"):
+            skipped_capped_window += 1
+        else:
+            if closed >= 5 and pnl < 0:
+                reasons.append("negative_30d_pnl")
+            if closed >= 5 and 0 < profit_factor < 1:
+                reasons.append("profit_factor_below_1")
         if wallet.get("holdingOnly30d") or to_float(wallet.get("daysSinceLastFill")) > 30:
             reasons.append("inactive")
         if wallet.get("reviewWeightMultiplier") == 0:
@@ -76,18 +88,22 @@ def evaluate_wallets(wallets: list[dict[str, Any]]) -> dict[str, dict[str, Any]]
             if shared >= 3 and union and shared / union >= 0.8:
                 review = reviews.setdefault(weaker_address, {"weight": 0.5, "reasons": []})
                 review["reasons"] = sorted(set([*review["reasons"], f"correlated_with_{better_address}"]))
+    if stats is not None:
+        stats["skippedCappedWindow"] = skipped_capped_window
     return reviews
 
 
 def main() -> int:
     service = WalletTrackerService(WalletStore(WALLETS_FILE), HyperliquidClient())
     dashboard = service.dashboard()
-    reviews = evaluate_wallets(dashboard.get("wallets", []))
+    review_stats: dict[str, int] = {}
+    reviews = evaluate_wallets(dashboard.get("wallets", []), review_stats)
     payload = {
         "version": 1,
         "generatedAt": now_iso(),
         "walletCount": len(dashboard.get("wallets", [])),
         "reviewCount": len(reviews),
+        "skippedCappedWindowCount": review_stats.get("skippedCappedWindow", 0),
         "wallets": reviews,
     }
     previous = {}
@@ -104,6 +120,7 @@ def main() -> int:
         lines = [
             "Weekly wallet health review",
             f"Tracked: {payload['walletCount']} | Reduced weight: {payload['reviewCount']}",
+            f"Skipped (capped fill window): {payload['skippedCappedWindowCount']}",
         ]
         for address, review in list(reviews.items())[:10]:
             lines.append(f"- {address[:6]}...{address[-4:]}: 0.5 ({', '.join(review['reasons'])})")
