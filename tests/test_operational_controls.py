@@ -145,13 +145,17 @@ class OperationalControlTests(unittest.TestCase):
         self.assertIn("profit_factor_below_1", reviews["0xcappedwellcovered"]["reasons"])
         self.assertEqual(stats["skippedCappedWindow"], 0)
 
-    def test_wallet_review_permissive_when_coverage_metadata_missing(self) -> None:
-        """A snapshot cached before qualityWindowCoverageMs existed carries the
+    def test_wallet_review_distrusts_a_capped_window_with_no_coverage_evidence(self) -> None:
+        """A snapshot cached between the two deploys carries the truncation flag
 
-        truncation flag but no coverage evidence. wallet_quality_window_trusted
-        treats that the same as before this field shipped: permissively
-        trusted, so the PnL checks run normally instead of being skipped.
+        but no coverage field. That is not a reason to trust it: the flag
+        already tells us the page was capped, and the missing field only means
+        we cannot tell whether the sample was adequate. Treating it as trusted
+        would leave the PnL checks running on exactly the wallets this whole
+        mechanism exists to protect, for as long as it takes every wallet to
+        refresh.
         """
+        stats: dict[str, int] = {}
         reviews = evaluate_wallets(
             [
                 {
@@ -162,9 +166,30 @@ class OperationalControlTests(unittest.TestCase):
                     "qualityWindowTruncated": True,
                     "positions": [],
                 }
+            ],
+            stats,
+        )
+        self.assertNotIn("0xnocoverage", reviews)
+        self.assertEqual(stats["skippedCappedWindow"], 1)
+
+    def test_wallet_review_trusts_a_wallet_carrying_no_truncation_flag(self) -> None:
+        """The permissive default survives where it belongs: a snapshot from
+
+        before any of these fields existed carries no truncation flag at all
+        and must keep being judged exactly as it was.
+        """
+        reviews = evaluate_wallets(
+            [
+                {
+                    "address": "0xnoflag",
+                    "closedTrades30d": 8,
+                    "qualityNetPnl30d": -100,
+                    "qualityProfitFactor30d": 0.8,
+                    "positions": [],
+                }
             ]
         )
-        self.assertIn("negative_30d_pnl", reviews["0xnocoverage"]["reasons"])
+        self.assertIn("negative_30d_pnl", reviews["0xnoflag"]["reasons"])
 
     def test_wallet_review_still_flags_inactive_when_capped(self) -> None:
         """The capped-window flag only silences the PnL reasons, not inactivity -

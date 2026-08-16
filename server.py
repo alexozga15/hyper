@@ -914,23 +914,24 @@ def wallet_quality_window_trusted(wallet: Any) -> bool:
     days is a fair sample. qualityWindowCoverageMs - the span the fetched page
     actually covers - is what tells the two cases apart.
 
-    Missing/absent metadata (snapshots written before these fields existed)
-    returns True, matching the previous, permissive behaviour - see
-    wallet_fill_window_covered's docstring for the same convention.
+    A wallet carrying no truncation flag at all is trusted, which is what
+    keeps snapshots written before any of this shipped behaving as they did -
+    see wallet_fill_window_covered's docstring for the same convention. The
+    permissive default stops there, though. Once the flag says the page *was*
+    capped, absent coverage is not reassurance: it means we positively know
+    the sample may be short and have no evidence that it is not. Reading that
+    as trusted would have silently disabled this check for every wallet cached
+    between the deploy that added qualityWindowTruncated and the one that
+    added qualityWindowCoverageMs - quality refreshes three wallets a cycle,
+    so with 41 tracked that gap is about two hours wide.
     """
     if not isinstance(wallet, dict):
         return True
     if not wallet.get("qualityWindowTruncated"):
         return True
-    coverage_ms = to_float(wallet.get("qualityWindowCoverageMs"))
-    # A missing field reads the same as a 0 here (to_float(None) == 0), which
-    # is exactly right: a snapshot cached before qualityWindowCoverageMs
-    # existed carries no coverage evidence and must keep the old permissive
-    # answer, the same convention wallet_fill_window_covered uses for
-    # oldestFillTime <= 0.
-    if coverage_ms <= 0:
-        return True
-    return coverage_ms >= QUALITY_WINDOW_MIN_COVERAGE_MS
+    if "qualityWindowCoverageMs" not in wallet:
+        return False
+    return to_float(wallet.get("qualityWindowCoverageMs")) >= QUALITY_WINDOW_MIN_COVERAGE_MS
 
 
 def side_from_size(size: float) -> str:
