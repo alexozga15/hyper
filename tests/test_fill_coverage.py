@@ -6,6 +6,7 @@ import pytest
 from server import (
     RANKING_WINDOW_MS,
     RECENT_FILL_ALERT_LIMIT,
+    WALLET_RECENT_FILL_CACHE_LIMIT,
     HyperliquidClient,
     TrackedWallet,
     WalletStore,
@@ -75,6 +76,70 @@ class RecentFillTruncationMetadataTests(unittest.TestCase):
 
         quality = snapshot["dataQuality"]
         self.assertFalse(quality["recentFillsTruncated"])
+
+    def test_merge_with_cache_can_truncate_even_when_fetched_page_did_not(self) -> None:
+        """FIX 3: recentFillsTruncated must describe the *merged* list.
+
+        A wallet can fetch a small, untruncated page this cycle and still have
+        the merge with WALLET_RECENT_FILL_CACHE_LIMIT worth of retained cache
+        history get cut - that must be visible on dataQuality too, not just
+        page-level truncation.
+        """
+        now_ms = 1_700_000_000_000
+        wallet = TrackedWallet(
+            address="0x2222222222222222222222222222222222222222", alias="", notes="", created_at=""
+        )
+        state = {
+            "marginSummary": {"accountValue": "1000000", "totalNtlPos": "0", "totalMarginUsed": "0"},
+            "withdrawable": "1000000",
+            "assetPositions": [],
+        }
+        fetched_count = 10
+        self.assertLess(fetched_count, RECENT_FILL_ALERT_LIMIT)
+        fetched_fills = [
+            {
+                "coin": "BTC",
+                "dir": "Open Long",
+                "px": "70000",
+                "sz": "1",
+                "closedPnl": "0",
+                "fee": "0",
+                "time": now_ms - i * 60_000,
+            }
+            for i in range(fetched_count)
+        ]
+        cached_count = WALLET_RECENT_FILL_CACHE_LIMIT + 5
+        cached_snapshot = {
+            "recentFills": [
+                {
+                    "coin": "BTC",
+                    "direction": "Open Long",
+                    "price": 70000,
+                    "size": 1,
+                    "time": now_ms - (fetched_count + i) * 60_000,
+                }
+                for i in range(cached_count)
+            ]
+        }
+        with patch("server.current_time_ms", return_value=now_ms), patch.object(
+            self.service.client, "safe_subscribe_all_dexs_clearinghouse_state", return_value=state
+        ), patch.object(
+            self.service, "fetch_fills_result", return_value={"ok": True, "data": fetched_fills, "error": ""}
+        ), patch.object(
+            self.service, "fetch_recent_fills_result", return_value={"ok": True, "data": [], "error": ""}
+        ), patch.object(
+            self.service, "fetch_open_orders_result", return_value={"ok": True, "data": [], "error": ""}
+        ), patch.object(
+            self.service, "fetch_portfolio_result", return_value={"ok": True, "data": {}, "error": ""}
+        ), patch.object(self.service, "fetch_wallet_role", return_value="user"):
+            snapshot = self.service.fetch_wallet_snapshot(wallet, cached_snapshot=cached_snapshot)
+
+        quality = snapshot["dataQuality"]
+        self.assertEqual(len(snapshot["recentFills"]), WALLET_RECENT_FILL_CACHE_LIMIT)
+        self.assertTrue(quality["recentFillsTruncated"])
+        expected_oldest = min(int(fill["time"]) for fill in snapshot["recentFills"])
+        self.assertEqual(quality["oldestFillTime"], expected_oldest)
+        self.assertEqual(quality["fillCoverageMs"], now_ms - expected_oldest)
 
     def test_wallet_fill_window_covered_false_when_truncated_and_short(self) -> None:
         now_ms = 1_700_000_000_000

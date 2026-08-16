@@ -25,6 +25,7 @@ import scripts.process_telegram_commands as commands
 from server import (
     DASHBOARD_SNAPSHOT_DROPPED_FILL_FIELDS,
     DASHBOARD_SNAPSHOT_DROPPED_WALLET_FIELDS,
+    DASHBOARD_SNAPSHOT_FILL_LIMIT,
     DASHBOARD_SNAPSHOT_MAX_AGE_SECONDS,
     build_dashboard_snapshot,
     current_time_ms,
@@ -86,6 +87,34 @@ class SnapshotTrimmingTests(unittest.TestCase):
             self.assertIn(kept, wallet)
         for kept in ("coin", "direction", "price", "size", "time"):
             self.assertIn(kept, wallet["recentFills"][0])
+
+    def test_snapshot_caps_fills_per_wallet_at_the_ui_limit(self) -> None:
+        """FIX 4: the UI-serving snapshot must not inflate with the analysis
+        cache's (much larger) retained-fill cap. It slices to
+        DASHBOARD_SNAPSHOT_FILL_LIMIT per wallet regardless of how many fills
+        the source dashboard carries.
+        """
+        fill_count = DASHBOARD_SNAPSHOT_FILL_LIMIT + 25
+        payload = dashboard_payload(now_iso())
+        payload["wallets"][0]["recentFills"] = [
+            {
+                "coin": "BTC",
+                "direction": "Open Long",
+                "price": 60_000.0,
+                "size": 1.0,
+                "time": current_time_ms() - i * 60_000,
+                "closedPnl": 0.0,
+                "fee": 0.0,
+            }
+            for i in range(fill_count)
+        ]
+
+        snapshot = build_dashboard_snapshot(payload)
+
+        fills = snapshot["wallets"][0]["recentFills"]
+        self.assertEqual(len(fills), DASHBOARD_SNAPSHOT_FILL_LIMIT)
+        # The newest fills (front of the source list) are the ones kept.
+        self.assertEqual(fills[0]["time"], payload["wallets"][0]["recentFills"][0]["time"])
 
     def test_snapshot_preserves_the_build_time_not_the_save_time(self) -> None:
         built_at = iso_minutes_ago(4)

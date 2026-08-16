@@ -61,6 +61,14 @@ DASHBOARD_SNAPSHOT_MAX_AGE_SECONDS = 15 * 60
 DASHBOARD_SNAPSHOT_DROPPED_WALLET_FIELDS = ("performance", "openOrders", "notes", "createdAt")
 # Recent-fill consumers only read coin/direction/price/size/time.
 DASHBOARD_SNAPSHOT_DROPPED_FILL_FIELDS = ("closedPnl", "fee")
+# This is a UI-serving cache with a 15-minute max age (DASHBOARD_SNAPSHOT_MAX_AGE_SECONDS
+# above), not an analysis source - nothing reads it back for history-coverage
+# or signal work, only on-demand Telegram replies. It is deliberately NOT
+# sized with WALLET_RECENT_FILL_CACHE_LIMIT: that cap was raised to 2000 to
+# stop the analysis cache from dropping fills inside the 2h signal window,
+# but copying 2000 fills per wallet into this file on every rebuild would
+# inflate it for no reader that needs it. Keep the UI cache small instead.
+DASHBOARD_SNAPSHOT_FILL_LIMIT = 100
 HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info"
 HYPERLIQUID_WS_URLS = (
     "wss://api-ui.hyperliquid.xyz/ws",
@@ -244,7 +252,12 @@ CLUSTERED_OPEN_ALERT_WINDOW_MS = OPEN_POSITION_ALERT_WINDOW_MS
 COUNTED_POSITION_MAX_UNREALIZED_LOSS = -1_000_000
 RECENT_ADD_POSITION_MIN_PCT = 0.20
 POSITION_RECENT_ADD_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
-RECENT_FILL_ALERT_LIMIT = int(os.environ.get("RECENT_FILL_ALERT_LIMIT", "100"))
+# The scheduled cycle runs every 10 minutes; measured on production the
+# busiest wallet produces roughly 47 fills per cycle. Anything past this cap
+# is dropped from the fetched page before it ever reaches the recent-fill
+# cache merge, so it is gone for good - the cap needs real headroom above the
+# observed per-cycle rate, not just enough to cover it exactly.
+RECENT_FILL_ALERT_LIMIT = int(os.environ.get("RECENT_FILL_ALERT_LIMIT", "500"))
 CONSENSUS_SIZE_ALERT_MIN_DELTA = 2
 CONSENSUS_SIZE_ALERT_MIN_PCT = 0.5
 HYPERLIQUID_DASHBOARD_WORKERS = 3
@@ -259,7 +272,15 @@ WALLET_QUALITY_REFRESH_BATCH_SIZE = 3
 WALLET_QUALITY_SOFT_TTL_MS = 2 * 60 * 60 * 1000
 WALLET_QUALITY_HARD_TTL_MS = 6 * 60 * 60 * 1000
 WALLET_RECENT_FILL_CACHE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
-WALLET_RECENT_FILL_CACHE_LIMIT = 200
+# Measured on production against the 41 tracked wallets: 13 wallets sit
+# exactly at this cap, and their retained history spans a median of 7.8h -
+# but 5 of those 13 retain LESS THAN 2 HOURS, while
+# WALLET_SIGNAL_ACTIVITY_WINDOW_MS (the live signal freshness window) is also
+# 2 hours. A cap of 200 was therefore cutting the busiest wallets' history
+# inside the very window the signal gates read from, silently. Raised to
+# 2000 for real headroom, and made env-tunable like the neighbouring caps so
+# it can be retuned without a code change as wallet activity grows.
+WALLET_RECENT_FILL_CACHE_LIMIT = int(float(os.environ.get("WALLET_RECENT_FILL_CACHE_LIMIT", "2000")))
 # Two fill requests per wallet per cycle are the largest single block of
 # Hyperliquid traffic: with 33 wallets they are 66 of the ~75 calls a cycle
 # makes, and they are what pushes the account into HTTP 429. A wallet whose
@@ -991,7 +1012,7 @@ def build_dashboard_snapshot(dashboard: dict[str, Any]) -> dict[str, Any]:
         if isinstance(fills, list):
             trimmed["recentFills"] = [
                 {key: value for key, value in fill.items() if key not in DASHBOARD_SNAPSHOT_DROPPED_FILL_FIELDS}
-                for fill in fills
+                for fill in fills[:DASHBOARD_SNAPSHOT_FILL_LIMIT]
                 if isinstance(fill, dict)
             ]
         wallets.append(trimmed)
@@ -1929,6 +1950,30 @@ class WalletTrackerService:
             key=lambda fill: int(to_float(fill.get("time"))),
             reverse=True,
         )[:WALLET_RECENT_FILL_CACHE_LIMIT]
+
+        # The truncation/coverage flags written into dataQuality above were
+        # computed against the *fetched* page only, before this merge with the
+        # recent-fill cache ran. That merge can itself get cut at
+        # WALLET_RECENT_FILL_CACHE_LIMIT even when the fetched page was not
+        # truncated, which used to leave recentFillsTruncated False and
+        # wallet_fill_window_covered() wrongly reporting the window as
+        # covered. Recompute all three fields against the final merged list -
+        # the one every consumer (including wallet_fill_window_covered)
+        # actually reads.
+        merged_candidate_count = len(merged_recent_fills)
+        merged_recent_fills_truncated = recent_fills_truncated or merged_candidate_count > WALLET_RECENT_FILL_CACHE_LIMIT
+        merged_oldest_fill_ms = min(
+            (int(to_float(fill.get("time"))) for fill in snapshot["recentFills"]),
+            default=0,
+        )
+        merged_fill_coverage_ms = (
+            (now_ms - merged_oldest_fill_ms)
+            if merged_recent_fills_truncated and merged_oldest_fill_ms > 0
+            else (now_ms - fills_start_ms)
+        )
+        snapshot["dataQuality"]["recentFillsTruncated"] = merged_recent_fills_truncated
+        snapshot["dataQuality"]["oldestFillTime"] = merged_oldest_fill_ms
+        snapshot["dataQuality"]["fillCoverageMs"] = merged_fill_coverage_ms
 
         # `fillsOk` above describes one request (userFillsByTime) issued this
         # cycle. It is not the same thing as "this wallet has usable fill
