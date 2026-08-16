@@ -341,6 +341,7 @@ WALLET_CACHED_QUALITY_FIELDS = (
     "qualityHoldout6dNetPnl",
     "qualityWindowTruncated",
     "qualityWindowFillCount",
+    "qualityWindowCoverageMs",
     "fills30d",
     "daysSinceLastFill",
     "holdingOnly30d",
@@ -350,6 +351,15 @@ WALLET_CACHED_QUALITY_FIELDS = (
     "hitRate",
     "openOrderCount",
     "openOrders",
+)
+# A capped page (qualityWindowTruncated) is not automatically an unusable one:
+# a wallet whose page still spans 25 of the requested 30 days is a fair
+# sample, while one spanning 2 hours is not (see qualityWindowCoverageMs in
+# fetch_wallet_snapshot). QUALITY_WINDOW_MIN_COVERAGE_MS is the line between
+# those two cases for wallet_quality_window_trusted below - default 7 days,
+# env-tunable like the neighbouring caps.
+QUALITY_WINDOW_MIN_COVERAGE_MS = int(
+    float(os.environ.get("QUALITY_WINDOW_MIN_COVERAGE_MS", 7 * 24 * 60 * 60 * 1000))
 )
 LORACLE_WALLET_ADDRESS = "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae"
 EXCLUDED_COUNTED_POSITIONS = {
@@ -799,6 +809,7 @@ def build_wallet_quality_rank(
     max_drawdown_pct: float = 0.0,
     margin_usage_pct: float = 0.0,
     unrealized_pnl: float = 0.0,
+    window_trusted: bool = True,
 ) -> dict[str, Any]:
     normalized_hit_rate = max(0.0, min(to_float(hit_rate), 100.0))
     sample_size_7d = max(0, int(to_float(closed_trade_count)))
@@ -900,7 +911,41 @@ def build_wallet_quality_rank(
         "convictionWeight7dShare": round(effective_7d_weight, 2),
         "eliteEligible": elite_eligible,
         "metric": "multi_period_quality",
+        # Lets downstream readers tell a real score from one computed over an
+        # unreadable (capped-and-poorly-covered) fill window without having to
+        # re-derive that judgment themselves. Does not change the score.
+        "windowTrusted": bool(window_trusted),
     }
+
+
+def wallet_quality_window_trusted(wallet: Any) -> bool:
+    """Is this wallet's 30d quality window (qualityXxx30d fields) trustworthy?
+
+    userFillsByTime caps at WALLET_WINDOW_FILL_CAP rows ascending from
+    startTime with no pagination, so a high-frequency wallet's 30-day page can
+    fill up within hours of the window opening (qualityWindowTruncated). That
+    alone is not disqualifying: a capped page that still spans most of the 30
+    days is a fair sample. qualityWindowCoverageMs - the span the fetched page
+    actually covers - is what tells the two cases apart.
+
+    A wallet carrying no truncation flag at all is trusted, which is what
+    keeps snapshots written before any of this shipped behaving as they did -
+    see wallet_fill_window_covered's docstring for the same convention. The
+    permissive default stops there, though. Once the flag says the page *was*
+    capped, absent coverage is not reassurance: it means we positively know
+    the sample may be short and have no evidence that it is not. Reading that
+    as trusted would have silently disabled this check for every wallet cached
+    between the deploy that added qualityWindowTruncated and the one that
+    added qualityWindowCoverageMs - quality refreshes three wallets a cycle,
+    so with 41 tracked that gap is about two hours wide.
+    """
+    if not isinstance(wallet, dict):
+        return True
+    if not wallet.get("qualityWindowTruncated"):
+        return True
+    if "qualityWindowCoverageMs" not in wallet:
+        return False
+    return to_float(wallet.get("qualityWindowCoverageMs")) >= QUALITY_WINDOW_MIN_COVERAGE_MS
 
 
 def side_from_size(size: float) -> str:
@@ -1751,6 +1796,16 @@ class WalletTrackerService:
                 }
             )
 
+        # A capped page (see qualityWindowTruncated below) is not automatically
+        # an unusable one: a page that still spans most of the 30-day window is
+        # a fair sample, while one spanning a couple of hours is not.
+        # qualityWindowCoverageMs is the span the fetched page actually covers
+        # - newest fill time in the page minus where the page started - so
+        # wallet_quality_window_trusted can tell the two cases apart. 0 when
+        # the page came back empty.
+        quality_window_truncated = bool(full_quality_refresh and fills_ok and len(fills) >= WALLET_WINDOW_FILL_CAP)
+        quality_window_coverage_ms = (last_fill_time - fills_start_ms) if fills else 0
+
         # userFillsByTime caps at 2000 rows ascending from startTime, so a busy
         # wallet's newest trades fall off the end of the time-windowed page.
         # Union in the userFills page (newest first) so freshness and
@@ -1849,6 +1904,12 @@ class WalletTrackerService:
             max_drawdown_pct=performance.get("month", {}).get("maxDrawdownPct", 0.0),
             margin_usage_pct=margin_usage_pct,
             unrealized_pnl=unrealized_pnl,
+            window_trusted=wallet_quality_window_trusted(
+                {
+                    "qualityWindowTruncated": quality_window_truncated,
+                    "qualityWindowCoverageMs": quality_window_coverage_ms,
+                }
+            ),
         )
         if wallet.address.lower() in ELITE_WALLET_OVERRIDES:
             recent_win_rate_rank = {
@@ -1907,10 +1968,13 @@ class WalletTrackerService:
             # qualityNetPnl30d of -3020.41 was a faithful sum over that ~2h
             # slice, not the month. The point of this flag is not "the page was
             # big", it is "these 30-day numbers may describe a couple of hours".
-            "qualityWindowTruncated": bool(
-                full_quality_refresh and fills_ok and len(fills) >= WALLET_WINDOW_FILL_CAP
-            ),
+            "qualityWindowTruncated": quality_window_truncated,
             "qualityWindowFillCount": len(fills),
+            # Span of the fetched page (newest fill time in it minus where it
+            # started), 0 when the page is empty. Lets a truncated-but-mostly-
+            # complete page (e.g. 25 of 30 days) be told apart from one that
+            # only covers a couple of hours - see wallet_quality_window_trusted.
+            "qualityWindowCoverageMs": quality_window_coverage_ms,
             "fills30d": fills_30d_count,
             "daysSinceLastFill": days_since_last_fill,
             "holdingOnly30d": holding_only_30d,
@@ -2412,6 +2476,15 @@ class WalletTrackerService:
             if "HTTP 429" in str(wallet.get("dataQuality", {}).get("fillsError", ""))
             or "HTTP 429" in str(wallet.get("dataQuality", {}).get("portfolioError", ""))
         )
+        # Surfaced so a capped-and-poorly-covered 30d fill window (see
+        # wallet_quality_window_trusted) cannot go quiet the way the original
+        # unconditional-truncation defect did: this counts wallets whose
+        # qualityXxx30d numbers are currently being refused rather than acted
+        # on by wallet_conviction_weight/is_wallet_quarantined/
+        # is_monthly_quality_eligible.
+        untrusted_quality_window_wallets = sum(
+            1 for wallet in snapshots if not wallet_quality_window_trusted(wallet)
+        )
         save_json_file(
             RUNTIME_HEALTH_FILE,
             {
@@ -2427,6 +2500,7 @@ class WalletTrackerService:
                 "rateLimitedWallets": rate_limited_wallets,
                 "throttle": self.client.rate_limiter.throttle_report(),
                 "fillsGloballyDegraded": fills_globally_degraded,
+                "untrustedQualityWindowWallets": untrusted_quality_window_wallets,
             },
         )
 
@@ -2626,6 +2700,15 @@ class WalletTrackerService:
     def is_monthly_quality_eligible(self, wallet: dict[str, Any]) -> bool:
         if "qualityClosedEvents30d" not in wallet:
             return not self.is_toxic_conviction_wallet(wallet)
+        # Deliberately asymmetric with wallet_conviction_weight/
+        # is_wallet_quarantined above: those refuse to judge (neutral weight,
+        # not quarantined) when the window is untrusted, because doing
+        # otherwise would penalize a wallet on unknown data. This method is a
+        # *positive* selection into the top-conviction cohort, so the same
+        # unknown data must not earn promotion either - do not "fix" this into
+        # matching the other two.
+        if not wallet_quality_window_trusted(wallet):
+            return False
         profit_factor_raw = wallet.get("qualityProfitFactor30d")
         profit_factor = float("inf") if profit_factor_raw == "inf" else to_float(profit_factor_raw)
         holdout_events = int(to_float(wallet.get("qualityHoldout6dEvents")))
@@ -2743,6 +2826,14 @@ class WalletTrackerService:
         rank = wallet.get("recentWinRateRank")
         if not isinstance(rank, dict):
             base_weight = 1.0
+        elif not wallet_quality_window_trusted(wallet):
+            # The score in `rank` was computed from a capped-and-poorly-
+            # covered 30d fill window (see wallet_quality_window_trusted) and
+            # may describe a couple of hours, not a month. A wallet whose
+            # numbers we cannot read must neither gain nor lose weight from
+            # them, so fall back to the same neutral base an unranked wallet
+            # gets instead of the score-derived one.
+            base_weight = 1.0
         else:
             score = to_float(rank.get("convictionWeightScore", rank.get("score")))
             label = str(rank.get("label") or "")
@@ -2796,6 +2887,14 @@ class WalletTrackerService:
         return max(0, (now_ms if now_ms is not None else current_time_ms()) - refreshed_at)
 
     def is_wallet_quarantined(self, wallet: dict[str, Any]) -> bool:
+        # rank's 7d fields come from the same fill loop over the same
+        # WALLET_WINDOW_FILL_CAP-capped page as the 30d quality numbers (see
+        # fetch_wallet_snapshot), so an unreadable window can just as easily
+        # produce a false quarantine as a false 30d score. Mirrors
+        # is_wallet_dormant, which refuses to judge a wallet whose fill data
+        # is unusable rather than risk silently penalizing it on noise.
+        if not wallet_quality_window_trusted(wallet):
+            return False
         rank = wallet.get("recentWinRateRank", {})
         if not isinstance(rank, dict):
             return False

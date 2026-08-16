@@ -58,6 +58,18 @@ class SegmentTests(unittest.TestCase):
         self.assertEqual(losing["label"], "Cold")
         self.assertEqual(losing["pnlReturnPct"], -50.0)
 
+    def test_wallet_quality_rank_carries_window_trusted_flag(self) -> None:
+        """windowTrusted travels with the score it describes, defaulting True
+
+        so every existing caller (which never passes window_trusted) is
+        unaffected, without changing how the score itself is computed.
+        """
+        default = build_wallet_quality_rank(70, 20, 20_000, 100_000)
+        self.assertTrue(default["windowTrusted"])
+        untrusted = build_wallet_quality_rank(70, 20, 20_000, 100_000, window_trusted=False)
+        self.assertFalse(untrusted["windowTrusted"])
+        self.assertEqual(untrusted["score"], default["score"])
+
     def test_wallet_quality_rank_blends_30d_base_with_capped_7d_weight(self) -> None:
         cold_week = build_wallet_quality_rank(
             0,
@@ -767,6 +779,39 @@ class AlertSummaryTests(unittest.TestCase):
             with self.subTest(field=field):
                 candidate = {**eligible, field: bad_value}
                 self.assertFalse(self.service.is_monthly_quality_eligible(candidate))
+
+    def test_monthly_quality_gate_denies_promotion_on_untrusted_window(self) -> None:
+        """Unlike wallet_conviction_weight/is_wallet_quarantined, which refuse
+
+        to judge (neutral/False) on an untrusted window, this gate is a
+        positive selection into the top-conviction cohort: unknown data must
+        not earn promotion, so an otherwise-eligible wallet with a capped and
+        poorly-covered window is denied, not passed through.
+        """
+        eligible = {
+            "address": "0x1111111111111111111111111111111111111111",
+            "qualityClosedEvents30d": 8,
+            "qualityNetPnl30d": 20_000.0,
+            "qualityProfitFactor30d": 1.6,
+            "qualityTopWinConcentrationPct": 45.0,
+            "qualityHoldout6dEvents": 2,
+            "qualityHoldout6dNetPnl": 1_000.0,
+            "realizedPnl30d": 20_000.0,
+            "unrealizedPnl": 0.0,
+        }
+        untrusted = {
+            **eligible,
+            "qualityWindowTruncated": True,
+            "qualityWindowCoverageMs": 2 * 60 * 60 * 1000,
+        }
+        self.assertFalse(self.service.is_monthly_quality_eligible(untrusted))
+
+        well_covered = {
+            **eligible,
+            "qualityWindowTruncated": True,
+            "qualityWindowCoverageMs": 25 * 24 * 60 * 60 * 1000,
+        }
+        self.assertTrue(self.service.is_monthly_quality_eligible(well_covered))
 
     def test_monthly_cohort_demotes_wallet_that_fails_quality_gate(self) -> None:
         address = "0x1111111111111111111111111111111111111111"

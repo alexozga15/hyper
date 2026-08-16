@@ -19,6 +19,7 @@ from server import (
     now_iso,
     save_json_file,
     to_float,
+    wallet_quality_window_trusted,
 )
 
 
@@ -57,8 +58,11 @@ def evaluate_wallets(
         # pagination (server.py fetch_wallet_snapshot). A high-frequency wallet
         # can exhaust that cap within hours of the 30-day window, so a capped
         # page's 30d PnL/profit-factor describe only that opening slice - not
-        # 30 days - and must not be trusted to downweight the wallet.
-        if wallet.get("qualityWindowTruncated"):
+        # 30 days - and must not be trusted to downweight the wallet. A capped
+        # page that still spans most of the 30 days is a fair sample though,
+        # so wallet_quality_window_trusted (not the raw truncation flag) is
+        # what decides whether these two checks are skipped.
+        if not wallet_quality_window_trusted(wallet):
             skipped_capped_window += 1
         else:
             if closed >= 5 and pnl < 0:

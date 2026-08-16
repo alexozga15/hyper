@@ -78,6 +78,9 @@ def detect_health_issues(
         issues.append("wallet fills globally degraded")
     if disk_free_pct < 10:
         issues.append("disk free space <10%")
+    untrusted_quality_window_wallets = int(runtime.get("untrustedQualityWindowWallets", 0))
+    if untrusted_quality_window_wallets > 0:
+        issues.append(f"{untrusted_quality_window_wallets} wallets with untrusted quality window")
     issues.extend(detect_signal_drought(state, now_ms=now_ms))
     issues.extend(detect_external_api_backoff(state, now_ms=now_ms))
     return issues

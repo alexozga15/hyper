@@ -5,6 +5,8 @@ from unittest.mock import patch
 
 from scripts.run_health_monitor import detect_health_issues
 from server import (
+    HOLDING_ONLY_WINDOW_MS,
+    QUALITY_WINDOW_MIN_COVERAGE_MS,
     WALLET_IDLE_FILL_THRESHOLD_MS,
     WALLET_LIVE_FILL_SKIP_MAX,
     WALLET_WINDOW_FILL_CAP,
@@ -14,6 +16,7 @@ from server import (
     WalletTrackerService,
     cached_window_fill_count,
     iso_to_ms,
+    wallet_quality_window_trusted,
 )
 
 NOW_MS = 2_000_000_000_000
@@ -243,7 +246,9 @@ class QualityWindowTruncationTests(unittest.TestCase):
     def snapshot(self, *, page: list[dict[str, object]], **kwargs: object) -> dict:
         tracked = TrackedWallet(address=self.ADDRESS, alias="", notes="", created_at="")
         state = {"marginSummary": {"accountValue": "1"}, "withdrawable": "1", "assetPositions": []}
-        with patch.object(
+        with patch(
+            "server.current_time_ms", return_value=NOW_MS
+        ), patch.object(
             self.service.client, "safe_subscribe_all_dexs_clearinghouse_state", return_value=state
         ), patch.object(
             self.service, "fetch_fills_result", return_value={"ok": True, "data": page, "error": ""}
@@ -256,9 +261,9 @@ class QualityWindowTruncationTests(unittest.TestCase):
         ), patch.object(self.service, "fetch_wallet_role", return_value="user"):
             return self.service.fetch_wallet_snapshot(tracked, **kwargs)
 
-    def capped_page(self) -> list[dict[str, object]]:
+    def capped_page(self, *, newest_fill_ms: int = NOW_MS) -> list[dict[str, object]]:
         return [
-            {"coin": "BTC", "dir": "Open Long", "px": "1", "sz": "1", "time": NOW_MS, "tid": i}
+            {"coin": "BTC", "dir": "Open Long", "px": "1", "sz": "1", "time": newest_fill_ms, "tid": i}
             for i in range(WALLET_WINDOW_FILL_CAP)
         ]
 
@@ -278,6 +283,7 @@ class QualityWindowTruncationTests(unittest.TestCase):
         full = self.snapshot(page=self.capped_page(), full_quality_refresh=True)
         cached = self.service.cached_wallet_quality_snapshot(full)
         self.assertTrue(cached["qualityWindowTruncated"])
+        self.assertEqual(cached["qualityWindowCoverageMs"], full["qualityWindowCoverageMs"])
 
         stale = self.snapshot(
             page=[],
@@ -289,6 +295,74 @@ class QualityWindowTruncationTests(unittest.TestCase):
         # including qualityWindowTruncated - are restored as a unit.
         self.assertTrue(stale["dataQuality"]["qualityCacheHit"])
         self.assertTrue(stale["qualityWindowTruncated"])
+        self.assertEqual(stale["qualityWindowCoverageMs"], full["qualityWindowCoverageMs"])
+
+
+class QualityWindowCoverageTests(unittest.TestCase):
+    """qualityWindowCoverageMs tells a fair capped sample apart from a thin one.
+
+    A capped page (qualityWindowTruncated) spanning most of the 30-day window
+    is still a fair sample; one spanning a couple of hours is not.
+    qualityWindowCoverageMs - the fetched page's actual span - is what lets
+    wallet_quality_window_trusted (and the recentWinRateRank it feeds) tell
+    the two cases apart, at the QUALITY_WINDOW_MIN_COVERAGE_MS boundary.
+    """
+
+    ADDRESS = "0x3333333333333333333333333333333333333333"
+
+    def setUp(self) -> None:
+        self.service = WalletTrackerService(object(), HyperliquidClient(RequestRateLimiter(1000)))
+
+    def snapshot(self, *, page: list[dict[str, object]], **kwargs: object) -> dict:
+        tracked = TrackedWallet(address=self.ADDRESS, alias="", notes="", created_at="")
+        state = {"marginSummary": {"accountValue": "1"}, "withdrawable": "1", "assetPositions": []}
+        with patch(
+            "server.current_time_ms", return_value=NOW_MS
+        ), patch.object(
+            self.service.client, "safe_subscribe_all_dexs_clearinghouse_state", return_value=state
+        ), patch.object(
+            self.service, "fetch_fills_result", return_value={"ok": True, "data": page, "error": ""}
+        ), patch.object(
+            self.service, "fetch_recent_fills_result", return_value={"ok": True, "data": [], "error": ""}
+        ), patch.object(
+            self.service, "fetch_open_orders_result", return_value={"ok": True, "data": [], "error": ""}
+        ), patch.object(
+            self.service, "fetch_portfolio_result", return_value={"ok": True, "data": {}, "error": ""}
+        ), patch.object(self.service, "fetch_wallet_role", return_value="user"):
+            return self.service.fetch_wallet_snapshot(tracked, full_quality_refresh=True, **kwargs)
+
+    def capped_page(self, *, newest_fill_ms: int) -> list[dict[str, object]]:
+        return [
+            {"coin": "BTC", "dir": "Open Long", "px": "1", "sz": "1", "time": newest_fill_ms, "tid": i}
+            for i in range(WALLET_WINDOW_FILL_CAP)
+        ]
+
+    def test_narrow_capped_page_has_low_coverage_and_is_untrusted(self) -> None:
+        fills_start_ms = NOW_MS - HOLDING_ONLY_WINDOW_MS
+        newest_fill_ms = fills_start_ms + 2 * 60 * 60 * 1000  # 2h into the window
+        snapshot = self.snapshot(page=self.capped_page(newest_fill_ms=newest_fill_ms))
+        self.assertTrue(snapshot["qualityWindowTruncated"])
+        self.assertEqual(snapshot["qualityWindowCoverageMs"], 2 * 60 * 60 * 1000)
+        self.assertLess(snapshot["qualityWindowCoverageMs"], QUALITY_WINDOW_MIN_COVERAGE_MS)
+        self.assertFalse(wallet_quality_window_trusted(snapshot))
+        self.assertFalse(snapshot["recentWinRateRank"]["windowTrusted"])
+
+    def test_well_covered_capped_page_is_trusted(self) -> None:
+        fills_start_ms = NOW_MS - HOLDING_ONLY_WINDOW_MS
+        newest_fill_ms = fills_start_ms + 25 * 24 * 60 * 60 * 1000  # 25d into the window
+        snapshot = self.snapshot(page=self.capped_page(newest_fill_ms=newest_fill_ms))
+        self.assertTrue(snapshot["qualityWindowTruncated"])
+        self.assertGreaterEqual(snapshot["qualityWindowCoverageMs"], QUALITY_WINDOW_MIN_COVERAGE_MS)
+        self.assertTrue(wallet_quality_window_trusted(snapshot))
+        self.assertTrue(snapshot["recentWinRateRank"]["windowTrusted"])
+
+    def test_empty_page_reports_zero_coverage(self) -> None:
+        snapshot = self.snapshot(page=[])
+        self.assertEqual(snapshot["qualityWindowCoverageMs"], 0)
+        self.assertFalse(snapshot["qualityWindowTruncated"])
+        # Not truncated, so the missing coverage never gets asked to decide
+        # trust - trusted stays the default.
+        self.assertTrue(wallet_quality_window_trusted(snapshot))
 
 
 class SkippedFetchAccountingTests(unittest.TestCase):
