@@ -225,6 +225,72 @@ class WindowFillCountTests(unittest.TestCase):
         live.assert_called_once()
 
 
+class QualityWindowTruncationTests(unittest.TestCase):
+    """qualityNetPnl30d etc. must carry a flag when their source page hit the cap.
+
+    userFillsByTime returns at most WALLET_WINDOW_FILL_CAP rows ascending from
+    startTime with no pagination, so a high-frequency wallet's 30-day page can
+    fill up within hours of the window opening and never reach the rest of the
+    30 days. qualityWindowTruncated marks exactly that case so consumers know
+    the 30d quality numbers may describe a couple of hours, not a month.
+    """
+
+    ADDRESS = "0x2222222222222222222222222222222222222222"
+
+    def setUp(self) -> None:
+        self.service = WalletTrackerService(object(), HyperliquidClient(RequestRateLimiter(1000)))
+
+    def snapshot(self, *, page: list[dict[str, object]], **kwargs: object) -> dict:
+        tracked = TrackedWallet(address=self.ADDRESS, alias="", notes="", created_at="")
+        state = {"marginSummary": {"accountValue": "1"}, "withdrawable": "1", "assetPositions": []}
+        with patch.object(
+            self.service.client, "safe_subscribe_all_dexs_clearinghouse_state", return_value=state
+        ), patch.object(
+            self.service, "fetch_fills_result", return_value={"ok": True, "data": page, "error": ""}
+        ), patch.object(
+            self.service, "fetch_recent_fills_result", return_value={"ok": True, "data": [], "error": ""}
+        ), patch.object(
+            self.service, "fetch_open_orders_result", return_value={"ok": True, "data": [], "error": ""}
+        ), patch.object(
+            self.service, "fetch_portfolio_result", return_value={"ok": True, "data": {}, "error": ""}
+        ), patch.object(self.service, "fetch_wallet_role", return_value="user"):
+            return self.service.fetch_wallet_snapshot(tracked, **kwargs)
+
+    def capped_page(self) -> list[dict[str, object]]:
+        return [
+            {"coin": "BTC", "dir": "Open Long", "px": "1", "sz": "1", "time": NOW_MS, "tid": i}
+            for i in range(WALLET_WINDOW_FILL_CAP)
+        ]
+
+    def test_page_at_the_cap_is_flagged_truncated(self) -> None:
+        snapshot = self.snapshot(page=self.capped_page(), full_quality_refresh=True)
+        self.assertTrue(snapshot["qualityWindowTruncated"])
+        self.assertEqual(snapshot["qualityWindowFillCount"], WALLET_WINDOW_FILL_CAP)
+
+    def test_page_under_the_cap_is_not_truncated(self) -> None:
+        page = [{"coin": "BTC", "dir": "Open Long", "px": "1", "sz": "1", "time": NOW_MS, "tid": 1}]
+        snapshot = self.snapshot(page=page, full_quality_refresh=True)
+        self.assertFalse(snapshot["qualityWindowTruncated"])
+        self.assertEqual(snapshot["qualityWindowFillCount"], 1)
+
+    def test_flag_travels_through_the_quality_cache(self) -> None:
+        """The flag must be cached and restored alongside the metrics it describes."""
+        full = self.snapshot(page=self.capped_page(), full_quality_refresh=True)
+        cached = self.service.cached_wallet_quality_snapshot(full)
+        self.assertTrue(cached["qualityWindowTruncated"])
+
+        stale = self.snapshot(
+            page=[],
+            full_quality_refresh=False,
+            cached_snapshot=cached,
+        )
+        # A non-full-refresh cycle's portfolio fetch is skipped, so
+        # quality_refresh_succeeded is False and the cached quality fields -
+        # including qualityWindowTruncated - are restored as a unit.
+        self.assertTrue(stale["dataQuality"]["qualityCacheHit"])
+        self.assertTrue(stale["qualityWindowTruncated"])
+
+
 class SkippedFetchAccountingTests(unittest.TestCase):
     """A skipped fetch must not be reported as a failed one."""
 

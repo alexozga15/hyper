@@ -325,6 +325,8 @@ WALLET_CACHED_QUALITY_FIELDS = (
     "qualityTopWinConcentrationPct",
     "qualityHoldout6dEvents",
     "qualityHoldout6dNetPnl",
+    "qualityWindowTruncated",
+    "qualityWindowFillCount",
     "fills30d",
     "daysSinceLastFill",
     "holdingOnly30d",
@@ -1880,6 +1882,21 @@ class WalletTrackerService:
             "qualityTopWinConcentrationPct": round(quality_top_win_concentration_pct, 1),
             "qualityHoldout6dEvents": len(holdout_event_pnls),
             "qualityHoldout6dNetPnl": round(sum(holdout_event_pnls), 2),
+            # userFillsByTime caps at WALLET_WINDOW_FILL_CAP rows ascending from
+            # startTime with no pagination (see fetch_fills_result above), so a
+            # high-frequency wallet can exhaust the cap within the first hours of
+            # the 30-day window and every qualityXxx30d field above then
+            # describes only that opening slice, not 30 days. Measured on
+            # production wallet 0x31dea2516beee92135b96f464eeec3cf292a13f2: a
+            # 30-day request returned 2000 rows spanning 2026-08-14 14:58 to
+            # 16:52 - one hour 54 minutes, 0.3% of the requested window - and its
+            # qualityNetPnl30d of -3020.41 was a faithful sum over that ~2h
+            # slice, not the month. The point of this flag is not "the page was
+            # big", it is "these 30-day numbers may describe a couple of hours".
+            "qualityWindowTruncated": bool(
+                full_quality_refresh and fills_ok and len(fills) >= WALLET_WINDOW_FILL_CAP
+            ),
+            "qualityWindowFillCount": len(fills),
             "fills30d": fills_30d_count,
             "daysSinceLastFill": days_since_last_fill,
             "holdingOnly30d": holding_only_30d,
