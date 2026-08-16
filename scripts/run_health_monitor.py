@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +45,21 @@ PUBLISHED_SIGNAL_DROUGHT_DAYS = float(os.environ.get("PUBLISHED_SIGNAL_DROUGHT_D
 SENTIMENT_STALE_MINUTES = float(os.environ.get("SENTIMENT_STALE_MINUTES", "25"))
 
 
+@dataclass(frozen=True)
+class Issue:
+    """A detected health problem.
+
+    `key` is a stable identity for the *condition* (e.g. "cmm_rate_limited")
+    used to decide whether anything actually changed since the last check.
+    `text` is the human-readable line sent to Telegram and stored for
+    display; it may embed numbers (counts, hours remaining) that drift on
+    their own without the underlying condition being new.
+    """
+
+    key: str
+    text: str
+
+
 def latest_signal_start_ms(records: Any) -> int:
     """Newest `startedAt` in a signal-outcome record map, or 0 when there is none."""
     if not isinstance(records, dict):
@@ -64,29 +80,34 @@ def detect_health_issues(
     *,
     now_ms: int,
     disk_free_pct: float,
-) -> list[str]:
-    issues: list[str] = []
+) -> list[Issue]:
+    issues: list[Issue] = []
     state = alerts.get("state", {})
     if not isinstance(state, dict):
         state = {}
     last_checked = iso_to_ms(state.get("lastCheckedAt"))
     if last_checked <= 0 or now_ms - last_checked > SENTIMENT_STALE_MINUTES * 60 * 1000:
-        issues.append(f"sentiment check stale >{SENTIMENT_STALE_MINUTES:g}m")
+        issues.append(Issue("sentiment_stale", f"sentiment check stale >{SENTIMENT_STALE_MINUTES:g}m"))
     if float(runtime.get("cacheCoverage", 0)) < 0.8:
-        issues.append("wallet quality cache coverage <80%")
+        issues.append(Issue("quality_cache_coverage", "wallet quality cache coverage <80%"))
     if runtime.get("fillsGloballyDegraded"):
-        issues.append("wallet fills globally degraded")
+        issues.append(Issue("fills_degraded", "wallet fills globally degraded"))
     if disk_free_pct < 10:
-        issues.append("disk free space <10%")
+        issues.append(Issue("disk_low", "disk free space <10%"))
     untrusted_quality_window_wallets = int(runtime.get("untrustedQualityWindowWallets", 0))
     if untrusted_quality_window_wallets > 0:
-        issues.append(f"{untrusted_quality_window_wallets} wallets with untrusted quality window")
+        issues.append(
+            Issue(
+                "untrusted_quality_window",
+                f"{untrusted_quality_window_wallets} wallets with untrusted quality window",
+            )
+        )
     issues.extend(detect_signal_drought(state, now_ms=now_ms))
     issues.extend(detect_external_api_backoff(state, now_ms=now_ms))
     return issues
 
 
-def detect_external_api_backoff(state: dict[str, Any], *, now_ms: int) -> list[str]:
+def detect_external_api_backoff(state: dict[str, Any], *, now_ms: int) -> list[Issue]:
     """Flag CoinMarketMan or Moni sitting out a self-imposed backoff.
 
     Both back off for hours after a rate limit or an error, and both keep
@@ -94,12 +115,14 @@ def detect_external_api_backoff(state: dict[str, Any], *, now_ms: int) -> list[s
     every other angle. Only these two fields say that the signals being
     published are being confirmed against hours-old external data.
     """
-    issues: list[str] = []
+    issues: list[Issue] = []
     cmm = state.get("cmmSignals")
     if isinstance(cmm, dict):
         until_ms = iso_to_ms(cmm.get("rateLimitedUntil"))
         if until_ms > now_ms:
-            issues.append(f"CMM rate limited for another {format_hours(until_ms - now_ms)}")
+            issues.append(
+                Issue("cmm_rate_limited", f"CMM rate limited for another {format_hours(until_ms - now_ms)}")
+            )
 
     moni = state.get("moniSocial")
     # nextFetchAt is also set on success as an ordinary cache TTL, so only an
@@ -107,7 +130,9 @@ def detect_external_api_backoff(state: dict[str, Any], *, now_ms: int) -> list[s
     if isinstance(moni, dict) and str(moni.get("error") or "").strip():
         until_ms = iso_to_ms(moni.get("nextFetchAt"))
         if until_ms > now_ms:
-            issues.append(f"Moni backed off for another {format_hours(until_ms - now_ms)}")
+            issues.append(
+                Issue("moni_backoff", f"Moni backed off for another {format_hours(until_ms - now_ms)}")
+            )
     return issues
 
 
@@ -139,7 +164,7 @@ def dirty_checkout_paths(root: Path) -> list[str]:
     return [line[3:] for line in result.stdout.splitlines() if line[3:].strip()]
 
 
-def detect_signal_drought(state: dict[str, Any], *, now_ms: int) -> list[str]:
+def detect_signal_drought(state: dict[str, Any], *, now_ms: int) -> list[Issue]:
     """Flag a signal pipeline that has gone quiet.
 
     Only meaningful once the sentiment check has run at least once - a fresh
@@ -147,7 +172,7 @@ def detect_signal_drought(state: dict[str, Any], *, now_ms: int) -> list[str]:
     """
     if iso_to_ms(state.get("lastCheckedAt")) <= 0:
         return []
-    issues: list[str] = []
+    issues: list[Issue] = []
     published_at = max(
         latest_signal_start_ms(state.get("signalOutcomes")),
         latest_signal_start_ms(state.get("candidateSignalOutcomes")),
@@ -156,11 +181,18 @@ def detect_signal_drought(state: dict[str, Any], *, now_ms: int) -> list[str]:
 
     silence_ms = int(SIGNAL_PIPELINE_SILENCE_HOURS * 60 * 60 * 1000)
     if pipeline_at <= 0 or now_ms - pipeline_at > silence_ms:
-        issues.append(f"no signal of any tier in >{SIGNAL_PIPELINE_SILENCE_HOURS:g}h")
+        issues.append(
+            Issue("signal_pipeline_silent", f"no signal of any tier in >{SIGNAL_PIPELINE_SILENCE_HOURS:g}h")
+        )
 
     drought_ms = int(PUBLISHED_SIGNAL_DROUGHT_DAYS * 24 * 60 * 60 * 1000)
     if published_at <= 0 or now_ms - published_at > drought_ms:
-        issues.append(f"no published or candidate signal in >{PUBLISHED_SIGNAL_DROUGHT_DAYS:g}d")
+        issues.append(
+            Issue(
+                "signal_drought_published",
+                f"no published or candidate signal in >{PUBLISHED_SIGNAL_DROUGHT_DAYS:g}d",
+            )
+        )
     return issues
 
 
@@ -177,20 +209,37 @@ def main() -> int:
     if int(runtime.get("rateLimitedWallets", 0)) > 0:
         first_seen.setdefault("rate_limit", now_ms)
         if now_ms - int(first_seen["rate_limit"]) > 30 * 60 * 1000:
-            issues.append("Hyperliquid HTTP 429 persisted >30m")
+            issues.append(Issue("http_429", "Hyperliquid HTTP 429 persisted >30m"))
     else:
         first_seen.pop("rate_limit", None)
 
     dirty = dirty_checkout_paths(ROOT)
     if dirty:
-        issues.append("deploy checkout dirty, ff-only pull blocked: " + ", ".join(sorted(dirty)[:5]))
+        issues.append(
+            Issue(
+                "dirty_checkout",
+                "deploy checkout dirty, ff-only pull blocked: " + ", ".join(sorted(dirty)[:5]),
+            )
+        )
 
+    # Dedupe on the stable keys, not the rendered text: several issues embed a
+    # number that drifts on its own (a wallet count draining, a backoff timer
+    # counting down), and re-notifying on every such drift is the bug this
+    # guards against. `issueKeys` is new; state written by the prior version
+    # of this script has only `issues` (rendered strings), so the very first
+    # run after deploying this change reads `issueKeys` as absent, treats it
+    # as "unknown prior state", and sends one message. That is expected and
+    # self-correcting - every run after that compares keys against keys.
     prior_issues = list(prior.get("issues", [])) if isinstance(prior, dict) else []
-    changed = issues != prior_issues
+    raw_prior_keys = prior.get("issueKeys") if isinstance(prior, dict) else None
+    prior_issue_keys = raw_prior_keys if isinstance(raw_prior_keys, list) else None
+    issue_keys = [issue.key for issue in issues]
+    changed = prior_issue_keys is None or issue_keys != prior_issue_keys
     payload = {
         "checkedAt": now_iso(),
         "healthy": not issues,
-        "issues": issues,
+        "issues": [issue.text for issue in issues],
+        "issueKeys": issue_keys,
         "firstSeen": first_seen,
         "diskFreePct": round(free_pct, 1),
     }
@@ -201,7 +250,8 @@ def main() -> int:
     if changed and bot_token and chat_id:
         service = WalletTrackerService(WalletStore(WALLETS_FILE), HyperliquidClient())
         if issues:
-            service.send_telegram_message(bot_token, chat_id, "Wallet monitor alert\n- " + "\n- ".join(issues))
+            texts = [issue.text for issue in issues]
+            service.send_telegram_message(bot_token, chat_id, "Wallet monitor alert\n- " + "\n- ".join(texts))
         elif prior_issues:
             service.send_telegram_message(bot_token, chat_id, "Wallet monitor recovered")
     print(json.dumps(payload, indent=2))
