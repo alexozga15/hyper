@@ -1191,6 +1191,73 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(top_promoted["candidateTier"], "actionable")
         self.assertEqual(top_promoted["candidateReason"], "two_top_wallets")
 
+    def test_candidate_below_threshold_cmm_score_is_recorded_not_zeroed(self) -> None:
+        base = {"coin": "HYPE", "side": "long", "candidateTier": "watch", "candidateReason": "one_top_wallet"}
+
+        result = self.service.apply_cmm_confirmation_to_summary(
+            {"signals": [], "candidateSignals": [base]},
+            {
+                "enabled": True,
+                "generatedAt": "2026-08-02T00:00:00Z",
+                "signals": [],
+                "scoredProbabilities": {"cmm:HYPE:long": 27.7},
+            },
+        )["candidateSignals"][0]
+
+        self.assertEqual(result["cmmScoreStatus"], "scored")
+        self.assertEqual(result["cmmScoredProbability"], 27.7)
+        # The legacy zero-fabricating field is untouched: HYPE never entered
+        # cmm_by_key (it scored below min_probability), so this stays 0.0.
+        self.assertEqual(result["cmmProbabilityScore"], 0.0)
+
+    def test_candidate_absent_from_present_scored_map_gets_no_opinion(self) -> None:
+        base = {"coin": "DOGE", "side": "long", "candidateTier": "watch", "candidateReason": "one_top_wallet"}
+
+        result = self.service.apply_cmm_confirmation_to_summary(
+            {"signals": [], "candidateSignals": [base]},
+            {
+                "enabled": True,
+                "generatedAt": "2026-08-02T00:00:00Z",
+                "signals": [],
+                "scoredProbabilities": {"cmm:HYPE:long": 27.7},
+            },
+        )["candidateSignals"][0]
+
+        self.assertEqual(result["cmmScoreStatus"], "no_opinion")
+        self.assertIsNone(result["cmmScoredProbability"])
+
+    def test_candidate_with_no_cmm_snapshot_is_not_consulted(self) -> None:
+        base = {"coin": "HYPE", "side": "long", "candidateTier": "watch", "candidateReason": "one_top_wallet"}
+
+        result = self.service.apply_cmm_confirmation_to_summary(
+            {"signals": [], "candidateSignals": [base]},
+            {"enabled": False, "error": "Missing COINMARKETMAN_API_TOKEN", "signals": []},
+        )["candidateSignals"][0]
+
+        self.assertEqual(result["cmmScoreStatus"], "not_consulted")
+        self.assertIsNone(result["cmmScoredProbability"])
+
+    def test_candidate_from_pre_deploy_cache_without_scored_map_is_unknown(self) -> None:
+        # A cmm_summary written by the previous version of the code never had a
+        # "scoredProbabilities" key. Every cache entry looks like this for up to
+        # CMM_SIGNAL_CACHE_TTL_MINUTES (60 minutes) after this change deploys, so
+        # this state must be distinguishable from a genuine "no opinion" scan.
+        base = {"coin": "HYPE", "side": "long", "candidateTier": "watch", "candidateReason": "one_top_wallet"}
+        legacy_cmm_summary = {
+            "enabled": True,
+            "generatedAt": "2026-08-02T00:00:00Z",
+            "signals": [],
+        }
+        self.assertNotIn("scoredProbabilities", legacy_cmm_summary)
+
+        result = self.service.apply_cmm_confirmation_to_summary(
+            {"signals": [], "candidateSignals": [base]},
+            legacy_cmm_summary,
+        )["candidateSignals"][0]
+
+        self.assertEqual(result["cmmScoreStatus"], "unknown")
+        self.assertIsNone(result["cmmScoredProbability"])
+
     def test_candidate_opposite_fresh_flow_is_blocked(self) -> None:
         now_ms = 1_700_000_000_000
         snapshots = []
