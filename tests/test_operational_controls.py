@@ -12,6 +12,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 from scripts.run_health_monitor import (
+    RATE_LIMIT_CLEAR_CHECKS,
     Issue,
     detect_external_api_backoff,
     detect_health_issues,
@@ -639,6 +640,89 @@ class OperationalControlTests(unittest.TestCase):
             alerts=alerts, runtime=runtime, prior_state=first_saved
         )
         second_service.send_telegram_message.assert_not_called()
+
+    @staticmethod
+    def _stale_rate_limit_prior(**extra: Any) -> dict[str, Any]:
+        """Prior state where `rate_limit` has already been accumulating for
+
+        31 minutes, so the >30m condition is already active and any test
+        built on this fixture is only exercising the clear-side hysteresis.
+        """
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        prior: dict[str, Any] = {
+            "issues": ["Hyperliquid HTTP 429 persisted >30m"],
+            "issueKeys": ["http_429"],
+            "firstSeen": {"rate_limit": now_ms - 31 * 60 * 1000},
+        }
+        prior.update(extra)
+        return prior
+
+    def test_one_clean_check_does_not_clear_the_rate_limit_condition(self) -> None:
+        alerts = self._fresh_alerts()
+        saved, service = self._run_monitor(
+            alerts=alerts,
+            runtime={"cacheCoverage": 1.0, "rateLimitedWallets": 0},
+            prior_state=self._stale_rate_limit_prior(rateLimitClearStreak=0),
+        )
+        self.assertIn("http_429", saved["issueKeys"])
+        self.assertIn("rate_limit", saved["firstSeen"])
+        self.assertEqual(saved["rateLimitClearStreak"], 1)
+        service.send_telegram_message.assert_not_called()
+
+    def test_n_consecutive_clean_checks_clear_the_condition(self) -> None:
+        alerts = self._fresh_alerts()
+        prior = self._stale_rate_limit_prior(rateLimitClearStreak=0)
+        saved: dict[str, Any] = {}
+        service = MagicMock()
+        for _ in range(RATE_LIMIT_CLEAR_CHECKS):
+            saved, service = self._run_monitor(
+                alerts=alerts,
+                runtime={"cacheCoverage": 1.0, "rateLimitedWallets": 0},
+                prior_state=prior,
+            )
+            prior = saved
+        self.assertNotIn("http_429", saved["issueKeys"])
+        self.assertNotIn("rate_limit", saved["firstSeen"])
+        self.assertEqual(saved["rateLimitClearStreak"], 0)
+        service.send_telegram_message.assert_called_once_with("tok", "chat", "Wallet monitor recovered")
+
+    def test_a_rate_limited_check_partway_through_resets_the_streak(self) -> None:
+        alerts = self._fresh_alerts()
+        original_prior = self._stale_rate_limit_prior(rateLimitClearStreak=0)
+        original_first_seen = original_prior["firstSeen"]["rate_limit"]
+        after_clean, _service = self._run_monitor(
+            alerts=alerts,
+            runtime={"cacheCoverage": 1.0, "rateLimitedWallets": 0},
+            prior_state=original_prior,
+        )
+        self.assertEqual(after_clean["rateLimitClearStreak"], 1)
+        after_rate_limited, _service = self._run_monitor(
+            alerts=alerts,
+            runtime={"cacheCoverage": 1.0, "rateLimitedWallets": 2},
+            prior_state=after_clean,
+        )
+        self.assertEqual(after_rate_limited["rateLimitClearStreak"], 0)
+        self.assertEqual(after_rate_limited["firstSeen"]["rate_limit"], original_first_seen)
+        self.assertIn("http_429", after_rate_limited["issueKeys"])
+
+    def test_state_missing_the_streak_counter_does_not_clear_on_first_clean_check(self) -> None:
+        """Deploy-transition case: state written by the prior version of
+
+        this script has no `rateLimitClearStreak` key at all. That must read
+        as 0 - a fresh streak starting now - not as "already satisfied".
+        """
+        alerts = self._fresh_alerts()
+        prior = self._stale_rate_limit_prior()
+        self.assertNotIn("rateLimitClearStreak", prior)
+        saved, service = self._run_monitor(
+            alerts=alerts,
+            runtime={"cacheCoverage": 1.0, "rateLimitedWallets": 0},
+            prior_state=prior,
+        )
+        self.assertIn("http_429", saved["issueKeys"])
+        self.assertIn("rate_limit", saved["firstSeen"])
+        self.assertEqual(saved["rateLimitClearStreak"], 1)
+        service.send_telegram_message.assert_not_called()
 
     def test_rate_limiter_spaces_requests(self) -> None:
         limiter = RequestRateLimiter(2)
