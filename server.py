@@ -5298,6 +5298,7 @@ class WalletTrackerService:
         contrarian_segment_ids: list[int],
         min_probability: float,
         diagnostics: dict[str, Any] | None = None,
+        scored_out: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         coin_filter = {coin.upper() for coin in coins}
         segment_filter = set(segment_ids)
@@ -5336,6 +5337,8 @@ class WalletTrackerService:
             signal = self.score_cmm_components(coin, components, contrarian_components=contrarian_components)
             if signal and diagnostics is not None:
                 diagnostics["scoredCandidates"] += 1
+            if signal and scored_out is not None:
+                scored_out.append(signal)
             if signal and to_float(signal.get("totalValue")) < CMM_SIGNAL_MIN_TOTAL_VALUE:
                 if diagnostics is not None:
                     diagnostics["lowValueCandidates"] += 1
@@ -5464,6 +5467,7 @@ class WalletTrackerService:
         timeframe = position_recency_timeframe or os.environ.get("CMM_SIGNAL_POSITION_RECENCY", "7d")
         signals: list[dict[str, Any]] = []
         below_threshold_signals: list[dict[str, Any]] = []
+        scored_candidates: list[dict[str, Any]] = []
         errors: list[str] = []
         heatmap_failed = False
         heatmap_quota_limited = False
@@ -5485,6 +5489,7 @@ class WalletTrackerService:
                 contrarian_segment_ids=contrarian_segments,
                 min_probability=0.0,
                 diagnostics=diagnostics,
+                scored_out=scored_candidates,
             )
             if self.cmm_trend_enrichment_enabled():
                 all_heatmap_signals = self.enrich_cmm_signals_with_trends(all_heatmap_signals, timeframe)
@@ -5529,8 +5534,22 @@ class WalletTrackerService:
                 if component:
                     components.append(component)
             signal = self.score_cmm_components(str(coin), components)
+            if signal:
+                scored_candidates.append(signal)
             if signal and to_float(signal.get("probabilityScore")) >= min_probability:
                 signals.append(signal)
+
+        scored_probabilities: dict[str, float] = {}
+        for candidate in scored_candidates:
+            if not isinstance(candidate, dict):
+                continue
+            key = f'cmm:{normalize_cmm_coin(candidate.get("coin"))}:{str(candidate.get("side") or "").lower()}'
+            scored_probabilities.setdefault(key, round(to_float(candidate.get("probabilityScore")), 1))
+        for candidate in signals + below_threshold_signals:
+            if not isinstance(candidate, dict):
+                continue
+            key = f'cmm:{normalize_cmm_coin(candidate.get("coin"))}:{str(candidate.get("side") or "").lower()}'
+            scored_probabilities[key] = round(to_float(candidate.get("probabilityScore")), 1)
 
         signals.sort(
             key=lambda item: (
@@ -5562,6 +5581,7 @@ class WalletTrackerService:
                 reverse=True,
             )[:5],
             "signalCount": len(signals),
+            "scoredProbabilities": scored_probabilities,
             "diagnostics": diagnostics,
             "error": "; ".join(errors[:3]),
             "generatedAt": now_iso(),
@@ -6025,11 +6045,15 @@ class WalletTrackerService:
                     **item,
                     "cmmConfirmation": "unavailable",
                     "cmmSnapshotGeneratedAt": cmm_summary.get("generatedAt", ""),
+                    "cmmScoredProbability": None,
+                    "cmmScoreStatus": "not_consulted",
                 }
                 for item in summary.get("candidateSignals", [])
                 if isinstance(item, dict)
             ]
             return {**summary, "candidateSignals": candidates, "candidateSignalCount": len(candidates)}
+        cmm_scored_probabilities = cmm_summary.get("scoredProbabilities")
+        cmm_scored_probabilities_available = isinstance(cmm_scored_probabilities, dict)
         cmm_by_key = {
             f'cmm:{normalize_cmm_coin(signal.get("coin"))}:{str(signal.get("side") or "").lower()}': signal
             for signal in cmm_summary.get("signals", [])
@@ -6124,6 +6148,16 @@ class WalletTrackerService:
                 tier = "actionable"
                 reason = "cmm_confirmed"
                 cmm_confirmation = "confirmed"
+            score_key = f"cmm:{coin}:{side}"
+            if not cmm_scored_probabilities_available:
+                cmm_score_status = "unknown"
+                cmm_scored_probability = None
+            elif score_key in cmm_scored_probabilities:
+                cmm_score_status = "scored"
+                cmm_scored_probability = to_float(cmm_scored_probabilities[score_key])
+            else:
+                cmm_score_status = "no_opinion"
+                cmm_scored_probability = None
             candidate_signals.append(
                 {
                     **candidate,
@@ -6137,6 +6171,8 @@ class WalletTrackerService:
                         to_float((same_cmm or opposite_cmm or {}).get("cohortCount"))
                     ),
                     "cmmSnapshotGeneratedAt": cmm_summary.get("generatedAt", ""),
+                    "cmmScoredProbability": cmm_scored_probability,
+                    "cmmScoreStatus": cmm_score_status,
                 }
             )
         candidate_signals.sort(
