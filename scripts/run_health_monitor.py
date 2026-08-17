@@ -44,6 +44,16 @@ PUBLISHED_SIGNAL_DROUGHT_DAYS = float(os.environ.get("PUBLISHED_SIGNAL_DROUGHT_D
 # tolerates two consecutive misses before complaining.
 SENTIMENT_STALE_MINUTES = float(os.environ.get("SENTIMENT_STALE_MINUTES", "25"))
 
+# Throttling on this box is intermittent, not steady: over the last 24 hours
+# only 13 of 88 sentiment cycles (about 15%) were completely free of rate
+# limiting. A single clean check is therefore not evidence that the trouble
+# has actually stopped - it is the expected background noise - so clearing
+# the accumulated `rate_limit` timestamp on one clean check just restarts the
+# 30-minute countdown from scratch and makes the alert oscillate forever.
+# This many *consecutive* clean checks are required before the condition is
+# considered resolved.
+RATE_LIMIT_CLEAR_CHECKS = int(os.environ.get("RATE_LIMIT_CLEAR_CHECKS", "3"))
+
 
 @dataclass(frozen=True)
 class Issue:
@@ -206,12 +216,28 @@ def main() -> int:
     prior = load_json_file(MONITOR_STATE_FILE, {})
     first_seen = dict(prior.get("firstSeen", {})) if isinstance(prior.get("firstSeen"), dict) else {}
 
+    # `rateLimitClearStreak` lives at the top level of the state payload, not
+    # inside `firstSeen`: every value in `firstSeen` is a millisecond
+    # timestamp that callers read back with `int(...)`, and folding a streak
+    # counter in there would be a type trap for the next reader. State
+    # written by the prior version of this script has no such key at all;
+    # reading it as 0 is correct there too - it just means the first clean
+    # check after deploy starts a fresh streak instead of clearing the
+    # condition immediately, which is what "unknown prior state" should mean
+    # for a counter that has never been anything but zero.
+    rate_limit_clear_streak = int(prior.get("rateLimitClearStreak", 0)) if isinstance(prior, dict) else 0
+
     if int(runtime.get("rateLimitedWallets", 0)) > 0:
         first_seen.setdefault("rate_limit", now_ms)
-        if now_ms - int(first_seen["rate_limit"]) > 30 * 60 * 1000:
-            issues.append(Issue("http_429", "Hyperliquid HTTP 429 persisted >30m"))
-    else:
-        first_seen.pop("rate_limit", None)
+        rate_limit_clear_streak = 0
+    elif "rate_limit" in first_seen:
+        rate_limit_clear_streak += 1
+        if rate_limit_clear_streak >= RATE_LIMIT_CLEAR_CHECKS:
+            first_seen.pop("rate_limit", None)
+            rate_limit_clear_streak = 0
+
+    if "rate_limit" in first_seen and now_ms - int(first_seen["rate_limit"]) > 30 * 60 * 1000:
+        issues.append(Issue("http_429", "Hyperliquid HTTP 429 persisted >30m"))
 
     dirty = dirty_checkout_paths(ROOT)
     if dirty:
@@ -241,6 +267,7 @@ def main() -> int:
         "issues": [issue.text for issue in issues],
         "issueKeys": issue_keys,
         "firstSeen": first_seen,
+        "rateLimitClearStreak": rate_limit_clear_streak,
         "diskFreePct": round(free_pct, 1),
     }
     save_json_file(MONITOR_STATE_FILE, payload)
