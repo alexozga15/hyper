@@ -252,8 +252,20 @@ def main() -> int:
         wallets_tracked > 0
         and fills_fetch_failed_wallets >= FILL_FETCH_FAIL_ALERT_FRACTION * wallets_tracked
     )
+    # The cap is set above the raise threshold, not equal to it: a cap equal
+    # to the threshold means a raised alert's streak can only ever be sitting
+    # exactly at the threshold, so a single clean check always drops it below
+    # and clears the alert in one step - no real hysteresis at all. Capping
+    # at 2N-1 gives the streak headroom to saturate above the threshold
+    # during a sustained run of breaches, so clearing a saturated alert takes
+    # the same N consecutive clean checks it took to raise it. This is the
+    # anti-oscillation property the whole counter exists for: an input that
+    # alternates breach/clean every check keeps the streak hovering around
+    # the threshold (2-3 for the N=2 default) instead of never reaching it or
+    # instantly dropping out of it, so the alert stays steadily raised
+    # instead of toggling on and off every run.
     if fill_fetch_breach:
-        fill_fetch_fail_streak = min(fill_fetch_fail_streak + 1, FILL_FETCH_FAIL_CONFIRM_CHECKS)
+        fill_fetch_fail_streak = min(fill_fetch_fail_streak + 1, 2 * FILL_FETCH_FAIL_CONFIRM_CHECKS - 1)
     else:
         fill_fetch_fail_streak = max(fill_fetch_fail_streak - 1, 0)
 

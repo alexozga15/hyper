@@ -685,16 +685,14 @@ class OperationalControlTests(unittest.TestCase):
         message = service.send_telegram_message.call_args.args[2]
         self.assertIn("5 of 10 wallets failed fill fetch", message)
 
-    def test_one_clean_check_clears_a_freshly_raised_fill_fetch_alert(self) -> None:
-        """`fillFetchFailStreak` is capped at FILL_FETCH_FAIL_CONFIRM_CHECKS,
+    def test_unsaturated_raise_clears_in_one_clean_check(self) -> None:
+        """Pins the boundary deliberately: an alert raised by exactly
 
-        the same constant used to raise the alert, so a raised alert's
-        streak can only ever be sitting exactly at that cap - one clean
-        check always decrements it below the raise threshold and clears
-        the alert immediately. (A design that actually needed N consecutive
-        clean checks to clear, matching N consecutive breaches to raise,
-        would need the cap decoupled from the raise threshold; as specified
-        the two share one constant, so clearing is always one check.)
+        FILL_FETCH_FAIL_CONFIRM_CHECKS breaches (streak == threshold, not
+        yet saturated at the 2N-1 cap) clears after a single clean check,
+        since one decrement already drops it below the threshold. Only a
+        *saturated* streak gets the multi-check hysteresis on the way down
+        (see test_saturated_alert_needs_two_consecutive_clean_checks_to_clear).
         """
         alerts = self._fresh_alerts()
         breach_runtime = {"cacheCoverage": 1.0, "walletsTracked": 10, "fillsFetchFailedWallets": 5}
@@ -704,10 +702,46 @@ class OperationalControlTests(unittest.TestCase):
                 alerts=alerts, runtime=breach_runtime, prior_state=raised_prior
             )
         self.assertIn("fill_fetch_failing", raised_prior["issueKeys"])
+        self.assertEqual(raised_prior["fillFetchFailStreak"], FILL_FETCH_FAIL_CONFIRM_CHECKS)
         clean_runtime = {"cacheCoverage": 1.0, "walletsTracked": 10, "fillsFetchFailedWallets": 0}
         saved, service = self._run_monitor(alerts=alerts, runtime=clean_runtime, prior_state=raised_prior)
         self.assertNotIn("fill_fetch_failing", saved["issueKeys"])
         self.assertEqual(saved["fillFetchFailStreak"], FILL_FETCH_FAIL_CONFIRM_CHECKS - 1)
+        service.send_telegram_message.assert_called_once_with("tok", "chat", "Wallet monitor recovered")
+
+    def test_saturated_alert_needs_two_consecutive_clean_checks_to_clear(self) -> None:
+        """The streak cap is 2N-1, not N, so a sustained run of breaches
+
+        saturates the streak above the raise threshold before topping out.
+        Clearing a saturated alert then takes the same N consecutive clean
+        checks it took to raise it, which is the whole anti-oscillation
+        point of the cap: an input alternating breach/clean every check
+        keeps the streak hovering at the threshold instead of toggling the
+        alert on and off every run.
+        """
+        alerts = self._fresh_alerts()
+        breach_runtime = {"cacheCoverage": 1.0, "walletsTracked": 10, "fillsFetchFailedWallets": 5}
+        cap = 2 * FILL_FETCH_FAIL_CONFIRM_CHECKS - 1
+        prior = {"issues": [], "issueKeys": []}
+        saved: dict[str, Any] = {}
+        # One extra breach beyond the raise threshold to actually saturate
+        # the streak at the cap rather than leaving it sitting at the
+        # threshold (the unsaturated case covered above).
+        for _ in range(FILL_FETCH_FAIL_CONFIRM_CHECKS + 1):
+            saved, _service = self._run_monitor(alerts=alerts, runtime=breach_runtime, prior_state=prior)
+            prior = saved
+        self.assertEqual(saved["fillFetchFailStreak"], cap)
+        self.assertIn("fill_fetch_failing", saved["issueKeys"])
+
+        clean_runtime = {"cacheCoverage": 1.0, "walletsTracked": 10, "fillsFetchFailedWallets": 0}
+        first_clean, service = self._run_monitor(alerts=alerts, runtime=clean_runtime, prior_state=saved)
+        self.assertIn("fill_fetch_failing", first_clean["issueKeys"])
+        self.assertEqual(first_clean["fillFetchFailStreak"], cap - 1)
+        service.send_telegram_message.assert_not_called()
+
+        second_clean, service = self._run_monitor(alerts=alerts, runtime=clean_runtime, prior_state=first_clean)
+        self.assertNotIn("fill_fetch_failing", second_clean["issueKeys"])
+        self.assertEqual(second_clean["fillFetchFailStreak"], cap - 2)
         service.send_telegram_message.assert_called_once_with("tok", "chat", "Wallet monitor recovered")
 
     def test_streak_does_not_grow_without_bound_across_many_breaches(self) -> None:
@@ -715,10 +749,10 @@ class OperationalControlTests(unittest.TestCase):
         breach_runtime = {"cacheCoverage": 1.0, "walletsTracked": 10, "fillsFetchFailedWallets": 5}
         prior = {"issues": [], "issueKeys": []}
         saved: dict[str, Any] = {}
-        for _ in range(FILL_FETCH_FAIL_CONFIRM_CHECKS + 3):
+        for _ in range(2 * FILL_FETCH_FAIL_CONFIRM_CHECKS + 3):
             saved, _service = self._run_monitor(alerts=alerts, runtime=breach_runtime, prior_state=prior)
             prior = saved
-        self.assertEqual(saved["fillFetchFailStreak"], FILL_FETCH_FAIL_CONFIRM_CHECKS)
+        self.assertEqual(saved["fillFetchFailStreak"], 2 * FILL_FETCH_FAIL_CONFIRM_CHECKS - 1)
 
     def test_missing_or_zero_wallets_tracked_never_breaches(self) -> None:
         alerts = self._fresh_alerts()
