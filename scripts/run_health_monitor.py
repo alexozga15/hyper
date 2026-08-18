@@ -270,10 +270,17 @@ def main() -> int:
         fill_fetch_fail_streak = max(fill_fetch_fail_streak - 1, 0)
 
     if fill_fetch_fail_streak >= FILL_FETCH_FAIL_CONFIRM_CHECKS:
+        # The streak stays above the threshold on checks that are not
+        # themselves breaching - that is the hysteresis doing its job - and
+        # rendering the current count on such a check produces a line reading
+        # "0 of 37 wallets failed fill fetch" underneath a raised alert. Name
+        # the condition instead whenever this check is not the breaching one.
         issues.append(
             Issue(
                 "fill_fetch_failing",
-                f"{fills_fetch_failed_wallets} of {wallets_tracked} wallets failed fill fetch",
+                f"{fills_fetch_failed_wallets} of {wallets_tracked} wallets failed fill fetch"
+                if fill_fetch_breach
+                else "fill fetch failures persisting",
             )
         )
 

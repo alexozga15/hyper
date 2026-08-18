@@ -744,6 +744,24 @@ class OperationalControlTests(unittest.TestCase):
         self.assertEqual(second_clean["fillFetchFailStreak"], cap - 2)
         service.send_telegram_message.assert_called_once_with("tok", "chat", "Wallet monitor recovered")
 
+    def test_held_alert_does_not_report_a_zero_count(self) -> None:
+        """While hysteresis holds a saturated alert up, the current check may
+
+        report zero failures. Rendering that count would put the line
+        "0 of 10 wallets failed fill fetch" underneath a raised alert, so the
+        condition is named instead on any check that is not itself breaching.
+        """
+        alerts = self._fresh_alerts()
+        breach_runtime = {"cacheCoverage": 1.0, "walletsTracked": 10, "fillsFetchFailedWallets": 5}
+        prior: dict[str, Any] = {"issues": [], "issueKeys": []}
+        for _ in range(FILL_FETCH_FAIL_CONFIRM_CHECKS + 1):
+            prior, _service = self._run_monitor(alerts=alerts, runtime=breach_runtime, prior_state=prior)
+        clean_runtime = {"cacheCoverage": 1.0, "walletsTracked": 10, "fillsFetchFailedWallets": 0}
+        held, _service = self._run_monitor(alerts=alerts, runtime=clean_runtime, prior_state=prior)
+        self.assertIn("fill_fetch_failing", held["issueKeys"])
+        self.assertIn("fill fetch failures persisting", held["issues"])
+        self.assertNotIn("0 of 10 wallets failed fill fetch", held["issues"])
+
     def test_streak_does_not_grow_without_bound_across_many_breaches(self) -> None:
         alerts = self._fresh_alerts()
         breach_runtime = {"cacheCoverage": 1.0, "walletsTracked": 10, "fillsFetchFailedWallets": 5}
