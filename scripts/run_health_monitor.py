@@ -44,15 +44,31 @@ PUBLISHED_SIGNAL_DROUGHT_DAYS = float(os.environ.get("PUBLISHED_SIGNAL_DROUGHT_D
 # tolerates two consecutive misses before complaining.
 SENTIMENT_STALE_MINUTES = float(os.environ.get("SENTIMENT_STALE_MINUTES", "25"))
 
-# Throttling on this box is intermittent, not steady: over the last 24 hours
-# only 13 of 88 sentiment cycles (about 15%) were completely free of rate
-# limiting. A single clean check is therefore not evidence that the trouble
-# has actually stopped - it is the expected background noise - so clearing
-# the accumulated `rate_limit` timestamp on one clean check just restarts the
-# 30-minute countdown from scratch and makes the alert oscillate forever.
-# This many *consecutive* clean checks are required before the condition is
-# considered resolved.
-RATE_LIMIT_CLEAR_CHECKS = int(os.environ.get("RATE_LIMIT_CLEAR_CHECKS", "3"))
+# HTTP 429s are background noise on this box, not a signal of anything
+# degrading: 118 sentiment cycles overnight produced 0 errors and only 1
+# failed fill fetch. The alert on it oscillated between
+# ["untrusted_quality_window"] and [..., "http_429"] and re-sent repeatedly
+# (23:15, 00:26, 05:00, 06:01, 06:41), so it has been retired in favor of the
+# outcome-based `fill_fetch_failing` check below, which tracks what actually
+# degrades rather than a proxy for it.
+
+# The fraction of tracked wallets whose fill fetch must be failing before it
+# is treated as a real degradation rather than the ordinary background rate
+# (measured: 1 failed fill fetch across 118 overnight cycles).
+FILL_FETCH_FAIL_ALERT_FRACTION = float(os.environ.get("FILL_FETCH_FAIL_ALERT_FRACTION", "0.25"))
+# Consecutive breaching (or clearing) checks required before the condition
+# raises (or clears), giving the same symmetric hysteresis the retired
+# rate-limit alert needed: a count hovering at the threshold must not
+# oscillate the alert on and off every run.
+FILL_FETCH_FAIL_CONFIRM_CHECKS = int(os.environ.get("FILL_FETCH_FAIL_CONFIRM_CHECKS", "2"))
+
+# The standing count of wallets with an untrusted quality window on this box
+# (2-4) is permanent background noise, not a problem - alerting on any
+# nonzero count kept the monitor permanently unhealthy. Fire only once a
+# meaningful fraction of tracked wallets are affected; the max(3, ...) floor
+# keeps the check meaningful when walletsTracked is missing or small. With 37
+# tracked wallets the threshold is 7, so the standing count of 2 goes quiet.
+UNTRUSTED_QUALITY_ALERT_FRACTION = float(os.environ.get("UNTRUSTED_QUALITY_ALERT_FRACTION", "0.2"))
 
 
 @dataclass(frozen=True)
@@ -105,7 +121,12 @@ def detect_health_issues(
     if disk_free_pct < 10:
         issues.append(Issue("disk_low", "disk free space <10%"))
     untrusted_quality_window_wallets = int(runtime.get("untrustedQualityWindowWallets", 0))
-    if untrusted_quality_window_wallets > 0:
+    # Fire on a systemic breakdown, not the standing background count (see
+    # UNTRUSTED_QUALITY_ALERT_FRACTION above for the measurement behind this).
+    untrusted_quality_threshold = max(
+        3, int(UNTRUSTED_QUALITY_ALERT_FRACTION * int(runtime.get("walletsTracked", 0)))
+    )
+    if untrusted_quality_window_wallets >= untrusted_quality_threshold:
         issues.append(
             Issue(
                 "untrusted_quality_window",
@@ -214,30 +235,35 @@ def main() -> int:
     free_pct = disk.free / max(disk.total, 1) * 100
     issues = detect_health_issues(alerts, runtime, now_ms=now_ms, disk_free_pct=free_pct)
     prior = load_json_file(MONITOR_STATE_FILE, {})
-    first_seen = dict(prior.get("firstSeen", {})) if isinstance(prior.get("firstSeen"), dict) else {}
 
-    # `rateLimitClearStreak` lives at the top level of the state payload, not
-    # inside `firstSeen`: every value in `firstSeen` is a millisecond
-    # timestamp that callers read back with `int(...)`, and folding a streak
-    # counter in there would be a type trap for the next reader. State
-    # written by the prior version of this script has no such key at all;
-    # reading it as 0 is correct there too - it just means the first clean
-    # check after deploy starts a fresh streak instead of clearing the
-    # condition immediately, which is what "unknown prior state" should mean
-    # for a counter that has never been anything but zero.
-    rate_limit_clear_streak = int(prior.get("rateLimitClearStreak", 0)) if isinstance(prior, dict) else 0
+    # State written by the currently deployed version has no such key; that
+    # is correctly read as 0 - the first breaching check after deploy starts
+    # a fresh streak rather than raising immediately, which is what "unknown
+    # prior state" should mean for a counter that has never been anything
+    # but zero.
+    fill_fetch_fail_streak = int(prior.get("fillFetchFailStreak", 0)) if isinstance(prior, dict) else 0
 
-    if int(runtime.get("rateLimitedWallets", 0)) > 0:
-        first_seen.setdefault("rate_limit", now_ms)
-        rate_limit_clear_streak = 0
-    elif "rate_limit" in first_seen:
-        rate_limit_clear_streak += 1
-        if rate_limit_clear_streak >= RATE_LIMIT_CLEAR_CHECKS:
-            first_seen.pop("rate_limit", None)
-            rate_limit_clear_streak = 0
+    # walletsTracked absent or 0 means a fresh install or an unreadable
+    # runtime file, not a degradation - never treat that as a breach, and
+    # never divide by it.
+    wallets_tracked = int(runtime.get("walletsTracked", 0))
+    fills_fetch_failed_wallets = int(runtime.get("fillsFetchFailedWallets", 0))
+    fill_fetch_breach = (
+        wallets_tracked > 0
+        and fills_fetch_failed_wallets >= FILL_FETCH_FAIL_ALERT_FRACTION * wallets_tracked
+    )
+    if fill_fetch_breach:
+        fill_fetch_fail_streak = min(fill_fetch_fail_streak + 1, FILL_FETCH_FAIL_CONFIRM_CHECKS)
+    else:
+        fill_fetch_fail_streak = max(fill_fetch_fail_streak - 1, 0)
 
-    if "rate_limit" in first_seen and now_ms - int(first_seen["rate_limit"]) > 30 * 60 * 1000:
-        issues.append(Issue("http_429", "Hyperliquid HTTP 429 persisted >30m"))
+    if fill_fetch_fail_streak >= FILL_FETCH_FAIL_CONFIRM_CHECKS:
+        issues.append(
+            Issue(
+                "fill_fetch_failing",
+                f"{fills_fetch_failed_wallets} of {wallets_tracked} wallets failed fill fetch",
+            )
+        )
 
     dirty = dirty_checkout_paths(ROOT)
     if dirty:
@@ -266,8 +292,7 @@ def main() -> int:
         "healthy": not issues,
         "issues": [issue.text for issue in issues],
         "issueKeys": issue_keys,
-        "firstSeen": first_seen,
-        "rateLimitClearStreak": rate_limit_clear_streak,
+        "fillFetchFailStreak": fill_fetch_fail_streak,
         "diskFreePct": round(free_pct, 1),
     }
     save_json_file(MONITOR_STATE_FILE, payload)

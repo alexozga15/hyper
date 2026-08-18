@@ -12,7 +12,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 from scripts.run_health_monitor import (
-    RATE_LIMIT_CLEAR_CHECKS,
+    FILL_FETCH_FAIL_CONFIRM_CHECKS,
     Issue,
     detect_external_api_backoff,
     detect_health_issues,
@@ -641,88 +641,124 @@ class OperationalControlTests(unittest.TestCase):
         )
         second_service.send_telegram_message.assert_not_called()
 
-    @staticmethod
-    def _stale_rate_limit_prior(**extra: Any) -> dict[str, Any]:
-        """Prior state where `rate_limit` has already been accumulating for
+    def test_high_rate_limited_wallets_produces_no_http_429_issue(self) -> None:
+        """The retired alert: `http_429` no longer exists as a condition at
 
-        31 minutes, so the >30m condition is already active and any test
-        built on this fixture is only exercising the clear-side hysteresis.
+        all, so even a runtime reporting heavy rate limiting must not raise
+        it - background throttling on this box is not itself a health
+        problem (measured: 118 sentiment cycles overnight, 0 errors, 1
+        failed fill fetch).
         """
-        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-        prior: dict[str, Any] = {
-            "issues": ["Hyperliquid HTTP 429 persisted >30m"],
-            "issueKeys": ["http_429"],
-            "firstSeen": {"rate_limit": now_ms - 31 * 60 * 1000},
-        }
-        prior.update(extra)
-        return prior
-
-    def test_one_clean_check_does_not_clear_the_rate_limit_condition(self) -> None:
         alerts = self._fresh_alerts()
         saved, service = self._run_monitor(
             alerts=alerts,
-            runtime={"cacheCoverage": 1.0, "rateLimitedWallets": 0},
-            prior_state=self._stale_rate_limit_prior(rateLimitClearStreak=0),
+            runtime={"cacheCoverage": 1.0, "rateLimitedWallets": 25},
+            prior_state={"issues": [], "issueKeys": []},
         )
-        self.assertIn("http_429", saved["issueKeys"])
-        self.assertIn("rate_limit", saved["firstSeen"])
-        self.assertEqual(saved["rateLimitClearStreak"], 1)
+        self.assertNotIn("http_429", saved["issueKeys"])
+        self.assertNotIn("firstSeen", saved)
+        self.assertNotIn("rateLimitClearStreak", saved)
         service.send_telegram_message.assert_not_called()
 
-    def test_n_consecutive_clean_checks_clear_the_condition(self) -> None:
+    def test_one_fill_fetch_breach_alone_does_not_raise(self) -> None:
         alerts = self._fresh_alerts()
-        prior = self._stale_rate_limit_prior(rateLimitClearStreak=0)
-        saved: dict[str, Any] = {}
-        service = MagicMock()
-        for _ in range(RATE_LIMIT_CLEAR_CHECKS):
-            saved, service = self._run_monitor(
-                alerts=alerts,
-                runtime={"cacheCoverage": 1.0, "rateLimitedWallets": 0},
-                prior_state=prior,
+        saved, service = self._run_monitor(
+            alerts=alerts,
+            runtime={"cacheCoverage": 1.0, "walletsTracked": 10, "fillsFetchFailedWallets": 5},
+            prior_state={"issues": [], "issueKeys": []},
+        )
+        self.assertNotIn("fill_fetch_failing", saved["issueKeys"])
+        self.assertEqual(saved["fillFetchFailStreak"], 1)
+        service.send_telegram_message.assert_not_called()
+
+    def test_two_consecutive_fill_fetch_breaches_raise(self) -> None:
+        alerts = self._fresh_alerts()
+        runtime = {"cacheCoverage": 1.0, "walletsTracked": 10, "fillsFetchFailedWallets": 5}
+        first_saved, _service = self._run_monitor(
+            alerts=alerts, runtime=runtime, prior_state={"issues": [], "issueKeys": []}
+        )
+        second_saved, service = self._run_monitor(alerts=alerts, runtime=runtime, prior_state=first_saved)
+        self.assertEqual(FILL_FETCH_FAIL_CONFIRM_CHECKS, 2)
+        self.assertIn("fill_fetch_failing", second_saved["issueKeys"])
+        self.assertEqual(second_saved["fillFetchFailStreak"], 2)
+        service.send_telegram_message.assert_called_once()
+        message = service.send_telegram_message.call_args.args[2]
+        self.assertIn("5 of 10 wallets failed fill fetch", message)
+
+    def test_one_clean_check_clears_a_freshly_raised_fill_fetch_alert(self) -> None:
+        """`fillFetchFailStreak` is capped at FILL_FETCH_FAIL_CONFIRM_CHECKS,
+
+        the same constant used to raise the alert, so a raised alert's
+        streak can only ever be sitting exactly at that cap - one clean
+        check always decrements it below the raise threshold and clears
+        the alert immediately. (A design that actually needed N consecutive
+        clean checks to clear, matching N consecutive breaches to raise,
+        would need the cap decoupled from the raise threshold; as specified
+        the two share one constant, so clearing is always one check.)
+        """
+        alerts = self._fresh_alerts()
+        breach_runtime = {"cacheCoverage": 1.0, "walletsTracked": 10, "fillsFetchFailedWallets": 5}
+        raised_prior = {"issues": [], "issueKeys": []}
+        for _ in range(FILL_FETCH_FAIL_CONFIRM_CHECKS):
+            raised_prior, _service = self._run_monitor(
+                alerts=alerts, runtime=breach_runtime, prior_state=raised_prior
             )
-            prior = saved
-        self.assertNotIn("http_429", saved["issueKeys"])
-        self.assertNotIn("rate_limit", saved["firstSeen"])
-        self.assertEqual(saved["rateLimitClearStreak"], 0)
+        self.assertIn("fill_fetch_failing", raised_prior["issueKeys"])
+        clean_runtime = {"cacheCoverage": 1.0, "walletsTracked": 10, "fillsFetchFailedWallets": 0}
+        saved, service = self._run_monitor(alerts=alerts, runtime=clean_runtime, prior_state=raised_prior)
+        self.assertNotIn("fill_fetch_failing", saved["issueKeys"])
+        self.assertEqual(saved["fillFetchFailStreak"], FILL_FETCH_FAIL_CONFIRM_CHECKS - 1)
         service.send_telegram_message.assert_called_once_with("tok", "chat", "Wallet monitor recovered")
 
-    def test_a_rate_limited_check_partway_through_resets_the_streak(self) -> None:
+    def test_streak_does_not_grow_without_bound_across_many_breaches(self) -> None:
         alerts = self._fresh_alerts()
-        original_prior = self._stale_rate_limit_prior(rateLimitClearStreak=0)
-        original_first_seen = original_prior["firstSeen"]["rate_limit"]
-        after_clean, _service = self._run_monitor(
-            alerts=alerts,
-            runtime={"cacheCoverage": 1.0, "rateLimitedWallets": 0},
-            prior_state=original_prior,
-        )
-        self.assertEqual(after_clean["rateLimitClearStreak"], 1)
-        after_rate_limited, _service = self._run_monitor(
-            alerts=alerts,
-            runtime={"cacheCoverage": 1.0, "rateLimitedWallets": 2},
-            prior_state=after_clean,
-        )
-        self.assertEqual(after_rate_limited["rateLimitClearStreak"], 0)
-        self.assertEqual(after_rate_limited["firstSeen"]["rate_limit"], original_first_seen)
-        self.assertIn("http_429", after_rate_limited["issueKeys"])
+        breach_runtime = {"cacheCoverage": 1.0, "walletsTracked": 10, "fillsFetchFailedWallets": 5}
+        prior = {"issues": [], "issueKeys": []}
+        saved: dict[str, Any] = {}
+        for _ in range(FILL_FETCH_FAIL_CONFIRM_CHECKS + 3):
+            saved, _service = self._run_monitor(alerts=alerts, runtime=breach_runtime, prior_state=prior)
+            prior = saved
+        self.assertEqual(saved["fillFetchFailStreak"], FILL_FETCH_FAIL_CONFIRM_CHECKS)
 
-    def test_state_missing_the_streak_counter_does_not_clear_on_first_clean_check(self) -> None:
-        """Deploy-transition case: state written by the prior version of
-
-        this script has no `rateLimitClearStreak` key at all. That must read
-        as 0 - a fresh streak starting now - not as "already satisfied".
-        """
+    def test_missing_or_zero_wallets_tracked_never_breaches(self) -> None:
         alerts = self._fresh_alerts()
-        prior = self._stale_rate_limit_prior()
-        self.assertNotIn("rateLimitClearStreak", prior)
-        saved, service = self._run_monitor(
-            alerts=alerts,
-            runtime={"cacheCoverage": 1.0, "rateLimitedWallets": 0},
-            prior_state=prior,
+        for runtime in (
+            {"cacheCoverage": 1.0, "walletsTracked": 0, "fillsFetchFailedWallets": 5},
+            {"cacheCoverage": 1.0, "fillsFetchFailedWallets": 5},
+        ):
+            saved, service = self._run_monitor(
+                alerts=alerts, runtime=runtime, prior_state={"issues": [], "issueKeys": []}
+            )
+            self.assertNotIn("fill_fetch_failing", saved["issueKeys"])
+            self.assertEqual(saved["fillFetchFailStreak"], 0)
+            service.send_telegram_message.assert_not_called()
+
+    def test_untrusted_quality_window_quiet_below_fraction_of_tracked_wallets(self) -> None:
+        issues = detect_health_issues(
+            {"state": {"lastCheckedAt": ms_to_iso(NOW_MS)}},
+            {"cacheCoverage": 1.0, "untrustedQualityWindowWallets": 2, "walletsTracked": 37},
+            now_ms=NOW_MS,
+            disk_free_pct=50,
         )
-        self.assertIn("http_429", saved["issueKeys"])
-        self.assertIn("rate_limit", saved["firstSeen"])
-        self.assertEqual(saved["rateLimitClearStreak"], 1)
-        service.send_telegram_message.assert_not_called()
+        self.assertNotIn("untrusted_quality_window", [issue.key for issue in issues])
+
+    def test_untrusted_quality_window_fires_above_fraction_of_tracked_wallets(self) -> None:
+        issues = detect_health_issues(
+            {"state": {"lastCheckedAt": ms_to_iso(NOW_MS)}},
+            {"cacheCoverage": 1.0, "untrustedQualityWindowWallets": 8, "walletsTracked": 37},
+            now_ms=NOW_MS,
+            disk_free_pct=50,
+        )
+        self.assertIn("untrusted_quality_window", [issue.key for issue in issues])
+
+    def test_untrusted_quality_window_floor_fires_when_wallets_tracked_absent(self) -> None:
+        issues = detect_health_issues(
+            {"state": {"lastCheckedAt": ms_to_iso(NOW_MS)}},
+            {"cacheCoverage": 1.0, "untrustedQualityWindowWallets": 3},
+            now_ms=NOW_MS,
+            disk_free_pct=50,
+        )
+        self.assertIn("untrusted_quality_window", [issue.key for issue in issues])
 
     def test_rate_limiter_spaces_requests(self) -> None:
         limiter = RequestRateLimiter(2)
