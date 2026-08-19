@@ -379,6 +379,130 @@ class OperationalControlTests(unittest.TestCase):
             _, _, message = fake_service.send_telegram_message.call_args[0]
             self.assertIn("Skipped (capped fill window): 1", message)
 
+    def test_wallet_review_flags_a_market_maker_by_fill_rate(self) -> None:
+        """Measured on production against each wallet's newest 1500 fills:
+
+        a clear 3.6x gap sits between 17.12 and 4.73 fills/min, so the
+        threshold is 10. 1500 fills over 18 minutes (~83/min) is deep in the
+        market-maker cluster and must be flagged, independent of whatever the
+        30d quality window says.
+        """
+        stats: dict[str, int] = {}
+        reviews = evaluate_wallets(
+            [
+                {
+                    "address": "0xmarketmaker",
+                    "positions": [],
+                    "dataQuality": {
+                        "recentFillCount": 1500,
+                        "fillCoverageMs": 18 * 60 * 1000,
+                    },
+                }
+            ],
+            stats,
+        )
+        self.assertIn("market_maker_fill_rate", reviews["0xmarketmaker"]["reasons"])
+        self.assertEqual(stats["marketMakerWallets"], 1)
+
+    def test_wallet_review_does_not_flag_below_the_threshold(self) -> None:
+        """0xbcd420d133 and 0x8cc94dc843 sit at 4.73 and 4.36 fills/min and are
+
+        deliberately kept for good profit factors. This pins the threshold at
+        10, not at 4: 1500 fills over 317 minutes (~4.7/min) must not be
+        flagged.
+        """
+        stats: dict[str, int] = {}
+        reviews = evaluate_wallets(
+            [
+                {
+                    "address": "0xslower",
+                    "positions": [],
+                    "dataQuality": {
+                        "recentFillCount": 1500,
+                        "fillCoverageMs": 317 * 60 * 1000,
+                    },
+                }
+            ],
+            stats,
+        )
+        self.assertNotIn("0xslower", reviews)
+        self.assertEqual(stats["marketMakerWallets"], 0)
+
+    def test_wallet_review_ignores_a_burst_below_the_sample_floor(self) -> None:
+        """12 fills inside one minute reads as 12 fills/min, well above the
+
+        threshold, but without a minimum-sample guard that would flag any
+        wallet mid-burst. MARKET_MAKER_MIN_FILL_SAMPLE keeps this quiet.
+        """
+        stats: dict[str, int] = {}
+        reviews = evaluate_wallets(
+            [
+                {
+                    "address": "0xburst",
+                    "positions": [],
+                    "dataQuality": {
+                        "recentFillCount": 12,
+                        "fillCoverageMs": 1 * 60 * 1000,
+                    },
+                }
+            ],
+            stats,
+        )
+        self.assertNotIn("0xburst", reviews)
+        self.assertEqual(stats["marketMakerWallets"], 0)
+
+    def test_wallet_review_market_maker_check_is_inert_on_old_snapshots(self) -> None:
+        """A wallet with no dataQuality key at all, and one with dataQuality
+
+        present but neither fill field, must both behave exactly as before
+        this change: no market_maker_fill_rate reason, no crash. This pins
+        the "absent field means no flag" reading that keeps pre-existing
+        snapshots behaving as they did.
+        """
+        stats: dict[str, int] = {}
+        reviews = evaluate_wallets(
+            [
+                {"address": "0xnodataquality", "positions": []},
+                {"address": "0xemptyquality", "positions": [], "dataQuality": {}},
+            ],
+            stats,
+        )
+        self.assertNotIn("0xnodataquality", reviews)
+        self.assertNotIn("0xemptyquality", reviews)
+        self.assertEqual(stats["marketMakerWallets"], 0)
+
+    def test_wallet_review_flags_market_maker_even_when_quality_window_untrusted(self) -> None:
+        """A market maker's own 30d quality window is usually untrusted -
+
+        capped by its own fill rate within hours - which is exactly why the
+        market-maker check must not live inside wallet_quality_window_trusted's
+        else branch. A wallet that is both untrusted and high fill rate must
+        still get market_maker_fill_rate.
+        """
+        stats: dict[str, int] = {}
+        reviews = evaluate_wallets(
+            [
+                {
+                    "address": "0xbothuntrustedandmm",
+                    "closedTrades30d": 8,
+                    "qualityNetPnl30d": -100,
+                    "qualityProfitFactor30d": 0.8,
+                    "qualityWindowTruncated": True,
+                    "qualityWindowCoverageMs": 2 * HOUR_MS,
+                    "positions": [],
+                    "dataQuality": {
+                        "recentFillCount": 1500,
+                        "fillCoverageMs": 18 * 60 * 1000,
+                    },
+                }
+            ],
+            stats,
+        )
+        self.assertIn("market_maker_fill_rate", reviews["0xbothuntrustedandmm"]["reasons"])
+        self.assertNotIn("negative_30d_pnl", reviews["0xbothuntrustedandmm"]["reasons"])
+        self.assertEqual(stats["skippedCappedWindow"], 1)
+        self.assertEqual(stats["marketMakerWallets"], 1)
+
     def test_wallet_review_uses_matching_quality_event_sample(self) -> None:
         reviews = evaluate_wallets(
             [

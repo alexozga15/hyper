@@ -22,6 +22,22 @@ from server import (
     wallet_quality_window_trusted,
 )
 
+# A wallet whose fills are inventory turnover rather than directional
+# conviction pollutes the "coordinated openings in the last 5 minutes"
+# consensus signal: it opens and closes constantly, so it shows up alongside
+# genuinely coordinated wallets and inflates the agreement count. Measured on
+# production against each wallet's newest 1500 fills (userFillsByTime, newest
+# first, so no ascending-cap distortion - see the note on
+# recent_fill_rate_per_min below): 188.05, 88.81 and 58.83 fills/min for three
+# wallets, 19.72 and 17.12 for two more, then a clear 3.6x gap down to 4.73,
+# 4.36 and 2.29, with everything else under 1/min. Four wallets were already
+# pulled from tracking today for exactly this behaviour at 66-111 fills/min.
+# The threshold sits at 10 - in the gap, not at 4, which would also catch
+# 0xbcd420d133 and 0x8cc94dc843, both kept deliberately for good profit
+# factors.
+MARKET_MAKER_FILLS_PER_MIN = float(os.environ.get("MARKET_MAKER_FILLS_PER_MIN", "10"))
+MARKET_MAKER_MIN_FILL_SAMPLE = int(os.environ.get("MARKET_MAKER_MIN_FILL_SAMPLE", "300"))
+
 
 def position_fingerprint(wallet: dict[str, Any]) -> set[str]:
     return {
@@ -37,6 +53,26 @@ def open_unrealized_pnl(wallet: dict[str, Any]) -> float:
         for position in wallet.get("positions", [])
         if isinstance(position, dict)
     )
+def recent_fill_rate_per_min(wallet: dict[str, Any]) -> float:
+    # recentFillCount/fillCoverageMs (not qualityWindowFillCount/
+    # qualityWindowCoverageMs) are the matched pair describing the same
+    # retained history: server.py sets fillCoverageMs to (now - oldest
+    # retained fill) once the retained history is truncated and to
+    # (now - fills_start_ms) otherwise (server.py:1851, server.py:2076), and
+    # recentFillCount is the length of that same merged list (server.py:2142).
+    # The quality-window pair comes from userFillsByTime, which caps at 2000
+    # rows ascending from startTime - a wallet that only recently turned
+    # high-frequency still shows ~29 days of coverage there, understating the
+    # rate by roughly three orders of magnitude (~68/day instead of ~100/min).
+    # That is the exact trap this helper exists to avoid.
+    quality = wallet.get("dataQuality")
+    if not isinstance(quality, dict):
+        return 0.0
+    count = to_float(quality.get("recentFillCount"))
+    coverage_ms = to_float(quality.get("fillCoverageMs"))
+    if count < MARKET_MAKER_MIN_FILL_SAMPLE or coverage_ms <= 0:
+        return 0.0
+    return count / (coverage_ms / 60000.0)
 
 
 def evaluate_wallets(
@@ -49,6 +85,7 @@ def evaluate_wallets(
     }
     skipped_capped_window = 0
     suppressed_by_open_profit = 0
+    market_maker_wallets = 0
     for wallet in wallets:
         address = str(wallet.get("address") or "").lower()
         reasons: list[str] = []
@@ -97,6 +134,15 @@ def evaluate_wallets(
                 reasons.append("profit_factor_below_1")
             if (would_flag_negative_pnl or would_flag_profit_factor) and combined >= 0:
                 suppressed_by_open_profit += 1
+        # A market maker's positions are inventory, not conviction, and its
+        # 30d quality window is usually untrusted anyway (capped within hours
+        # by its own fill rate) - so this check must run independent of the
+        # trusted branch above, not nested inside its else, or it would never
+        # fire for the wallets it exists to catch.
+        fill_rate = recent_fill_rate_per_min(wallet)
+        if fill_rate >= MARKET_MAKER_FILLS_PER_MIN:
+            reasons.append("market_maker_fill_rate")
+            market_maker_wallets += 1
         if wallet.get("holdingOnly30d") or to_float(wallet.get("daysSinceLastFill")) > 30:
             reasons.append("inactive")
         if wallet.get("reviewWeightMultiplier") == 0:
@@ -123,6 +169,7 @@ def evaluate_wallets(
     if stats is not None:
         stats["skippedCappedWindow"] = skipped_capped_window
         stats["suppressedByOpenProfit"] = suppressed_by_open_profit
+        stats["marketMakerWallets"] = market_maker_wallets
     return reviews
 
 
@@ -138,6 +185,7 @@ def main() -> int:
         "reviewCount": len(reviews),
         "skippedCappedWindowCount": review_stats.get("skippedCappedWindow", 0),
         "suppressedByOpenProfitCount": review_stats.get("suppressedByOpenProfit", 0),
+        "marketMakerCount": review_stats.get("marketMakerWallets", 0),
         "wallets": reviews,
     }
     previous = {}
@@ -156,6 +204,7 @@ def main() -> int:
             f"Tracked: {payload['walletCount']} | Reduced weight: {payload['reviewCount']}",
             f"Skipped (capped fill window): {payload['skippedCappedWindowCount']}",
             f"Suppressed (open profit offsets realised loss): {payload['suppressedByOpenProfitCount']}",
+            f"Market maker fill rate: {payload['marketMakerCount']}",
         ]
         for address, review in list(reviews.items())[:10]:
             lines.append(f"- {address[:6]}...{address[-4:]}: 0.5 ({', '.join(review['reasons'])})")
