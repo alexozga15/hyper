@@ -195,6 +195,129 @@ class OperationalControlTests(unittest.TestCase):
         )
         self.assertIn("negative_30d_pnl", reviews["0xnoflag"]["reasons"])
 
+    def test_wallet_review_suppresses_realised_loss_covered_by_open_profit(self) -> None:
+        """negative_30d_pnl/profit_factor_below_1 read qualityNetPnl30d/
+
+        qualityProfitFactor30d, which count ONLY closed events. Measured across
+        the 37 tracked wallets, all 4 that tripped profit_factor_below_1 were
+        sitting on positive unrealised PnL that outweighed the realised loss -
+        a wallet cutting losers fast and letting winners run always looks like
+        a loser on realised-only numbers while its profit sits in open
+        positions. When open unrealised PnL more than covers the realised
+        loss, the wallet is carrying, not losing, and neither reason should fire.
+        """
+        stats: dict[str, int] = {}
+        reviews = evaluate_wallets(
+            [
+                {
+                    "address": "0xcarrying",
+                    "closedTrades30d": 8,
+                    "qualityNetPnl30d": -100,
+                    "qualityProfitFactor30d": 0.5,
+                    "positions": [{"unrealizedPnl": 150}],
+                }
+            ],
+            stats,
+        )
+        self.assertNotIn("0xcarrying", reviews)
+        self.assertEqual(stats["suppressedByOpenProfit"], 1)
+
+    def test_wallet_review_still_flags_realised_loss_open_profit_does_not_cover(self) -> None:
+        """The same wallet stays flagged when its open profit is smaller than
+
+        the realised loss - the combined (realised + unrealised) figure is
+        still negative, so it is genuinely losing, not carrying.
+        """
+        stats: dict[str, int] = {}
+        reviews = evaluate_wallets(
+            [
+                {
+                    "address": "0xstillloser",
+                    "closedTrades30d": 8,
+                    "qualityNetPnl30d": -100,
+                    "qualityProfitFactor30d": 0.5,
+                    "positions": [{"unrealizedPnl": 30}],
+                }
+            ],
+            stats,
+        )
+        self.assertIn("negative_30d_pnl", reviews["0xstillloser"]["reasons"])
+        self.assertIn("profit_factor_below_1", reviews["0xstillloser"]["reasons"])
+        self.assertEqual(stats["suppressedByOpenProfit"], 0)
+
+    def test_wallet_review_treats_missing_positions_key_as_no_open_pnl(self) -> None:
+        """A wallet with no `positions` key at all (older dashboards, no
+
+        migration) must be judged exactly as before this change - open
+        unrealised PnL reads as 0.0, so the combined figure equals the
+        realised figure and the wallet stays flagged.
+        """
+        stats: dict[str, int] = {}
+        reviews = evaluate_wallets(
+            [
+                {
+                    "address": "0xnopositions",
+                    "closedTrades30d": 8,
+                    "qualityNetPnl30d": -100,
+                    "qualityProfitFactor30d": 0.5,
+                }
+            ],
+            stats,
+        )
+        self.assertIn("negative_30d_pnl", reviews["0xnopositions"]["reasons"])
+        self.assertIn("profit_factor_below_1", reviews["0xnopositions"]["reasons"])
+        self.assertEqual(stats["suppressedByOpenProfit"], 0)
+
+    def test_wallet_review_profit_factor_alone_is_also_suppressed_by_open_profit(self) -> None:
+        """profit_factor_below_1 reads the same realised-only profit factor as
+
+        negative_30d_pnl and shares its defect: a wallet with a positive
+        realised PnL, a profit factor under 1, and no open losses to drag the
+        combined figure negative should not be flagged either.
+        """
+        stats: dict[str, int] = {}
+        reviews = evaluate_wallets(
+            [
+                {
+                    "address": "0xpfonly",
+                    "closedTrades30d": 8,
+                    "qualityNetPnl30d": 50,
+                    "qualityProfitFactor30d": 0.5,
+                    "positions": [],
+                }
+            ],
+            stats,
+        )
+        self.assertNotIn("0xpfonly", reviews)
+        self.assertEqual(stats["suppressedByOpenProfit"], 1)
+
+    def test_wallet_review_untrusted_window_skip_precedes_open_profit_gate(self) -> None:
+        """The wallet_quality_window_trusted skip must short-circuit before the
+
+        combined-figure gate even runs, so a capped-and-poorly-covered wallet
+        stays skipped (counted under skippedCappedWindow) rather than being
+        reclassified as suppressedByOpenProfit just because it happens to be
+        carrying a large open position.
+        """
+        stats: dict[str, int] = {}
+        reviews = evaluate_wallets(
+            [
+                {
+                    "address": "0xuntrustedbig",
+                    "closedTrades30d": 8,
+                    "qualityNetPnl30d": -100,
+                    "qualityProfitFactor30d": 0.5,
+                    "qualityWindowTruncated": True,
+                    "qualityWindowCoverageMs": 2 * HOUR_MS,
+                    "positions": [{"unrealizedPnl": 10000}],
+                }
+            ],
+            stats,
+        )
+        self.assertNotIn("0xuntrustedbig", reviews)
+        self.assertEqual(stats["skippedCappedWindow"], 1)
+        self.assertEqual(stats["suppressedByOpenProfit"], 0)
+
     def test_wallet_review_still_flags_inactive_when_capped(self) -> None:
         """The capped-window flag only silences the PnL reasons, not inactivity -
         daysSinceLastFill/holdingOnly30d come from a different endpoint and are
