@@ -240,6 +240,18 @@ MONI_SOCIAL_PROJECT_HANDLES = {
 POSITION_GROUP_DISPLAY_MIN_VALUE = 1_000_000
 MIN_POSITION_MESSAGE_WALLETS = 3
 FRESH_WALLET_FLOW_MIN_VALUE = int(os.environ.get("FRESH_WALLET_FLOW_MIN_VALUE", "500000"))
+# Diagnostic-only windows for measuring how fresh-add clustering behaves at
+# widths other than WALLET_SIGNAL_ACTIVITY_WINDOW_MS. Deliberately hard-coded
+# rather than environment-driven so that samples collected over the study
+# period stay comparable across restarts and deploys. They exist to answer
+# which window actually separates profitable samples from unprofitable ones -
+# measured today, 3 wallets clustering on one coin:side takes about 24h, not
+# the 2h the live gates assume.
+FRESH_ACTIVITY_DIAGNOSTIC_WINDOWS_MS = {
+    "2h": 2 * 60 * 60 * 1000,
+    "8h": 8 * 60 * 60 * 1000,
+    "24h": 24 * 60 * 60 * 1000,
+}
 LARGE_POSITION_ALERT_MIN_VALUE = 1_000_000
 MIN_POSITION_MESSAGE_VALUE = POSITION_GROUP_DISPLAY_MIN_VALUE
 NEW_POSITION_ALERT_MIN_VALUE = LARGE_POSITION_ALERT_MIN_VALUE
@@ -3105,6 +3117,52 @@ class WalletTrackerService:
             latest_time = max(latest_time, fill_time)
         return {"value": value, "size": size, "latestTime": float(latest_time)}
 
+    def recent_position_add_metrics_by_window(
+        self,
+        wallet: dict[str, Any],
+        position: dict[str, Any],
+        *,
+        now_ms: int,
+        windows_ms: dict[str, int],
+    ) -> dict[str, dict[str, float]]:
+        """Single-pass variant of recent_position_add_metrics for several windows.
+
+        Mirrors recent_position_add_metrics's filters exactly - the same
+        direction classification, coin normalisation, and price/size/time
+        validity checks - but walks wallet["recentFills"] once and accumulates
+        into every window whose cutoff a fill satisfies, rather than re-scanning
+        the fill list once per window. A wallet's recent-fill cache holds up to
+        2000 rows and this runs for every wallet/position every cycle, so
+        calling recent_position_add_metrics once per window would multiply that
+        scan by len(windows_ms) instead of doing it once. Always returns an
+        entry for every label in windows_ms, zeroed when nothing matched.
+        """
+        coin = normalize_position_coin(position.get("coin"))
+        side = str(position.get("side") or "").lower()
+        cutoffs_ms = {label: now_ms - window_ms for label, window_ms in windows_ms.items()}
+        results: dict[str, dict[str, float]] = {
+            label: {"value": 0.0, "size": 0.0, "latestTime": 0.0} for label in windows_ms
+        }
+        for fill in wallet.get("recentFills", []):
+            classified = self.classify_fill_direction(fill.get("direction"))
+            if not classified or classified != (side, "add"):
+                continue
+            fill_time = int(to_float(fill.get("time")))
+            fill_price = to_float(fill.get("price"))
+            fill_size = abs(to_float(fill.get("size")))
+            if fill_time > now_ms or fill_price <= 0 or fill_size <= 0:
+                continue
+            if normalize_position_coin(fill.get("coin")) != coin:
+                continue
+            for label, cutoff_ms in cutoffs_ms.items():
+                if fill_time < cutoff_ms:
+                    continue
+                bucket = results[label]
+                bucket["value"] += fill_price * fill_size
+                bucket["size"] += fill_size
+                bucket["latestTime"] = max(bucket["latestTime"], float(fill_time))
+        return results
+
     def max_signal_entry_distance_pct(self, coin: Any) -> float:
         normalized = normalize_position_coin(coin).upper()
         if normalized in {"BTC", "ETH"} or is_stock_like_position(normalized):
@@ -3448,6 +3506,14 @@ class WalletTrackerService:
                         "freshAddValue": 0.0,
                         "freshAddSize": 0.0,
                         "freshAddLatestTime": 0,
+                        # Diagnostic only (see FRESH_ACTIVITY_DIAGNOSTIC_WINDOWS_MS):
+                        # per-window sums of fresh-add value, keyed by
+                        # correlation group rather than address, with no
+                        # FRESH_WALLET_FLOW_MIN_VALUE floor applied. Does not
+                        # feed verifiedFreshIndependentWalletCount or any gate.
+                        "freshAddValueByWindowGroup": {
+                            label: {} for label in FRESH_ACTIVITY_DIAGNOSTIC_WINDOWS_MS
+                        },
                         "candidateFreshWalletAddresses": set(),
                         "candidateFreshWalletGroups": set(),
                         "candidateFreshTopWalletAddresses": set(),
@@ -3507,6 +3573,25 @@ class WalletTrackerService:
                         now_ms=now_ms,
                         window_ms=WALLET_SIGNAL_ACTIVITY_WINDOW_MS,
                     )
+                    if self.wallet_fill_data_reliable(snapshot):
+                        # Diagnostic only: captures the full add-value
+                        # distribution across alternate windows, unfiltered by
+                        # FRESH_WALLET_FLOW_MIN_VALUE, so it must never gate
+                        # anything - see FRESH_ACTIVITY_DIAGNOSTIC_WINDOWS_MS.
+                        fresh_add_by_window = self.recent_position_add_metrics_by_window(
+                            snapshot,
+                            position,
+                            now_ms=now_ms,
+                            windows_ms=FRESH_ACTIVITY_DIAGNOSTIC_WINDOWS_MS,
+                        )
+                        for window_label, window_metrics in fresh_add_by_window.items():
+                            window_value = to_float(window_metrics.get("value"))
+                            if window_value <= 0:
+                                continue
+                            group_totals = bucket["freshAddValueByWindowGroup"][window_label]
+                            group_totals[correlation_group] = (
+                                group_totals.get(correlation_group, 0.0) + window_value
+                            )
                     if (
                         self.wallet_fill_data_reliable(snapshot)
                         and to_float(fresh_add.get("value")) > 0
@@ -3581,6 +3666,15 @@ class WalletTrackerService:
                 if bucket["freshAddSize"] > 0
                 else 0.0,
                 "freshAddLatestTime": int(bucket["freshAddLatestTime"]),
+                # Diagnostic only - see FRESH_ACTIVITY_DIAGNOSTIC_WINDOWS_MS.
+                # Does not feed any gate, score, or publication decision.
+                "freshAddValuesByWindow": {
+                    label: sorted(
+                        (int(round(value)) for value in bucket["freshAddValueByWindowGroup"][label].values()),
+                        reverse=True,
+                    )
+                    for label in FRESH_ACTIVITY_DIAGNOSTIC_WINDOWS_MS
+                },
                 "wallets": sorted(bucket["wallets"], key=lambda item: item["value"], reverse=True),
             }
             for bucket in aggregate.values()
@@ -6790,6 +6884,10 @@ class WalletTrackerService:
                 "probabilityScore": round(probability, 1),
                 "rawProbabilityScore": round(probability, 1),
                 "freshWalletCount": int(to_float(item.get("verifiedFreshIndependentWalletCount"))),
+                # Diagnostic only - see FRESH_ACTIVITY_DIAGNOSTIC_WINDOWS_MS.
+                # Absent on consensus items built before this field existed, so
+                # default to {} rather than requiring its presence.
+                "freshAddValuesByWindow": item.get("freshAddValuesByWindow") or {},
                 "rejectionReasons": self.signal_rejection_reasons(item, probability),
                 "shadow": True,
                 "published": False,
