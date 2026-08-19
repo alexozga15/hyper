@@ -194,6 +194,33 @@ class DispatchUpdateTests(unittest.TestCase):
         self.assertTrue(summary["enriched"])
         self.assertEqual(fake_service.summary["signals"][0]["coin"], "LINK")
 
+    def test_build_reply_update_omits_the_crowding_board(self) -> None:
+        """/update is the routine digest and must not carry the consensus block.
+
+        The board ranks nothing - measured over 805 shadow samples, neither the
+        wallet count nor the score separated profitable observations from
+        unprofitable ones - so it stays available on demand via /consensus
+        instead of implying a recommendation in every digest.
+        """
+
+        class FakeService:
+            def __init__(self) -> None:
+                self.kwargs: dict = {}
+
+            def build_summary_message(self, summary, min_wallets, **kwargs) -> str:
+                self.kwargs = kwargs
+                return "summary"
+
+            def build_positions_message(self, dashboard) -> str:
+                return "positions"
+
+        service = FakeService()
+        reply = commands.build_reply(service, "/update", None, {}, {}, None, 3)
+
+        self.assertIs(service.kwargs.get("include_consensus"), False)
+        self.assertIs(service.kwargs.get("include_signals"), False)
+        self.assertEqual(reply, "summary\n\npositions")
+
     def test_build_reply_routes_ticker_direction_query(self) -> None:
         class FakeService:
             def build_position_wallets_message(self, dashboard: dict, coin: str, side: str) -> str:

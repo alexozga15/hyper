@@ -4795,7 +4795,12 @@ class WalletTrackerService:
         if include_consensus:
             consensus = summary.get("consensus", [])
             lines.append("")
-            lines.append("Strongest wallet agreement")
+            # Not a ranking of trade quality: measured over 805 shadow
+            # samples, neither the wallet count nor the score separated
+            # profitable observations from unprofitable ones. The header says
+            # what these rows actually are - where the tracked wallets are
+            # currently crowded - so the order is not read as a recommendation.
+            lines.append("Where wallets are crowded")
             main_consensus = [
                 item
                 for item in consensus
@@ -4809,9 +4814,13 @@ class WalletTrackerService:
             def append_consensus_items(items: list[dict[str, Any]]) -> None:
                 for item in items[:10]:
                     lines.append(
+                        # convictionScore is netIndependentWeightedWalletCount
+                        # divided by the strongest item of the same cycle, so it
+                        # printed the next line's number a second time and gave
+                        # the top row a permanent 100/100 - including rows with
+                        # Net support +0, where there is no consensus at all.
                         f'- {item["coin"]} {str(item.get("side") or "").upper()}: '
-                        f'{int(to_float(item.get("independentWalletCount", item.get("walletCount"))))} wallets | '
-                        f'Confidence {to_float(item.get("convictionScore")):.0f}/100'
+                        f'{int(to_float(item.get("independentWalletCount", item.get("walletCount"))))} wallets'
                     )
                     if "netWalletCount" in item:
                         lines.append(
