@@ -178,7 +178,13 @@ def build_reply(
     if command == "/update":
         return "\n\n".join(
             [
-                service.build_summary_message(summary_cache, min_wallets, include_signals=False),
+                # /update is the routine digest, so it carries sentiment,
+                # data health and open positions only. The crowding board is
+                # a reference rather than a decision aid and stays available
+                # on demand through /consensus.
+                service.build_summary_message(
+                    summary_cache, min_wallets, include_consensus=False, include_signals=False
+                ),
                 service.build_positions_message(dashboard_cache),
             ]
         )

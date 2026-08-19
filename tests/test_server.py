@@ -407,11 +407,16 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_summary_message(summary, min_wallets=3)
         self.assertIn("Current wallet sentiment", message)
-        self.assertIn("BTC LONG: 3 wallets | Confidence 84/100", message)
+        self.assertIn("BTC LONG: 3 wallets", message)
         self.assertIn("Commodities", message)
-        self.assertIn("OIL SHORT: 3 wallets | Confidence 72/100", message)
+        self.assertIn("OIL SHORT: 3 wallets", message)
         self.assertIn("Stocks and indices", message)
-        self.assertIn("EWY LONG: 3 wallets | Confidence 68/100", message)
+        self.assertIn("EWY LONG: 3 wallets", message)
+        # The rendered score was the next line's number rescaled by the
+        # cycle's strongest row, so it is gone from the display entirely.
+        self.assertNotIn("Confidence", message)
+        self.assertIn("Where wallets are crowded", message)
+        self.assertNotIn("Strongest wallet agreement", message)
         self.assertNotIn("$12,345", message)
         self.assertNotIn("HIP-3 consensus:", message)
         self.assertNotIn("@PUMP-1 short (3 wallets, $456)", message)
