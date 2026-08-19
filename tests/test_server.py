@@ -3224,6 +3224,54 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(self.service.cmm_signal_tier(79, 1_100_000), "actionable")
         self.assertEqual(self.service.cmm_signal_tier(86, 1_100_000), "alert")
 
+    def _cmm_signal(self, coin: str, total_value: float, probability: float = 90.0) -> dict:
+        return {
+            "coin": coin,
+            "side": "short",
+            "action": "sell",
+            "signalTier": "watch",
+            "probabilityScore": probability,
+            "cohortCount": 3,
+            "valueBias": 0.8,
+            "trendScore": 0,
+            "trendAvailable": False,
+            "contrarianScore": 0,
+            "totalValue": total_value,
+            "components": [{"segment": "Money Printer"}],
+        }
+
+    def test_build_cmm_signals_message_hides_cohorts_below_actionable_exposure(self) -> None:
+        """Sub-$1M cohorts are capped at WATCH by cmm_signal_tier whatever they
+
+        score, so a 93/100 cohort at $560K led the list wearing a WATCH label
+        with nothing on screen to explain it. Those rows are not shown at all.
+        """
+        message = self.service.build_cmm_signals_message(
+            {
+                "enabled": True,
+                "signals": [
+                    self._cmm_signal("SMALL", 560_000, probability=93.0),
+                    self._cmm_signal("BIG", 2_000_000, probability=75.0),
+                ],
+                "generatedAt": "2026-06-20T00:00:00Z",
+            }
+        )
+
+        self.assertNotIn("SMALL", message)
+        self.assertIn("BIG", message)
+
+    def test_build_cmm_signals_message_says_so_when_every_cohort_is_too_small(self) -> None:
+        message = self.service.build_cmm_signals_message(
+            {
+                "enabled": True,
+                "signals": [self._cmm_signal("SMALL", 560_000, probability=93.0)],
+                "generatedAt": "2026-06-20T00:00:00Z",
+            }
+        )
+
+        self.assertNotIn("SMALL", message)
+        self.assertIn("No cohort at $1.0M exposure or above", message)
+
     def test_build_cmm_signals_message_limits_groups_and_marks_tracked(self) -> None:
         signals = [
             {
@@ -3271,7 +3319,14 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("Tracked wallets: 4 | Quality-adjusted support: 2.5", message)
         self.assertIn("Exposure: $2.0M", message)
         self.assertIn("Aggregate Entry: $123.45", message)
-        self.assertIn("Trend confirmation: not available", message)
+        # Trend history is absent here, and the probability already
+        # renormalises for that, so the row must not carry a "not available"
+        # placeholder - it is ten repetitions of nothing in the real message.
+        self.assertNotIn("Trend confirmation", message)
+        self.assertIn("Contrarian support: 0/100", message)
+        self.assertIn("Tiers: WATCH 60+ | ACTIONABLE 70+ | ALERT 80+", message)
+        self.assertIn("Listed from $1.0M cohort exposure", message)
+        self.assertNotIn("Confidence levels:", message)
         self.assertIn("10. WATCH", message)
         self.assertNotIn("11. WATCH", message)
 

@@ -7121,15 +7121,17 @@ class WalletTrackerService:
         lines = [
             "CMM market signals",
             f'Based on: {summary.get("timeframe", os.environ.get("CMM_SIGNAL_POSITION_RECENCY", "7d"))} pos',
+            # The legend has to use the words the rows actually print. It said
+            # "Action"/"Strong" while the rows read ACTIONABLE/ALERT, and it
+            # described the tiers as purely score-based while cmm_signal_tier
+            # checks exposure first - which is how a 93/100 cohort came out
+            # labelled WATCH with nothing on screen to explain it.
             (
-                f"Confidence levels: Watch {CMM_WATCH_PROBABILITY_THRESHOLD:.0f} | "
-                f"Action {CMM_SIGNAL_PROBABILITY_THRESHOLD:.0f} | "
-                f"Strong {CMM_ALERT_PROBABILITY_THRESHOLD:.0f}"
+                f"Tiers: WATCH {CMM_WATCH_PROBABILITY_THRESHOLD:.0f}+ | "
+                f"ACTIONABLE {CMM_SIGNAL_PROBABILITY_THRESHOLD:.0f}+ | "
+                f"ALERT {CMM_ALERT_PROBABILITY_THRESHOLD:.0f}+"
             ),
-            (
-                f"Minimum cohort exposure: {format_money_compact(CMM_SIGNAL_MIN_TOTAL_VALUE)} to watch | "
-                f"{format_money_compact(CMM_ACTIONABLE_MIN_TOTAL_VALUE)} to act"
-            ),
+            f"Listed from {format_money_compact(CMM_ACTIONABLE_MIN_TOTAL_VALUE)} cohort exposure",
         ]
         if not summary.get("enabled"):
             lines.append(f'- Disabled: {summary.get("error", "missing API token")}')
@@ -7137,7 +7139,21 @@ class WalletTrackerService:
             if summary.get("stale"):
                 lines.append(f'- Showing cached CMM data: {summary.get("staleReason", "live CMM unavailable")}')
         if summary.get("enabled") and summary.get("signals"):
-            shown = summary.get("signals", [])[: max(1, limit)]
+            # A cohort below CMM_ACTIONABLE_MIN_TOTAL_VALUE can never be acted
+            # on - cmm_signal_tier caps it at "watch" whatever it scores - so
+            # listing it only produced top-of-list rows that looked mislabelled.
+            eligible = [
+                item
+                for item in summary.get("signals", [])
+                if isinstance(item, dict)
+                and to_float(item.get("totalValue")) >= CMM_ACTIONABLE_MIN_TOTAL_VALUE
+            ]
+            if not eligible:
+                lines.append(
+                    "- No cohort at "
+                    f"{format_money_compact(CMM_ACTIONABLE_MIN_TOTAL_VALUE)} exposure or above"
+                )
+            shown = eligible[: max(1, limit)]
             by_group: dict[str, list[dict[str, Any]]] = {"Crypto": [], "Commodities": [], "Stocks / indices": []}
             for item in shown:
                 if isinstance(item, dict):
@@ -7170,7 +7186,7 @@ class WalletTrackerService:
                     trend_note = (
                         f'{to_float(item.get("trendScore")):.0f}/100'
                         if item.get("trendAvailable", item.get("trendScore") is not None)
-                        else "not available"
+                        else ""
                     )
                     lines.extend(
                         [
@@ -7185,8 +7201,14 @@ class WalletTrackerService:
                                 f'Exposure: {format_money_compact(item.get("totalValue"))}'
                             ),
                             (
+                                # Trend history is often absent, and the score
+                                # already renormalises for that rather than
+                                # counting it against the position, so printing
+                                # "not available" on every row said nothing.
                                 f'   Trend confirmation: {trend_note} | '
                                 f'Contrarian support: {to_float(item.get("contrarianScore")):.0f}/100'
+                                if trend_note
+                                else f'   Contrarian support: {to_float(item.get("contrarianScore")):.0f}/100'
                             ),
                             f'   Cohorts: {cohorts}',
                         ]
