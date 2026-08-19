@@ -11,6 +11,7 @@ from coinmarketman import CoinMarketManApiError
 from server import (
     ALERTS_FILE,
     DORMANT_WALLET_MAX_IDLE_MS,
+    FRESH_ACTIVITY_DIAGNOSTIC_WINDOWS_MS,
     WALLET_SIGNAL_ACTIVITY_WINDOW_MS,
     ELITE_WALLET_OVERRIDES,
     HyperliquidClient,
@@ -1380,6 +1381,152 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(summary["signals"], [])
         probability = self.service.signal_probability_score(summary["consensus"][0])
         self.assertIn("insufficient_verified_activity", self.service.signal_rejection_reasons(summary["consensus"][0], probability))
+
+    def test_recent_position_add_metrics_by_window_matches_single_window_calls(self) -> None:
+        # Diagnostic-only helper (see FRESH_ACTIVITY_DIAGNOSTIC_WINDOWS_MS):
+        # a single pass over recentFills must return exactly what calling
+        # recent_position_add_metrics once per window would, for a wallet
+        # whose fills straddle all three window boundaries.
+        now_ms = 1_700_000_000_000
+        wallet = {
+            "recentFills": [
+                # 30 min ago - inside 2h, 8h, 24h.
+                {"coin": "BTC", "direction": "Increase Long", "price": 50_000.0, "size": 1.0, "time": now_ms - 30 * 60 * 1000},
+                # 5h ago - outside 2h, inside 8h and 24h.
+                {"coin": "BTC", "direction": "Increase Long", "price": 50_000.0, "size": 2.0, "time": now_ms - 5 * 60 * 60 * 1000},
+                # 20h ago - outside 2h and 8h, inside 24h.
+                {"coin": "BTC", "direction": "Increase Long", "price": 50_000.0, "size": 3.0, "time": now_ms - 20 * 60 * 60 * 1000},
+                # 30h ago - outside all three windows.
+                {"coin": "BTC", "direction": "Increase Long", "price": 50_000.0, "size": 4.0, "time": now_ms - 30 * 60 * 60 * 1000},
+            ],
+        }
+        position = {"coin": "BTC", "side": "Long"}
+
+        combined = self.service.recent_position_add_metrics_by_window(
+            wallet, position, now_ms=now_ms, windows_ms=FRESH_ACTIVITY_DIAGNOSTIC_WINDOWS_MS
+        )
+
+        self.assertEqual(set(combined.keys()), set(FRESH_ACTIVITY_DIAGNOSTIC_WINDOWS_MS.keys()))
+        for label, window_ms in FRESH_ACTIVITY_DIAGNOSTIC_WINDOWS_MS.items():
+            expected = self.service.recent_position_add_metrics(
+                wallet, position, now_ms=now_ms, window_ms=window_ms
+            )
+            self.assertEqual(combined[label], expected, f"mismatch for window {label}")
+
+    def test_consensus_fresh_add_values_by_window_group_by_correlation(self) -> None:
+        # Two wallets sharing an identical recent-fill fingerprint (3 shared
+        # "Increase Long" events in the same 5-minute buckets) correlate into
+        # one group, so their fresh-add value must be summed into a single
+        # diagnostic entry, not reported as two.
+        now_ms = 1_700_000_000_000
+        shared_times = [now_ms - 10 * 60 * 1000, now_ms - 70 * 60 * 1000, now_ms - 130 * 60 * 1000]
+
+        def correlated_wallet(address: str) -> dict[str, Any]:
+            return {
+                "address": address,
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 300.0, "size": 3.0}],
+                "recentFills": [
+                    {"coin": "BTC", "direction": "Increase Long", "price": 100.0, "size": 1.0, "time": t}
+                    for t in shared_times
+                ],
+            }
+
+        snapshots = [
+            correlated_wallet(f"0x{1:040x}"),
+            correlated_wallet(f"0x{2:040x}"),
+            {
+                "address": f"0x{3:040x}",
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000.0, "size": 10.0}],
+                "recentFills": [
+                    {
+                        "coin": "BTC",
+                        "direction": "Increase Long",
+                        "price": 100_000.0,
+                        "size": 10.0,
+                        "time": now_ms - 5 * 60 * 1000,
+                    }
+                ],
+            },
+        ]
+
+        with patch("server.current_time_ms", return_value=now_ms):
+            summary = self.service.build_sentiment_summary(snapshots, min_wallets=3)
+
+        item = summary["consensus"][0]
+        self.assertEqual(item["independentWalletCount"], 2)
+        self.assertEqual(
+            item["freshAddValuesByWindow"],
+            {"2h": [1_000_000, 400], "8h": [1_000_000, 600], "24h": [1_000_000, 600]},
+        )
+
+    def test_diagnostic_windows_capture_adds_below_fresh_wallet_flow_min_value(self) -> None:
+        # $1,000 adds are far below FRESH_WALLET_FLOW_MIN_VALUE ($500k) and so
+        # must never count toward verifiedFreshIndependentWalletCount, but the
+        # entire point of the diagnostic windows is to surface exactly this
+        # sub-threshold distribution.
+        now_ms = 1_700_000_000_000
+        snapshots = [
+            {
+                "address": f"0x{index:040x}",
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000.0, "size": 0.02}],
+                "recentFills": [
+                    {
+                        "coin": "BTC",
+                        "direction": "Increase Long",
+                        "price": 50_000.0,
+                        "size": 0.02,
+                        "time": now_ms - 10 * 60 * 1000,
+                    }
+                ],
+            }
+            for index in (1, 2, 3)
+        ]
+
+        with patch("server.current_time_ms", return_value=now_ms):
+            summary = self.service.build_sentiment_summary(snapshots, min_wallets=3)
+
+        item = summary["consensus"][0]
+        self.assertEqual(item["verifiedFreshIndependentWalletCount"], 0)
+        self.assertEqual(
+            item["freshAddValuesByWindow"],
+            {"2h": [1000, 1000, 1000], "8h": [1000, 1000, 1000], "24h": [1000, 1000, 1000]},
+        )
+
+    def test_signal_rejection_reasons_unchanged_by_diagnostic_windows(self) -> None:
+        # Regression pin: the diagnostic freshAddValuesByWindow field must not
+        # move signal_rejection_reasons output. Any future gating drift on
+        # this exact fixture should fail this assertion loudly.
+        snapshots = [
+            {
+                "address": "0x1111111111111111111111111111111111111111",
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000.0}],
+            },
+            {
+                "address": "0x2222222222222222222222222222222222222222",
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000.0}],
+            },
+            {
+                "address": "0x3333333333333333333333333333333333333333",
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000.0}],
+            },
+            {
+                "address": "0x4444444444444444444444444444444444444444",
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000.0}],
+            },
+        ]
+
+        summary = self.service.build_sentiment_summary(snapshots, min_wallets=4)
+        item = summary["consensus"][0]
+
+        self.assertEqual(
+            item["freshAddValuesByWindow"],
+            {"2h": [], "8h": [], "24h": []},
+        )
+        probability = self.service.signal_probability_score(item)
+        self.assertEqual(
+            self.service.signal_rejection_reasons(item, probability),
+            ["insufficient_verified_activity", "weak_fresh_net", "missing_fresh_vwap"],
+        )
 
     def test_unreliable_fill_data_does_not_count_as_verified_activity(self) -> None:
         item = {
@@ -3542,6 +3689,45 @@ class AlertSummaryTests(unittest.TestCase):
         stats = next(iter(buckets.values()))
         self.assertEqual(stats["sample"], 1)
         self.assertEqual(stats["shadowSample"], 1)
+
+    def test_shadow_record_copies_fresh_add_values_by_window_and_defaults_absent(self) -> None:
+        started_at = 1_700_000_000_000
+        with_windows = {
+            "coin": "ETH",
+            "side": "long",
+            "markPrice": 100.0,
+            "freshAddVwap": 99.0,
+            "convictionScore": 50.0,
+            "verifiedFreshIndependentWalletCount": 1,
+            "freshAddValuesByWindow": {"2h": [1000], "8h": [1000, 500], "24h": [2000]},
+        }
+        without_windows = {
+            "coin": "BTC",
+            "side": "long",
+            "markPrice": 100.0,
+            "freshAddVwap": 99.0,
+            "convictionScore": 50.0,
+            "verifiedFreshIndependentWalletCount": 1,
+        }
+        summary = {
+            "signals": [],
+            "consensus": [with_windows, without_windows],
+            "positionMarks": [
+                {"coin": "ETH", "marketCoin": "ETH", "side": "long", "markPrice": 100.0},
+                {"coin": "BTC", "marketCoin": "BTC", "side": "long", "markPrice": 100.0},
+            ],
+        }
+
+        records = self.service.update_shadow_signal_outcomes({}, summary, now_ms=started_at)
+
+        by_coin = {record["coin"]: record for record in records.values()}
+        self.assertEqual(
+            by_coin["ETH"]["freshAddValuesByWindow"],
+            {"2h": [1000], "8h": [1000, 500], "24h": [2000]},
+        )
+        # Consensus items built before this field existed (or any item that
+        # simply has none) must not require its presence.
+        self.assertEqual(by_coin["BTC"]["freshAddValuesByWindow"], {})
 
     def test_shadow_outcomes_skip_published_signals_and_rearm_slowly(self) -> None:
         started_at = 1_700_000_000_000
