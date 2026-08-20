@@ -239,6 +239,8 @@ MONI_SOCIAL_PROJECT_HANDLES = {
 }
 POSITION_GROUP_DISPLAY_MIN_VALUE = 1_000_000
 MIN_POSITION_MESSAGE_WALLETS = 3
+# 10-minute cycles, so this holds roughly a month of "Market view" values.
+MARKET_VIEW_HISTORY_LIMIT = int(os.environ.get("MARKET_VIEW_HISTORY_LIMIT", "4400"))
 FRESH_WALLET_FLOW_MIN_VALUE = int(os.environ.get("FRESH_WALLET_FLOW_MIN_VALUE", "500000"))
 # Diagnostic-only windows for measuring how fresh-add clustering behaves at
 # widths other than WALLET_SIGNAL_ACTIVITY_WINDOW_MS. Deliberately hard-coded
@@ -537,6 +539,23 @@ SECURITY_HEADERS = (
     ("Cache-Control", "no-store"),
 )
 _QUERY_TOKEN_RE = re.compile(r"([?&](?:token|api_token)=)[^&\s]*", re.IGNORECASE)
+
+
+def append_market_view_history(
+    history: Any,
+    at: str,
+    bias: Any,
+    *,
+    limit: int = MARKET_VIEW_HISTORY_LIMIT,
+) -> list[dict[str, str]]:
+    """Append one Market view reading, dropping the oldest past the limit."""
+    kept = [
+        {"at": str(entry.get("at", "")), "bias": str(entry.get("bias"))}
+        for entry in (history or [])
+        if isinstance(entry, dict) and entry.get("bias")
+    ]
+    kept.append({"at": at, "bias": str(bias or "mixed")})
+    return kept[-limit:]
 
 
 def redact_query_token(value: Any) -> Any:
@@ -7748,8 +7767,22 @@ class WalletTrackerService:
             }
 
         checked_at = now_iso()
+        # "Market view" prints on every digest but nothing has ever recorded
+        # what it said: 30 days of journal carry no mention of it and no state
+        # file kept it, so "how often is it not mixed" was unanswerable. It
+        # only leaves "mixed" when one side has 20% more wallets than the
+        # other (server.py:3851), and 24 of the 39 tracked wallets currently
+        # hold both sides at once, which pins the two counts together. Keep a
+        # bounded log so the question can be answered from data rather than
+        # argued from the mechanism.
+        bias_history = append_market_view_history(
+            state.get("marketViewHistory"),
+            checked_at,
+            alert_summary.get("overallBias"),
+        )
         new_state = {
             **state,
+            "marketViewHistory": bias_history,
             "lastCheckedAt": checked_at,
             "lastSentAt": checked_at if sent else state.get("lastSentAt"),
             "topConvictionWallets": top_cohort,

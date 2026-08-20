@@ -509,6 +509,27 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("5 wallets |", sol_row)
         self.assertNotIn("net", sol_row)
 
+    def test_market_view_history_appends_and_stays_bounded(self) -> None:
+        from server import append_market_view_history
+
+        history = [{"at": "2026-04-01T00:00:00Z", "bias": "mixed"}]
+        history = append_market_view_history(history, "2026-04-01T00:10:00Z", "bearish", limit=3)
+        history = append_market_view_history(history, "2026-04-01T00:20:00Z", "mixed", limit=3)
+        history = append_market_view_history(history, "2026-04-01T00:30:00Z", "bullish", limit=3)
+
+        self.assertEqual([entry["bias"] for entry in history], ["bearish", "mixed", "bullish"])
+
+        # Garbage entries from an older state file are dropped, and a missing
+        # bias records as mixed rather than crashing the alert cycle.
+        recovered = append_market_view_history(
+            ["junk", {"at": "x"}, {"at": "2026-04-01T00:40:00Z", "bias": "bearish"}],
+            "2026-04-01T00:50:00Z",
+            None,
+            limit=3,
+        )
+        self.assertEqual([entry["bias"] for entry in recovered], ["bearish", "mixed"])
+        self.assertEqual(append_market_view_history(None, "2026-04-01T01:00:00Z", "bullish")[0]["bias"], "bullish")
+
     def test_dormant_exclusion_line_follows_the_consensus_block(self) -> None:
         # The line explains why the consensus counts are smaller than the
         # tracked count, so it belongs wherever that block is shown and
