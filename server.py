@@ -4646,48 +4646,46 @@ class WalletTrackerService:
                 action = str(item.get("action") or signal_action_from_side(item.get("side"))).upper()
                 status = str(item.get("status") or "NEW").upper()
                 probability = to_float(item.get("probabilityScore"))
-                confidence_note = f"Confidence: {probability:.0f}/100"
+                confidence_note = f"conf {probability:.0f}/100"
                 if "fromProbabilityScore" in item:
                     confidence_note += (
                         f' (was {to_float(item.get("fromProbabilityScore")):.0f})'
                     )
                 if to_float(item.get("freshAddVwap")) > 0:
                     price_note = (
-                        f'Wallet add price: ${format_price(to_float(item.get("freshAddVwap")))} | '
-                        f'Current: ~${format_price(to_float(item.get("markPrice")))} '
+                        f'add ${format_price(to_float(item.get("freshAddVwap")))} -> '
+                        f'~${format_price(to_float(item.get("markPrice")))} '
                         f'({to_float(item.get("entryDistancePct")):+.2f}%)'
                     )
                 else:
-                    price_note = "Price data unavailable"
-                lines.extend(
-                    [
-                        f'{index}. {action} {item.get("coin", "Unknown")} '
-                        f'({str(item.get("side") or "").upper()}) - {status}',
-                        f'   {confidence_note}',
-                        (
-                            f'   Support: {int(to_float(item.get("independentWalletCount", item.get("walletCount"))))} wallets | '
-                            f'Net support: +{int(to_float(item.get("netIndependentWalletCount", item.get("netWalletCount"))))} | '
-                            f'Quality-adjusted: '
-                            f'{to_float(item.get("netIndependentWeightedWalletCount", item.get("netWeightedWalletCount"))):.1f}'
-                        ),
-                    ]
+                    price_note = "price unavailable"
+                lines.append(
+                    f'{index}. {action} {item.get("coin", "Unknown")} '
+                    f'({str(item.get("side") or "").upper()}) - {status} | {confidence_note}'
+                )
+                support_note = (
+                    f'   {int(to_float(item.get("independentWalletCount", item.get("walletCount"))))} wallets, '
+                    f'net +{int(to_float(item.get("netIndependentWalletCount", item.get("netWalletCount"))))}, '
+                    f'quality {to_float(item.get("netIndependentWeightedWalletCount", item.get("netWeightedWalletCount"))):.1f}'
                 )
                 if "netFreshIndependentWalletCount" in item:
-                    lines.append(
-                        f'   Fresh flow: {int(to_float(item.get("netFreshIndependentWalletCount")))} with signal, '
+                    support_note += (
+                        f' | fresh {int(to_float(item.get("netFreshIndependentWalletCount")))} vs '
                         f'{int(to_float(item.get("oppositeVerifiedFreshIndependentWalletCount")))} opposite'
                     )
+                lines.append(support_note)
                 if to_float(item.get("totalValue")) > 0:
-                    lines.append(f'   Open value: {format_money_compact(item.get("totalValue"))}')
-                lines.append(f'   {price_note}')
+                    lines.append(f'   {format_money_compact(item.get("totalValue"))} open | {price_note}')
+                else:
+                    lines.append(f'   {price_note}')
                 if item.get("cmmConfirmation") == "confirmed":
                     lines.append(
-                        f'   CMM confirms: {to_float(item.get("cmmProbabilityScore")):.0f}/100'
+                        f'   CMM confirms {to_float(item.get("cmmProbabilityScore")):.0f}/100'
                     )
                 if item.get("moniSocialTrend"):
                     lines.append(
-                        f'   Social activity: {item.get("moniSocialTrend")} '
-                        f'({to_float(item.get("moniSocialPaceRatio")):.2f}x normal pace)'
+                        f'   Social: {item.get("moniSocialTrend")} '
+                        f'({to_float(item.get("moniSocialPaceRatio")):.2f}x pace)'
                     )
 
         candidate_signals = changes.get("addedCandidateSignals", [])
@@ -4748,84 +4746,87 @@ class WalletTrackerService:
                     f'{format_money_compact(item.get("totalValue"))}, {cohorts}'
                 )
 
-        if changes.get("clusteredOpenPositions"):
+        clustered_rendered = changes.get("clusteredOpenPositions", [])[:10]
+        if clustered_rendered:
             lines.append("")
-            lines.append("Coordinated openings in the last 5 minutes")
-            for item in changes["clusteredOpenPositions"][:10]:
-                size_note = ""
-                if to_float(item.get("totalSize")) > 0:
-                    size_note = f' sz {format_position_size(to_float(item.get("totalSize")))}'
+            lines.append("Coordinated openings (5 min)")
+            for item in clustered_rendered:
                 entry_note = ""
                 if to_float(item.get("entryPx")) > 0:
-                    entry_note = f' VWAP ${format_price(to_float(item.get("entryPx")))}'
+                    entry_note = f' @ ${format_price(to_float(item.get("entryPx")))}'
                 lines.append(
                     f'- {item["coin"]} {str(item.get("side") or "").upper()}: '
-                    f'{int(item.get("walletCount") or 0)} wallets opened '
-                    f'{format_money_compact(item["totalValue"])} total{size_note}{entry_note}'
+                    f'{int(item.get("walletCount") or 0)} wallets, '
+                    f'{format_money_compact(item["totalValue"])}{entry_note}'
                 )
-                for wallet in item.get("wallets", [])[:5]:
+                rendered_wallets = item.get("wallets", [])[:5]
+                if rendered_wallets:
                     lines.append(
-                        f'  {wallet_label(wallet.get("alias", ""), wallet.get("address", ""))}: '
-                        f'{format_money_compact(wallet.get("totalValue"))}'
+                        "  "
+                        + " | ".join(
+                            f'{wallet_label(wallet.get("alias", ""), wallet.get("address", ""))} '
+                            f'{format_money_compact(wallet.get("totalValue"))}'
+                            for wallet in rendered_wallets
+                        )
                     )
 
-        if changes.get("newLargePositions"):
+        # (address.lower(), coin, side) already shown in the Coordinated
+        # openings block above - built from the same groups/wallets slices
+        # actually rendered, so it only skips rows the user has already seen.
+        clustered_keys = {
+            (str(wallet.get("address", "")).lower(), item.get("coin"), item.get("side"))
+            for item in clustered_rendered
+            for wallet in item.get("wallets", [])[:5]
+        }
+
+        filtered_new_large_positions = [
+            item
+            for item in changes.get("newLargePositions", [])
+            if (str(item.get("address", "")).lower(), item.get("coin"), item.get("side")) not in clustered_keys
+        ]
+        if filtered_new_large_positions:
             lines.append("")
             lines.append(f"New large pos ({format_money_compact(NEW_POSITION_ALERT_MIN_VALUE)}+)")
-            for item in changes["newLargePositions"][:10]:
-                size_note = ""
-                if to_float(item.get("totalSize")) > 0:
-                    size_note = f' sz {format_position_size(to_float(item.get("totalSize")))}'
+            for item in filtered_new_large_positions[:10]:
                 entry_note = ""
                 if to_float(item.get("entryPx")) > 0:
-                    entry_label = "open VWAP" if item.get("entryPriceSource") == "fill" else "entry"
-                    entry_note = f' {entry_label} ${format_price(to_float(item.get("entryPx")))}'
+                    marker = "@" if item.get("entryPriceSource") == "fill" else "~"
+                    entry_note = f' {marker} ${format_price(to_float(item.get("entryPx")))}'
                 lines.append(
-                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))} opened '
-                    f'{item["coin"]} {str(item.get("side") or "").upper()}: '
-                    f'{format_money_compact(item["totalValue"])}{size_note}{entry_note}'
+                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))} '
+                    f'{item["coin"]} {str(item.get("side") or "").upper()} '
+                    f'{format_money_compact(item["totalValue"])}{entry_note}'
                 )
 
         if changes.get("closedLargePositions"):
             lines.append("")
             lines.append(f"Closed large pos ({format_money_compact(NEW_POSITION_ALERT_MIN_VALUE)}+)")
             for item in changes["closedLargePositions"][:10]:
-                size_note = ""
-                if to_float(item.get("totalSize")) > 0:
-                    size_note = f' sz {format_position_size(to_float(item.get("totalSize")))}'
                 close_note = ""
                 if to_float(item.get("closePrice")) > 0:
-                    price_marker = "@" if item.get("closePriceSource") == "fill" else "~$"
-                    if price_marker == "@":
-                        close_note = f' close @${format_price(to_float(item.get("closePrice")))}'
-                    else:
-                        close_note = f' last ~${format_price(to_float(item.get("closePrice")))}'
+                    marker = "@" if item.get("closePriceSource") == "fill" else "~"
+                    close_note = f' {marker}${format_price(to_float(item.get("closePrice")))}'
                 lines.append(
-                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))} closed '
-                    f'{item["coin"]} {str(item.get("side") or "").upper()}: '
-                    f'{format_money_compact(item["totalValue"])}{size_note}{close_note}'
+                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))} '
+                    f'{item["coin"]} {str(item.get("side") or "").upper()} '
+                    f'{format_money_compact(item["totalValue"])}{close_note}'
                 )
 
         if changes.get("increasedLargePositions"):
             lines.append("")
             lines.append(f"Large pos additions ({format_money_compact(POSITION_INCREASE_ALERT_MIN_DELTA)}+)")
             for item in changes["increasedLargePositions"][:10]:
-                size_note = ""
-                if to_float(item.get("sizeIncrease")) > 0:
-                    size_note = f' +{format_position_size(to_float(item.get("sizeIncrease")))}'
                 add_price_note = ""
                 if to_float(item.get("addPrice")) > 0:
-                    add_label = "add price" if item.get("addPriceSource") == "fill" else "estimated price"
-                    add_price_note = f' at {add_label} ${format_price(to_float(item.get("addPrice")))}'
+                    marker = "@" if item.get("addPriceSource") == "fill" else "~"
+                    add_price_note = f' {marker} ${format_price(to_float(item.get("addPrice")))}'
                 add_value = to_float(item.get("addValue", item.get("increaseValue")))
                 lines.append(
-                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))} added '
-                    f'{format_money_compact(add_value)} to {item["coin"]} '
-                    f'{str(item.get("side") or "").upper()}{add_price_note}'
-                )
-                lines.append(
-                    f'   Position: {format_money_compact(item.get("previousValue"))} -> '
-                    f'{format_money_compact(item.get("totalValue"))}{size_note}'
+                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))} '
+                    f'+{format_money_compact(add_value)} {item["coin"]} '
+                    f'{str(item.get("side") or "").upper()}{add_price_note} '
+                    f'({format_money_compact(item.get("previousValue"))} -> '
+                    f'{format_money_compact(item.get("totalValue"))})'
                 )
 
         return "\n".join(lines)
