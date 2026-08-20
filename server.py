@@ -7276,6 +7276,27 @@ class WalletTrackerService:
         )
         stock_groups = self.build_position_groups(dashboard, hip3_only=False, stock_like_only=True)
         total_positions = sum(item["positionCount"] for item in position_groups + commodity_groups + stock_groups)
+        # A coin whose two sides both clear the display floor gets one row per
+        # side, and each row reads as agreement on its own: a live message
+        # carried GOOGL LONG with 4 wallets directly above GOOGL SHORT with 4,
+        # which is no agreement at all, and five more coins were split the same
+        # way (BTC 8/6, HYPE 7/3, SPCX 8/4, SKHX 8/4, SKHY 5/3) - 12 of its 40
+        # rows. The consensus board states net for exactly this reason; without
+        # it here the gross count overstates what the wallets agree on. Only
+        # rows with an opposite side get the fragment, since with no opposite
+        # side the net equals the wallet count already printed.
+        wallets_by_coin_side = {
+            (str(item.get("coin")), str(item.get("side") or "").upper()): int(to_float(item.get("walletCount")))
+            for item in position_groups + commodity_groups + stock_groups
+        }
+
+        def net_note(item: dict[str, Any]) -> str:
+            side = str(item.get("side") or "").upper()
+            opposite_side = "SHORT" if side == "LONG" else "LONG"
+            opposite = wallets_by_coin_side.get((str(item.get("coin")), opposite_side), 0)
+            if opposite <= 0:
+                return ""
+            return f', net {int(to_float(item.get("walletCount"))) - opposite:+d}'
 
         if not position_groups and not commodity_groups and not stock_groups:
             lines.append("")
@@ -7307,7 +7328,7 @@ class WalletTrackerService:
                             )
                         lines.append(
                             f'- {item["coin"]} {str(item.get("side") or "").upper()}: '
-                            f'{item["walletCount"]} wallets | '
+                            f'{item["walletCount"]} wallets{net_note(item)} | '
                             f'{format_money_compact(to_float(item.get("totalValue")))} open'
                             f'{entry_note}{recent_add_note}'
                         )

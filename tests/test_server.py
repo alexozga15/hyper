@@ -475,6 +475,40 @@ class AlertSummaryTests(unittest.TestCase):
 
         self.assertEqual(message.count("Updated:"), 1)
 
+    def test_positions_row_shows_net_when_both_sides_are_listed(self) -> None:
+        # A live /update carried GOOGL LONG with 4 wallets directly above
+        # GOOGL SHORT with 4 - two rows that each read as agreement while the
+        # net is zero. Rows without an opposite side stay unannotated, since
+        # there the net equals the wallet count already printed.
+        dashboard = {
+            "generatedAt": "2026-04-09T06:05:00Z",
+            "wallets": [
+                {
+                    "address": f"0x{index:040x}",
+                    "alias": f"W{index}",
+                    "positions": [
+                        {"coin": coin, "side": side, "positionValue": 2_000_000, "size": 10, "entryPx": 100},
+                    ],
+                }
+                for index, (coin, side) in enumerate(
+                    [("GOOGL", "Long")] * 4
+                    + [("GOOGL", "Short")] * 4
+                    + [("SOL", "Short")] * 5
+                )
+            ],
+        }
+
+        message = self.service.build_positions_message(dashboard)
+        rows = [line for line in message.splitlines() if line.startswith("- ")]
+        long_row = next(line for line in rows if line.startswith("- GOOGL LONG"))
+        short_row = next(line for line in rows if line.startswith("- GOOGL SHORT"))
+        sol_row = next(line for line in rows if line.startswith("- SOL SHORT"))
+
+        self.assertIn("4 wallets, net +0", long_row)
+        self.assertIn("4 wallets, net +0", short_row)
+        self.assertIn("5 wallets |", sol_row)
+        self.assertNotIn("net", sol_row)
+
     def test_data_health_lines_only_in_on_demand_summaries(self) -> None:
         # run_health_monitor.py already watches these counts with thresholds
         # and dedupe, so the routine digests drop them; on-demand commands,
