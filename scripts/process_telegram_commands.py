@@ -188,6 +188,7 @@ def build_reply(
                     include_consensus=False,
                     include_signals=False,
                     include_footer=False,
+                    include_data_health=False,
                 ),
                 service.build_positions_message(dashboard_cache),
             ]

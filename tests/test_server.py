@@ -475,6 +475,45 @@ class AlertSummaryTests(unittest.TestCase):
 
         self.assertEqual(message.count("Updated:"), 1)
 
+    def test_data_health_lines_only_in_on_demand_summaries(self) -> None:
+        # run_health_monitor.py already watches these counts with thresholds
+        # and dedupe, so the routine digests drop them; on-demand commands,
+        # where the reader is asking what the tracker knows, keep them.
+        summary = {
+            "generatedAt": "2026-04-09T06:00:00Z",
+            "overallBias": "bearish",
+            "walletCount": 39,
+            "fillQualityUnknownWalletCount": 3,
+            "fillFetchFailedWalletCount": 1,
+            "dormantWalletCount": 3,
+            "excludedDormantWalletCount": 2,
+        }
+
+        routine = self.service.build_summary_message(
+            summary,
+            min_wallets=4,
+            include_consensus=False,
+            include_signals=False,
+            include_data_health=False,
+        )
+        on_demand = self.service.build_summary_message(
+            summary,
+            min_wallets=4,
+            include_consensus=False,
+            include_signals=False,
+        )
+
+        self.assertNotIn("No usable fill data: 3 wallets", routine)
+        self.assertNotIn("Fill fetch failed this cycle: 1 wallets", routine)
+        self.assertNotIn("No fills in the last 7 days: 3 wallets", routine)
+        self.assertIn("No usable fill data: 3 wallets", on_demand)
+        self.assertIn("Fill fetch failed this cycle: 1 wallets", on_demand)
+        self.assertIn("No fills in the last 7 days: 3 wallets", on_demand)
+        # Not fetch telemetry: it explains why consensus counts are smaller
+        # than the tracked count, so it survives in both.
+        self.assertIn("Dropped from consensus as dormant: 2 wallets", routine)
+        self.assertIn("Dropped from consensus as dormant: 2 wallets", on_demand)
+
     def test_build_sentiment_summary_assigns_conviction_scores(self) -> None:
         snapshots = [
             {
