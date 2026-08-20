@@ -15,6 +15,7 @@ import argparse
 import json
 import math
 import random
+import re
 import statistics
 import sys
 from collections import defaultdict
@@ -26,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from server import HyperliquidClient, WalletStore, WalletTrackerService, WALLETS_FILE, normalize_position_coin, now_iso, to_float
+from server import DATA_DIR, HyperliquidClient, WalletStore, WalletTrackerService, WALLETS_FILE, normalize_position_coin, now_iso, to_float
 
 
 HORIZONS_HOURS = (1, 4, 12, 24)
@@ -68,6 +69,34 @@ def normalize_fill(address: str, fill: dict[str, Any]) -> dict[str, Any] | None:
         "size": size,
         "time": time_ms,
     }
+
+
+def parse_configs(spec: str) -> tuple[dict[str, Any], ...]:
+    """Parse "3w/5m,4w/120m" into config dicts, or fall back to the defaults.
+
+    The built-in three were chosen before the live detector settled on 3
+    wallets inside a 5-minute window, and a 30-day run over 39 wallets found
+    only 3 events at the loosest of them - too few to evaluate. Being able to
+    sweep the window from the command line is what makes it possible to find
+    where the event count becomes large enough to say anything.
+    """
+    if not spec.strip():
+        return DEFAULT_CONFIGS
+    configs: list[dict[str, Any]] = []
+    for chunk in spec.split(","):
+        piece = chunk.strip().lower()
+        if not piece:
+            continue
+        match = re.fullmatch(r"(\d+)w/(\d+)m", piece)
+        if not match:
+            raise ValueError(f"config {chunk!r} must look like '3w/5m'")
+        wallets, minutes = int(match.group(1)), int(match.group(2))
+        if wallets < 2 or minutes < 1:
+            raise ValueError(f"config {chunk!r} needs at least 2 wallets and 1 minute")
+        configs.append({"name": f"{wallets}w_{minutes}m", "minWallets": wallets, "windowMinutes": minutes})
+    if not configs:
+        raise ValueError("no usable configs were parsed")
+    return tuple(configs)
 
 
 def build_consensus_events(
@@ -273,9 +302,18 @@ def main() -> int:
     parser.add_argument("--cost-bps-per-side", type=float, default=10.0, help="Round-trip cost assumes this value twice.")
     parser.add_argument("--output", type=Path, default=ROOT / "data" / "wallet_signal_backtest.json")
     parser.add_argument("--max-wallets", type=int, default=0, help="Optional cap for a fast smoke test.")
+    parser.add_argument(
+        "--configs",
+        default="",
+        help='Comma-separated "<wallets>w/<minutes>m" specs, e.g. "3w/5m,4w/120m". Defaults to the built-in three.',
+    )
     args = parser.parse_args()
     if args.days < 2 or args.cost_bps_per_side < 0:
         parser.error("--days must be >= 2 and cost cannot be negative")
+    try:
+        configs = parse_configs(args.configs)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     service = WalletTrackerService(WalletStore(WALLETS_FILE), HyperliquidClient())
     wallets = service.store.list_wallets()
@@ -299,7 +337,7 @@ def main() -> int:
 
     all_events: dict[str, list[dict[str, Any]]] = {}
     coins: set[str] = set()
-    for config in DEFAULT_CONFIGS:
+    for config in configs:
         events = build_consensus_events(fills, min_wallets=config["minWallets"], window_minutes=config["windowMinutes"])
         all_events[config["name"]] = events
         coins.update(str(item["coin"]) for item in events)
@@ -317,7 +355,7 @@ def main() -> int:
                 errors.append(f"{coin} candles: {exc}")
 
     configurations = []
-    for config in DEFAULT_CONFIGS:
+    for config in configs:
         evaluated = [
             evaluate_event(event, candles_by_coin.get(str(event["coin"]), []), cost_bps_per_side=args.cost_bps_per_side)
             for event in all_events[config["name"]]
@@ -343,6 +381,13 @@ def main() -> int:
         default=None,
     )
     warnings = build_report_warnings(selected, configurations)
+    if DATA_DIR == (ROOT / "data").resolve():
+        warnings.insert(
+            0,
+            f"DATA_DIR is unset, so this ran against the repo copy at {WALLETS_FILE} "
+            f"({len(wallets)} wallets), not production state. Re-run with DATA_DIR set to the "
+            "live state directory before drawing conclusions.",
+        )
     report = {
         "generatedAt": now_iso(),
         "methodology": {
@@ -358,10 +403,23 @@ def main() -> int:
                 "Historical position snapshots, correlation groups, CMM confirmation, and point-in-time top-10 membership are unavailable.",
                 "This evaluates opening consensus only; it is not a claim that the complete live signal engine is backtested.",
                 "The current wallet universe is hindsight-selected, so this is not a clean out-of-sample estimate of the original wallet-selection process.",
-                f"{len(DEFAULT_CONFIGS)} configs x {len(HORIZONS_HOURS)} horizons are screened without multiple-comparison correction.",
+                f"{len(configs)} configs x {len(HORIZONS_HOURS)} horizons are screened without multiple-comparison correction.",
             ],
         },
-        "coverage": {"wallets": len(wallets), "openFills": len(fills), "coinsWithEvents": len(coins), "days": args.days},
+        # Which wallet list this ran against, in the report itself. DATA_DIR
+        # defaults to the repo's data/ directory, and the copy committed there
+        # drifts from production: a run without DATA_DIR set silently used a
+        # 33-wallet list that still contained wallets removed from tracking,
+        # and nothing in the output said so. systemd sets DATA_DIR for the
+        # services; a hand-run does not unless you export it.
+        "coverage": {
+            "wallets": len(wallets),
+            "openFills": len(fills),
+            "coinsWithEvents": len(coins),
+            "days": args.days,
+            "dataDir": str(DATA_DIR),
+            "walletsFile": str(WALLETS_FILE),
+        },
         "configs": configurations,
         "selectedOnValidation": {
             "name": selected["name"],
