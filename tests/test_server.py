@@ -427,6 +427,54 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("@PUMP-1 short (3 wallets)", hip3_message)
         self.assertNotIn("$456", hip3_message)
 
+    def test_consensus_row_renders_net_and_quality_on_one_line(self) -> None:
+        summary = {
+            "generatedAt": "2026-04-09T06:00:00Z",
+            "overallBias": "bearish",
+            "walletCount": 16,
+            "consensus": [
+                {
+                    "coin": "SOL",
+                    "side": "short",
+                    "walletCount": 10,
+                    "netWalletCount": 6,
+                    "netWeightedWalletCount": 5.9,
+                },
+            ],
+        }
+
+        message = self.service.build_summary_message(summary, min_wallets=3)
+
+        self.assertIn("- SOL SHORT: 10 wallets, net +6, quality 5.9", message)
+        self.assertNotIn("Net support:", message)
+        self.assertNotIn("Quality-adjusted support:", message)
+
+    def test_update_message_concatenation_has_single_updated_footer(self) -> None:
+        # /update (and the 4-hour digest) build the summary block with
+        # include_footer=False so the trailing Updated: line comes only
+        # from the positions block that ends the concatenated message.
+        summary = {
+            "generatedAt": "2026-04-09T06:00:00Z",
+            "overallBias": "bearish",
+            "walletCount": 16,
+        }
+        dashboard = {"generatedAt": "2026-04-09T06:05:00Z", "wallets": []}
+
+        message = "\n\n".join(
+            [
+                self.service.build_summary_message(
+                    summary,
+                    min_wallets=3,
+                    include_consensus=False,
+                    include_signals=False,
+                    include_footer=False,
+                ),
+                self.service.build_positions_message(dashboard),
+            ]
+        )
+
+        self.assertEqual(message.count("Updated:"), 1)
+
     def test_build_sentiment_summary_assigns_conviction_scores(self) -> None:
         snapshots = [
             {

@@ -4840,12 +4840,15 @@ class WalletTrackerService:
         include_consensus: bool = True,
         include_hip3: bool = False,
         include_signals: bool = True,
+        include_footer: bool = True,
     ) -> str:
         lines = [
             title,
-            f"Market view: {str(summary.get('overallBias', 'mixed')).title()}",
-            f'Tracking: {summary.get("walletCount", 0)} wallets',
-            f"Agreement required: {min_wallets} wallets",
+            (
+                f"Market view: {str(summary.get('overallBias', 'mixed')).title()} | "
+                f"Tracking: {int(to_float(summary.get('walletCount')))} wallets | "
+                f"Agreement required: {min_wallets}"
+            ),
         ]
         fill_quality_unknown = int(to_float(summary.get("fillQualityUnknownWalletCount")))
         if fill_quality_unknown > 0:
@@ -4860,29 +4863,19 @@ class WalletTrackerService:
         if excluded_dormant > 0:
             lines.append(f"Dropped from consensus as dormant: {excluded_dormant} wallets")
         if include_signals:
-            lines.append(
-                f'Signals ready to act on: {summary.get("signalCount", len(summary.get("signals", [])))}'
-            )
-
-        if include_signals:
             signals = summary.get("signals", [])
             lines.append("")
             lines.append("Signals ready to act on")
             if signals:
                 for index, item in enumerate(signals[:10], start=1):
                     probability = to_float(item.get("probabilityScore", item.get("convictionScore")))
-                    lines.extend(
-                        [
-                            f'{index}. {str(item.get("action", "watch")).upper()} '
-                            f'{item["coin"]} ({str(item.get("side") or "").upper()}) - '
-                            f'{probability:.0f}/100 confidence',
-                            (
-                                f'   {int(to_float(item.get("independentWalletCount", item.get("walletCount"))))} wallets | '
-                                f'Net support: +{int(to_float(item.get("netIndependentWalletCount", item.get("netWalletCount"))))} | '
-                                f'Quality-adjusted: '
-                                f'{to_float(item.get("netIndependentWeightedWalletCount", item.get("netWeightedWalletCount"))):.1f}'
-                            ),
-                        ]
+                    lines.append(
+                        f'{index}. {str(item.get("action", "watch")).upper()} '
+                        f'{item["coin"]} ({str(item.get("side") or "").upper()}) - '
+                        f'{probability:.0f}/100 | '
+                        f'{int(to_float(item.get("independentWalletCount", item.get("walletCount"))))} wallets, '
+                        f'net +{int(to_float(item.get("netIndependentWalletCount", item.get("netWalletCount"))))}, '
+                        f'quality {to_float(item.get("netIndependentWeightedWalletCount", item.get("netWeightedWalletCount"))):.1f}'
                     )
             else:
                 lines.append("- None right now")
@@ -4908,21 +4901,21 @@ class WalletTrackerService:
 
             def append_consensus_items(items: list[dict[str, Any]]) -> None:
                 for item in items[:10]:
-                    lines.append(
-                        # convictionScore is netIndependentWeightedWalletCount
-                        # divided by the strongest item of the same cycle, so it
-                        # printed the next line's number a second time and gave
-                        # the top row a permanent 100/100 - including rows with
-                        # Net support +0, where there is no consensus at all.
+                    # convictionScore is netIndependentWeightedWalletCount
+                    # divided by the strongest item of the same cycle, so it
+                    # printed the next line's number a second time and gave
+                    # the top row a permanent 100/100 - including rows with
+                    # Net support +0, where there is no consensus at all.
+                    row = (
                         f'- {item["coin"]} {str(item.get("side") or "").upper()}: '
                         f'{int(to_float(item.get("independentWalletCount", item.get("walletCount"))))} wallets'
                     )
                     if "netWalletCount" in item:
-                        lines.append(
-                            f'  Net support: +{int(to_float(item.get("netIndependentWalletCount", item.get("netWalletCount"))))} | '
-                            f'Quality-adjusted support: '
-                            f'{to_float(item.get("netIndependentWeightedWalletCount", item.get("netWeightedWalletCount"))):.1f}'
+                        row += (
+                            f', net +{int(to_float(item.get("netIndependentWalletCount", item.get("netWalletCount"))))}, '
+                            f'quality {to_float(item.get("netIndependentWeightedWalletCount", item.get("netWeightedWalletCount"))):.1f}'
                         )
+                    lines.append(row)
 
             if main_consensus:
                 append_consensus_items(main_consensus)
@@ -4949,8 +4942,9 @@ class WalletTrackerService:
             else:
                 lines.append("- None")
 
-        lines.append("")
-        lines.append(f'Updated: {format_update_time(summary.get("generatedAt", now_iso()))}')
+        if include_footer:
+            lines.append("")
+            lines.append(f'Updated: {format_update_time(summary.get("generatedAt", now_iso()))}')
         return "\n".join(lines)
 
     def live_sentiment_summary(self, min_wallets: int) -> dict[str, Any]:
@@ -7596,7 +7590,9 @@ class WalletTrackerService:
     def build_hourly_update_message(self, dashboard: dict[str, Any], summary: dict[str, Any], min_wallets: int) -> str:
         return "\n\n".join(
             [
-                self.build_summary_message(summary, min_wallets, title="4-hour wallet update", include_signals=False),
+                self.build_summary_message(
+                    summary, min_wallets, title="4-hour wallet update", include_signals=False, include_footer=False
+                ),
                 self.build_positions_message(dashboard),
             ]
         )

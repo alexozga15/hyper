@@ -183,7 +183,11 @@ def build_reply(
                 # a reference rather than a decision aid and stays available
                 # on demand through /consensus.
                 service.build_summary_message(
-                    summary_cache, min_wallets, include_consensus=False, include_signals=False
+                    summary_cache,
+                    min_wallets,
+                    include_consensus=False,
+                    include_signals=False,
+                    include_footer=False,
                 ),
                 service.build_positions_message(dashboard_cache),
             ]
