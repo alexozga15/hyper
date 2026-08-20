@@ -4841,6 +4841,7 @@ class WalletTrackerService:
         include_hip3: bool = False,
         include_signals: bool = True,
         include_footer: bool = True,
+        include_data_health: bool = True,
     ) -> str:
         lines = [
             title,
@@ -4850,15 +4851,25 @@ class WalletTrackerService:
                 f"Agreement required: {min_wallets}"
             ),
         ]
-        fill_quality_unknown = int(to_float(summary.get("fillQualityUnknownWalletCount")))
-        if fill_quality_unknown > 0:
-            lines.append(f"No usable fill data: {fill_quality_unknown} wallets")
-        fill_fetch_failed = int(to_float(summary.get("fillFetchFailedWalletCount")))
-        if fill_fetch_failed > 0:
-            lines.append(f"Fill fetch failed this cycle: {fill_fetch_failed} wallets")
-        dormant_wallets = int(to_float(summary.get("dormantWalletCount")))
-        if dormant_wallets > 0:
-            lines.append(f"No fills in the last 7 days: {dormant_wallets} wallets")
+        # These three report how the fetch went, not what the wallets are
+        # doing, and run_health_monitor.py already watches the same numbers -
+        # fillsFetchFailedWallets and untrustedQualityWindowWallets - with
+        # thresholds and alert dedupe behind them. In the routine digests they
+        # were a second, unthresholded copy of that channel, so those callers
+        # pass include_data_health=False. On-demand commands keep them: there
+        # the question being asked is what the tracker currently knows.
+        if include_data_health:
+            fill_quality_unknown = int(to_float(summary.get("fillQualityUnknownWalletCount")))
+            if fill_quality_unknown > 0:
+                lines.append(f"No usable fill data: {fill_quality_unknown} wallets")
+            fill_fetch_failed = int(to_float(summary.get("fillFetchFailedWalletCount")))
+            if fill_fetch_failed > 0:
+                lines.append(f"Fill fetch failed this cycle: {fill_fetch_failed} wallets")
+            dormant_wallets = int(to_float(summary.get("dormantWalletCount")))
+            if dormant_wallets > 0:
+                lines.append(f"No fills in the last 7 days: {dormant_wallets} wallets")
+        # Kept in every caller: this one is not fetch telemetry, it explains
+        # why the consensus counts below are smaller than the tracked count.
         excluded_dormant = int(to_float(summary.get("excludedDormantWalletCount")))
         if excluded_dormant > 0:
             lines.append(f"Dropped from consensus as dormant: {excluded_dormant} wallets")
@@ -7591,7 +7602,12 @@ class WalletTrackerService:
         return "\n\n".join(
             [
                 self.build_summary_message(
-                    summary, min_wallets, title="4-hour wallet update", include_signals=False, include_footer=False
+                    summary,
+                    min_wallets,
+                    title="4-hour wallet update",
+                    include_signals=False,
+                    include_footer=False,
+                    include_data_health=False,
                 ),
                 self.build_positions_message(dashboard),
             ]
