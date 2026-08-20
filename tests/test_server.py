@@ -207,6 +207,19 @@ class SegmentTests(unittest.TestCase):
 class AlertSummaryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.service = WalletTrackerService(WalletStore(Path(ALERTS_FILE)), HyperliquidClient())
+        # The production floor for single-wallet position alerts is $2M; these
+        # scenarios were written against the earlier $1M and are about how the
+        # events are diffed and rendered, not about where the floor sits. Pin
+        # the old value here so the fixtures keep their meaning, and see
+        # test_large_position_alert_floor_default for the floor itself.
+        for name in (
+            "LARGE_POSITION_ALERT_MIN_VALUE",
+            "NEW_POSITION_ALERT_MIN_VALUE",
+            "POSITION_INCREASE_ALERT_MIN_DELTA",
+        ):
+            patcher = patch(f"server.{name}", 1_000_000)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def test_elite_override_wallet_is_configured(self) -> None:
         self.assertIn("0xc9e839a529d1a3a46e2b48d20c461d4afecb72e4", ELITE_WALLET_OVERRIDES)
@@ -6403,3 +6416,38 @@ class ShadowSignalSamplingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LargePositionAlertFloorTests(unittest.TestCase):
+    """The production floor itself, outside the class that patches it down."""
+
+    def test_default_floor_is_two_million(self) -> None:
+        # Measured over 14 days across the 39 tracked wallets: 5.5 fills/day at
+        # $1M or more, 1.6/day at $2M, 0.4/day at $5M. One stretch sent seven
+        # notifications in 100 minutes, none of them above $2M.
+        import server as server_module
+
+        self.assertEqual(server_module.LARGE_POSITION_ALERT_MIN_VALUE, 2_000_000)
+        self.assertEqual(server_module.NEW_POSITION_ALERT_MIN_VALUE, 2_000_000)
+        self.assertEqual(server_module.POSITION_INCREASE_ALERT_MIN_DELTA, 2_000_000)
+
+    def test_snapshot_threshold_follows_the_patched_constant(self) -> None:
+        # A default argument would have frozen the import-time value; this is
+        # the regression guard for that, and for the env var reaching here.
+        service = WalletTrackerService(WalletStore(Path(ALERTS_FILE)), HyperliquidClient())
+        dashboard = {
+            "wallets": [
+                {
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "alias": "One",
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_500_000}],
+                }
+            ]
+        }
+
+        self.assertEqual(service.build_large_position_snapshot(dashboard), {})
+        with patch("server.NEW_POSITION_ALERT_MIN_VALUE", 1_000_000):
+            self.assertIn(
+                "0x1111111111111111111111111111111111111111:BTC:long",
+                service.build_large_position_snapshot(dashboard),
+            )
