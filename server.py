@@ -7378,17 +7378,17 @@ class WalletTrackerService:
                     for item in groups[:50]:
                         entry_note = ""
                         if to_float(item.get("entryPx")) > 0:
-                            entry_label = "weighted entry" if item.get("entryType") == "size_weighted" else "average entry"
-                            entry_note = f' | {entry_label}: ${format_price(to_float(item.get("entryPx")))}'
+                            entry_label = "entry(w)" if item.get("entryType") == "size_weighted" else "entry(avg)"
+                            entry_note = f' | {entry_label} ${format_price(to_float(item.get("entryPx")))}'
                         recent_add_note = ""
                         if to_float(item.get("recentAddPx")) > 0:
                             recent_add_note = (
-                                f' | 7d add VWAP: ${format_price(to_float(item.get("recentAddPx")))} '
-                                f'({int(to_float(item.get("recentAddWalletCount")))} wallets)'
+                                f' | 7d add ${format_price(to_float(item.get("recentAddPx")))} '
+                                f'({int(to_float(item.get("recentAddWalletCount")))}w)'
                             )
                         lines.append(
                             f'- {item["coin"]} {str(item.get("side") or "").upper()}: '
-                            f'{item["walletCount"]} wallets, {item["positionCount"]} pos | '
+                            f'{item["walletCount"]} wallets | '
                             f'{format_money_compact(to_float(item.get("totalValue")))} open'
                             f'{entry_note}{recent_add_note}'
                         )
