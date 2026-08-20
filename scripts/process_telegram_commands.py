@@ -11,7 +11,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import importlib.util
+
 from server import (
+    ALERTS_FILE,
     DASHBOARD_SNAPSHOT_FILE,
     DASHBOARD_SNAPSHOT_MAX_AGE_SECONDS,
     HyperliquidClient,
@@ -27,7 +30,22 @@ from server import (
 )
 
 
+# run_outcome_report is a script, not a package module, so it is loaded by
+# path the same way the tests load it. Importing it here keeps one
+# implementation of the report behind both the weekly job and /outcomes.
+_OUTCOME_SPEC = importlib.util.spec_from_file_location(
+    "run_outcome_report", ROOT / "scripts" / "run_outcome_report.py"
+)
+assert _OUTCOME_SPEC and _OUTCOME_SPEC.loader
+outcome_report = importlib.util.module_from_spec(_OUTCOME_SPEC)
+_OUTCOME_SPEC.loader.exec_module(outcome_report)
+
+# Commands here trigger a live dashboard fetch before the reply is built.
+# /outcomes reads stored outcomes only, so it stays out - listing it would
+# make a report about past calls pay for a fresh snapshot it never reads.
 LIVE_COMMANDS = {"/update", "/sentiment", "/consensus", "/signals", "/cmm", "/hip3", "/positions", "/ranks", "/elite"}
+# Every command name, live or not: a ticker query must never swallow one.
+KNOWN_COMMANDS = LIVE_COMMANDS | {"/moni", "/outcomes", "/help"}
 SUMMARY_COMMANDS = {"/update", "/sentiment", "/consensus", "/signals", "/hip3"}
 CMM_COMMANDS = {"/signals", "/cmm"}
 MONI_COMMANDS = {"/signals", "/moni"}
@@ -56,7 +74,7 @@ def parse_position_wallet_query(text: str) -> tuple[str, str] | None:
     side = message[1].strip().lower()
     if not ticker or side not in {"long", "short"}:
         return None
-    if f"/{ticker.lower()}" in LIVE_COMMANDS or ticker.lower() == "help":
+    if f"/{ticker.lower()}" in KNOWN_COMMANDS:
         return None
     return ticker.upper(), side
 
@@ -74,6 +92,7 @@ def build_help_message() -> str:
             "/hip3 - current HIP-3 consensus only",
             "/positions - all open positions now",
             "/ranks - tracked wallets ranked by 7D hit rate plus 7D PnL",
+            "/outcomes - what the last 7 days of calls actually returned",
             "/elite - open positions for Elite-ranked wallets",
             "/btc long - wallets currently long BTC",
             "/hype short - wallets currently short HYPE",
@@ -238,6 +257,15 @@ def build_reply(
         return service.build_wallet_rankings_message(dashboard_cache, limit=20)
     if command == "/elite":
         return service.build_elite_wallet_positions_message(dashboard_cache)
+    if command == "/outcomes":
+        # The only message that reports what came of the bot's own calls; the
+        # weekly job sends the same text on a timer.
+        return outcome_report.build_message(
+            outcome_report.build_payload(
+                (load_json_file(ALERTS_FILE, {}) or {}).get("state", {}),
+                now_ms=current_time_ms(),
+            )
+        )
     if position_query:
         coin, side = position_query
         return service.build_position_wallets_message(dashboard_cache, coin, side)

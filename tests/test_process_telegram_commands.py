@@ -319,3 +319,36 @@ class DispatchUpdateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OutcomeCommandTests(unittest.TestCase):
+    def test_outcomes_is_not_a_live_command(self) -> None:
+        # It reads stored outcomes only; listing it in LIVE_COMMANDS would
+        # make it pay for a dashboard fetch it never reads.
+        self.assertNotIn("/outcomes", commands.LIVE_COMMANDS)
+        self.assertIn("/outcomes", commands.KNOWN_COMMANDS)
+
+    def test_command_names_are_never_parsed_as_tickers(self) -> None:
+        for text in ("/outcomes long", "/moni short", "/help long"):
+            with self.subTest(text=text):
+                self.assertIsNone(commands.parse_position_wallet_query(text))
+        self.assertEqual(commands.parse_position_wallet_query("/btc long"), ("BTC", "long"))
+
+    def test_outcomes_reply_reports_stored_outcomes(self) -> None:
+        state = {
+            "state": {
+                "shadowSignalOutcomes": {
+                    "a": {
+                        "coin": "BTC",
+                        "side": "short",
+                        "startedAt": commands.current_time_ms() - 3_600_000,
+                        "outcomes": {"1h": {"netReturnPct": -3.419}},
+                    }
+                }
+            }
+        }
+        with patch.object(commands, "load_json_file", return_value=state):
+            reply = commands.build_reply(object(), "/outcomes", None, None, None, None, 4)
+
+        self.assertIn("Outcome report", reply)
+        self.assertIn("n=1", reply)
