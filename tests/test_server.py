@@ -4799,8 +4799,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertTrue(result["sent"])
         sent_message = send_telegram_message.call_args.args[2]
         self.assertIn("High-confidence signals", sent_message)
-        self.assertIn("1. BUY BTC (LONG) - NEW", sent_message)
-        self.assertIn("Confidence: 82/100", sent_message)
+        self.assertIn("1. BUY BTC (LONG) - NEW | conf 82/100", sent_message)
 
     def test_check_alerts_notifies_on_new_large_positions(self) -> None:
         now_ms = 1_700_000_000_000
@@ -4842,7 +4841,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(result["changes"]["newLargePositions"][0]["coin"], "BTC")
         sent_message = send_telegram_message.call_args.args[2]
         self.assertIn("New large pos ($1.0M+)", sent_message)
-        self.assertIn("Trader One opened BTC LONG: $1.2M sz 12 open VWAP $100,000", sent_message)
+        self.assertIn("Trader One BTC LONG $1.2M @ $100,000", sent_message)
 
     def test_check_alerts_notifies_on_closed_large_positions(self) -> None:
         previous_summary = {
@@ -4879,7 +4878,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(len(result["changes"]["closedLargePositions"]), 1)
         sent_message = send_telegram_message.call_args.args[2]
         self.assertIn("Closed large pos ($1.0M+)", sent_message)
-        self.assertIn("Trader One closed ETH SHORT: $1.2M sz 400 last ~$3,000", sent_message)
+        self.assertIn("Trader One ETH SHORT $1.2M ~$3,000", sent_message)
 
     def test_check_alerts_ignores_closed_positions_for_untracked_wallets(self) -> None:
         previous_summary = {
@@ -5182,12 +5181,64 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(result["changes"]["clusteredOpenPositions"][0]["coin"], "BTC")
         self.assertEqual(result["changes"]["clusteredOpenPositions"][0]["walletCount"], 3)
         sent_message = send_telegram_message.call_args.args[2]
-        self.assertIn("Coordinated openings in the last 5 minutes", sent_message)
-        self.assertIn("- BTC LONG: 3 wallets opened $3.6M total", sent_message)
-        self.assertIn("VWAP $102,857", sent_message)
-        self.assertIn("Trader One: $1.2M", sent_message)
+        self.assertIn("Coordinated openings (5 min)", sent_message)
+        self.assertIn("- BTC LONG: 3 wallets, $3.6M", sent_message)
+        self.assertIn("@ $102,857", sent_message)
+        self.assertIn("Trader One $1.2M", sent_message)
         saved_dedupe = save_json_file.call_args.args[1]["state"]["alertDedupe"]
         self.assertTrue(next(iter(saved_dedupe)).startswith("position:cluster-open:BTC:long:"))
+
+    def test_build_telegram_message_omits_new_large_position_already_in_cluster(self) -> None:
+        summary = {"overallBias": "mixed", "walletCount": 10}
+        changes = {
+            "addedSignals": [],
+            "changedSignals": [],
+            "removedSignals": [],
+            "addedCandidateSignals": [],
+            "addedCmmSignals": [],
+            "changedCmmSignals": [],
+            "clusteredOpenPositions": [
+                {
+                    "coin": "BTC",
+                    "side": "long",
+                    "walletCount": 3,
+                    "totalValue": 3_600_000.0,
+                    "entryPx": 100_000.0,
+                    "wallets": [
+                        {"address": "0x1111111111111111111111111111111111111111", "alias": "Trader One", "totalValue": 1_200_000.0},
+                        {"address": "0x2222222222222222222222222222222222222222", "alias": "Trader Two", "totalValue": 1_200_000.0},
+                        {"address": "0x3333333333333333333333333333333333333333", "alias": "Trader Three", "totalValue": 1_200_000.0},
+                    ],
+                }
+            ],
+            "newLargePositions": [
+                {
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "alias": "Trader One",
+                    "coin": "BTC",
+                    "side": "long",
+                    "totalValue": 1_200_000.0,
+                    "entryPx": 100_000.0,
+                    "entryPriceSource": "fill",
+                },
+                {
+                    "address": "0x4444444444444444444444444444444444444444",
+                    "alias": "Trader Four",
+                    "coin": "ETH",
+                    "side": "short",
+                    "totalValue": 1_500_000.0,
+                    "entryPx": 3_000.0,
+                    "entryPriceSource": "fill",
+                },
+            ],
+            "closedLargePositions": [],
+            "increasedLargePositions": [],
+        }
+
+        message = self.service.build_telegram_message(changes, summary, min_wallets=4)
+
+        self.assertNotIn("Trader One BTC LONG", message)
+        self.assertIn("Trader Four ETH SHORT $1.5M @ $3,000", message)
 
     def test_clustered_large_open_alert_requires_three_wallets_inside_window(self) -> None:
         now_ms = 1_700_000_000_000
@@ -5340,7 +5391,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertNotIn("High-conviction signals", hourly_message)
         alert_message = send_telegram_message.call_args_list[1].args[2]
         self.assertIn("New large pos ($1.0M+)", alert_message)
-        self.assertIn("Trader One opened BTC LONG: $1.2M", alert_message)
+        self.assertIn("Trader One BTC LONG $1.2M", alert_message)
         saved_state = save_json_file.call_args.args[1]["state"]
         self.assertEqual(saved_state["summary"]["consensus"][0]["walletCount"], 8)
         self.assertIn("0x69906b0ed626ca01a4b7c001e5711e5714ccf207:BTC:long", saved_state["largePositions"])
@@ -5440,8 +5491,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(len(result["changes"]["increasedLargePositions"]), 1)
         sent_message = send_telegram_message.call_args.args[2]
         self.assertIn("Large pos additions ($1.0M+)", sent_message)
-        self.assertIn("Trader One added $1.2M to BTC LONG at estimated price $120,000", sent_message)
-        self.assertIn("Position: $1.2M -> $2.4M +10", sent_message)
+        self.assertIn("Trader One +$1.2M BTC LONG ~ $120,000 ($1.2M -> $2.4M)", sent_message)
         self.assertNotIn("@$78,000", sent_message)
 
     def test_large_position_snapshot_filters_after_aggregation(self) -> None:
