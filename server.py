@@ -254,7 +254,15 @@ FRESH_ACTIVITY_DIAGNOSTIC_WINDOWS_MS = {
     "8h": 8 * 60 * 60 * 1000,
     "24h": 24 * 60 * 60 * 1000,
 }
-LARGE_POSITION_ALERT_MIN_VALUE = 1_000_000
+# Measured over 14 days of fills across the 39 tracked wallets: 77 fills at
+# $1M or more (5.5/day), 23 at $2M (1.6/day), 6 at $5M (0.4/day). At the old
+# $1M floor a single fast wallet could fill the channel on its own - one
+# stretch sent seven notifications in 100 minutes, six of them from one
+# wallet opening and closing positions sitting exactly on the $1M line, none
+# of the eleven rows above $2M. Nothing measured says these events predict
+# anything (mean return is negative at every horizon over 1135 shadow
+# records), so the floor is about how loud they are, not what they mean.
+LARGE_POSITION_ALERT_MIN_VALUE = int(os.environ.get("LARGE_POSITION_ALERT_MIN_VALUE", "2000000"))
 MIN_POSITION_MESSAGE_VALUE = POSITION_GROUP_DISPLAY_MIN_VALUE
 NEW_POSITION_ALERT_MIN_VALUE = LARGE_POSITION_ALERT_MIN_VALUE
 POSITION_INCREASE_ALERT_MIN_DELTA = LARGE_POSITION_ALERT_MIN_VALUE
@@ -3901,8 +3909,13 @@ class WalletTrackerService:
         self,
         dashboard: dict[str, Any],
         *,
-        min_value: float = NEW_POSITION_ALERT_MIN_VALUE,
+        min_value: float | None = None,
     ) -> dict[str, dict[str, Any]]:
+        # Resolved per call, not baked into the signature default: a default
+        # argument is evaluated at import, so LARGE_POSITION_ALERT_MIN_VALUE
+        # in the environment reached every other reader of the threshold but
+        # silently missed this one.
+        threshold = NEW_POSITION_ALERT_MIN_VALUE if min_value is None else min_value
         positions: dict[str, dict[str, Any]] = {}
         for wallet in dashboard.get("wallets", []):
             address = str(wallet.get("address") or "")
@@ -3940,7 +3953,7 @@ class WalletTrackerService:
                 "entryPx": round(item["entryValue"] / item["totalSize"], 8) if item["totalSize"] > 0 else 0.0,
             }
             for key, item in positions.items()
-            if item["totalValue"] >= min_value
+            if item["totalValue"] >= threshold
         }
 
     def fill_price_key(self, address: str, coin: str, side: str, event: str) -> str:
