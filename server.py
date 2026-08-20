@@ -343,6 +343,10 @@ WALLET_IDLE_FILL_INTERVAL_MS = int(
 # two cycles while the live request is switched off. Set it to 0 to always
 # issue both requests, as before.
 WALLET_WINDOW_FILL_CAP = int(float(os.environ.get("WALLET_WINDOW_FILL_CAP", 2000)))
+# Pages of WALLET_WINDOW_FILL_CAP rows that fetch_fills_paginated_result will
+# walk before it gives up and says so. Ten pages is 20000 fills, more than any
+# tracked wallet produced in 30 days when this was measured.
+FILL_HISTORY_MAX_PAGES = int(os.environ.get("FILL_HISTORY_MAX_PAGES", "10"))
 WALLET_LIVE_FILL_SKIP_MAX = int(float(os.environ.get("WALLET_LIVE_FILL_SKIP_MAX", 1600)))
 WALLET_CACHED_QUALITY_FIELDS = (
     "role",
@@ -1616,6 +1620,77 @@ class WalletTrackerService:
         fills = result.get("data") if result.get("ok") else []
         ok = bool(result.get("ok")) and isinstance(fills, list)
         return {"ok": ok, "data": fills if isinstance(fills, list) else [], "error": result.get("error", "")}
+
+    def fetch_fills_paginated_result(
+        self,
+        address: str,
+        start_time: int,
+        *,
+        max_pages: int = FILL_HISTORY_MAX_PAGES,
+        page_size: int = WALLET_WINDOW_FILL_CAP,
+    ) -> dict[str, Any]:
+        """Every fill since start_time, walking past the 2000-row page cap.
+
+        ``userFillsByTime`` returns at most ``WALLET_WINDOW_FILL_CAP`` rows
+        ascending from ``startTime``, so one call covers only the oldest slice
+        of a busy wallet's history: measured over 30 days, 17 of 38 tracked
+        wallets exhausted the page, several of them within a day, which is why
+        per-wallet outcome attribution could not reach 30 observations for all
+        but two of them.
+
+        Paging restarts from the newest fill already seen rather than one
+        millisecond later, because fills sharing a timestamp are common and
+        skipping ahead would drop them; the overlap that creates is removed by
+        identity instead. Pages stop early when one comes back short, and
+        ``max_pages`` bounds the total so a pathological wallet cannot spin
+        here forever - a truncated result says so rather than pretending to be
+        complete.
+        """
+        collected: list[dict[str, Any]] = []
+        seen: set[tuple[Any, ...]] = set()
+        cursor = int(start_time)
+        pages = 0
+        while pages < max_pages:
+            result = self.client.safe_post_result(
+                {
+                    "type": "userFillsByTime",
+                    "user": address,
+                    "startTime": cursor,
+                    "aggregateByTime": True,
+                },
+                [],
+            )
+            if not result.get("ok"):
+                return {
+                    "ok": False,
+                    "data": collected,
+                    "error": result.get("error", ""),
+                    "truncated": True,
+                    "pages": pages,
+                }
+            page = result.get("data")
+            if not isinstance(page, list) or not page:
+                return {"ok": True, "data": collected, "error": "", "truncated": False, "pages": pages + 1}
+            pages += 1
+            fresh = 0
+            newest = cursor
+            for fill in page:
+                if not isinstance(fill, dict):
+                    continue
+                identity = raw_fill_identity(fill)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                collected.append(fill)
+                fresh += 1
+                newest = max(newest, int(to_float(fill.get("time"))))
+            # A full page that adds nothing new means every row shares the
+            # cursor timestamp, so advancing would loop on the same page.
+            if len(page) < page_size or fresh == 0 or newest <= cursor:
+                truncated = len(page) >= page_size and (fresh == 0 or newest <= cursor)
+                return {"ok": True, "data": collected, "error": "", "truncated": truncated, "pages": pages}
+            cursor = newest
+        return {"ok": True, "data": collected, "error": "", "truncated": True, "pages": pages}
 
     def fetch_recent_fills_result(self, address: str) -> dict[str, Any]:
         """Latest fills for a wallet, newest first.

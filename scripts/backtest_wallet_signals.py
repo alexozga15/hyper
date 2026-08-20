@@ -324,9 +324,17 @@ def main() -> int:
     fills: list[dict[str, Any]] = []
     errors: list[str] = []
     for wallet in wallets:
-        result = service.fetch_fills_result(wallet.address, start_ms)
+        # Paginated: a single userFillsByTime page stops at 2000 rows counted
+        # from start_ms, so for a busy wallet the window this evaluates was
+        # only its oldest hours. Measured over 30 days, 17 of 38 tracked
+        # wallets exhausted one page, which is why per-wallet attribution
+        # could not reach 30 observations for all but two of them.
+        result = service.fetch_fills_paginated_result(wallet.address, start_ms)
         if not result["ok"]:
             errors.append(f"{wallet.address}: {result['error']}")
+        if result.get("truncated"):
+            errors.append(f"{wallet.address}: fill history truncated after {result.get('pages')} pages")
+        if not result["ok"] and not result["data"]:
             continue
         fills.extend(
             normalized
