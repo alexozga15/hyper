@@ -4868,10 +4868,12 @@ class WalletTrackerService:
             dormant_wallets = int(to_float(summary.get("dormantWalletCount")))
             if dormant_wallets > 0:
                 lines.append(f"No fills in the last 7 days: {dormant_wallets} wallets")
-        # Kept in every caller: this one is not fetch telemetry, it explains
-        # why the consensus counts below are smaller than the tracked count.
+        # This one is not fetch telemetry - it explains why the counts in the
+        # consensus block are smaller than the tracked wallet count - so it is
+        # tied to that block rather than to include_data_health. Without the
+        # block on screen it explains nothing the reader can see.
         excluded_dormant = int(to_float(summary.get("excludedDormantWalletCount")))
-        if excluded_dormant > 0:
+        if include_consensus and excluded_dormant > 0:
             lines.append(f"Dropped from consensus as dormant: {excluded_dormant} wallets")
         if include_signals:
             signals = summary.get("signals", [])
@@ -7528,12 +7530,19 @@ class WalletTrackerService:
         return "\n".join(lines)
 
     def build_hourly_update_message(self, dashboard: dict[str, Any], summary: dict[str, Any], min_wallets: int) -> str:
+        # Same shape as /update, and for the same reason: the crowding board
+        # ranks nothing - over 805 shadow samples neither the wallet count nor
+        # the score separated profitable observations from unprofitable ones -
+        # and since the positions table started stating net of the opposite
+        # side, the board's only remaining unique column is the quality
+        # weighting. It stays available on demand through /consensus.
         return "\n\n".join(
             [
                 self.build_summary_message(
                     summary,
                     min_wallets,
                     title="4-hour wallet update",
+                    include_consensus=False,
                     include_signals=False,
                     include_footer=False,
                     include_data_health=False,
