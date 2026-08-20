@@ -509,6 +509,41 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("5 wallets |", sol_row)
         self.assertNotIn("net", sol_row)
 
+    def test_dormant_exclusion_line_follows_the_consensus_block(self) -> None:
+        # The line explains why the consensus counts are smaller than the
+        # tracked count, so it belongs wherever that block is shown and
+        # nowhere else - without the block it explains nothing on screen.
+        summary = {
+            "generatedAt": "2026-04-09T06:00:00Z",
+            "overallBias": "bearish",
+            "walletCount": 39,
+            "excludedDormantWalletCount": 4,
+            "consensus": [],
+        }
+
+        with_board = self.service.build_summary_message(summary, min_wallets=4, include_signals=False)
+        without_board = self.service.build_summary_message(
+            summary, min_wallets=4, include_consensus=False, include_signals=False
+        )
+
+        self.assertIn("Dropped from consensus as dormant: 4 wallets", with_board)
+        self.assertNotIn("Dropped from consensus as dormant", without_board)
+
+    def test_four_hour_update_omits_the_crowding_board(self) -> None:
+        summary = {
+            "generatedAt": "2026-04-09T06:00:00Z",
+            "overallBias": "bearish",
+            "walletCount": 39,
+            "consensus": [{"coin": "MON", "side": "Short", "walletCount": 6, "netWalletCount": 6}],
+        }
+        dashboard = {"generatedAt": "2026-04-09T06:05:00Z", "wallets": []}
+
+        message = self.service.build_hourly_update_message(dashboard, summary, 4)
+
+        self.assertIn("4-hour wallet update", message)
+        self.assertNotIn("Where wallets are crowded", message)
+        self.assertEqual(message.count("Updated:"), 1)
+
     def test_data_health_lines_only_in_on_demand_summaries(self) -> None:
         # run_health_monitor.py already watches these counts with thresholds
         # and dedupe, so the routine digests drop them; on-demand commands,
@@ -533,7 +568,6 @@ class AlertSummaryTests(unittest.TestCase):
         on_demand = self.service.build_summary_message(
             summary,
             min_wallets=4,
-            include_consensus=False,
             include_signals=False,
         )
 
@@ -544,8 +578,10 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("Fill fetch failed this cycle: 1 wallets", on_demand)
         self.assertIn("No fills in the last 7 days: 3 wallets", on_demand)
         # Not fetch telemetry: it explains why consensus counts are smaller
-        # than the tracked count, so it survives in both.
-        self.assertIn("Dropped from consensus as dormant: 2 wallets", routine)
+        # than the tracked count, so it follows the consensus block rather
+        # than this flag - absent from the routine form, which drops that
+        # block, and present in the on-demand form, which keeps it.
+        self.assertNotIn("Dropped from consensus as dormant", routine)
         self.assertIn("Dropped from consensus as dormant: 2 wallets", on_demand)
 
     def test_build_sentiment_summary_assigns_conviction_scores(self) -> None:
