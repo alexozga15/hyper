@@ -308,3 +308,93 @@ class ConsensusTotalSizeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PaginatedFillHistoryTests(unittest.TestCase):
+    """Walking past the 2000-row page cap on userFillsByTime."""
+
+    @pytest.fixture(autouse=True)
+    def _inject_tmp_path(self, tmp_path):
+        self.tmp_path = tmp_path
+
+    def setUp(self) -> None:
+        self.service = WalletTrackerService(WalletStore(self.tmp_path / "wallets.json"), HyperliquidClient())
+
+    @staticmethod
+    def fill(index: int, *, time_ms: int) -> dict:
+        return {"tid": index, "time": time_ms, "coin": "BTC", "px": "100", "sz": "1", "dir": "Open Long"}
+
+    def test_pages_until_a_short_page_arrives(self) -> None:
+        first = [self.fill(index, time_ms=1_000 + index) for index in range(4)]
+        second = [self.fill(100 + index, time_ms=2_000 + index) for index in range(2)]
+        calls: list[int] = []
+
+        def fake_post(payload, fallback):
+            calls.append(int(payload["startTime"]))
+            return {"ok": True, "data": first if len(calls) == 1 else second, "error": ""}
+
+        with patch.object(self.service.client, "safe_post_result", side_effect=fake_post):
+            result = self.service.fetch_fills_paginated_result("0xabc", 1_000, page_size=4)
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["truncated"])
+        self.assertEqual(len(result["data"]), 6)
+        self.assertEqual(result["pages"], 2)
+        # Second page restarts at the newest fill seen, not one past it.
+        self.assertEqual(calls, [1_000, 1_003])
+
+    def test_overlapping_rows_are_not_counted_twice(self) -> None:
+        shared = self.fill(7, time_ms=1_003)
+        first = [self.fill(index, time_ms=1_000 + index) for index in range(3)] + [shared]
+        second = [shared, self.fill(9, time_ms=1_004)]
+
+        with patch.object(
+            self.service.client,
+            "safe_post_result",
+            side_effect=[{"ok": True, "data": first, "error": ""}, {"ok": True, "data": second, "error": ""}],
+        ):
+            result = self.service.fetch_fills_paginated_result("0xabc", 1_000, page_size=4)
+
+        self.assertEqual(len(result["data"]), 5)
+        self.assertFalse(result["truncated"])
+
+    def test_a_full_page_sharing_one_timestamp_stops_instead_of_looping(self) -> None:
+        stuck = [self.fill(index, time_ms=1_000) for index in range(4)]
+
+        with patch.object(
+            self.service.client, "safe_post_result", return_value={"ok": True, "data": stuck, "error": ""}
+        ) as post:
+            result = self.service.fetch_fills_paginated_result("0xabc", 1_000, page_size=4)
+
+        self.assertEqual(post.call_count, 1)
+        self.assertTrue(result["truncated"])
+        self.assertEqual(len(result["data"]), 4)
+
+    def test_page_budget_bounds_the_walk_and_is_reported(self) -> None:
+        def fake_post(payload, fallback):
+            start = int(payload["startTime"])
+            return {"ok": True, "data": [self.fill(start + index, time_ms=start + index) for index in range(4)], "error": ""}
+
+        with patch.object(self.service.client, "safe_post_result", side_effect=fake_post):
+            result = self.service.fetch_fills_paginated_result("0xabc", 1_000, max_pages=3, page_size=4)
+
+        self.assertTrue(result["truncated"])
+        self.assertEqual(result["pages"], 3)
+
+    def test_a_failed_page_keeps_what_was_already_collected(self) -> None:
+        first = [self.fill(index, time_ms=1_000 + index) for index in range(4)]
+
+        with patch.object(
+            self.service.client,
+            "safe_post_result",
+            side_effect=[
+                {"ok": True, "data": first, "error": ""},
+                {"ok": False, "data": [], "error": "http 429"},
+            ],
+        ):
+            result = self.service.fetch_fills_paginated_result("0xabc", 1_000, page_size=4)
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["truncated"])
+        self.assertEqual(len(result["data"]), 4)
+        self.assertEqual(result["error"], "http 429")
