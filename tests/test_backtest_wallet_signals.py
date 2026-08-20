@@ -281,3 +281,23 @@ class ReportWarningTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ParseConfigsTests(unittest.TestCase):
+    def test_parses_wallet_and_window_pairs(self) -> None:
+        self.assertEqual(
+            backtest.parse_configs("3w/5m, 4w/120m"),
+            (
+                {"name": "3w_5m", "minWallets": 3, "windowMinutes": 5},
+                {"name": "4w_120m", "minWallets": 4, "windowMinutes": 120},
+            ),
+        )
+
+    def test_empty_spec_keeps_the_built_in_defaults(self) -> None:
+        self.assertEqual(backtest.parse_configs("  "), backtest.DEFAULT_CONFIGS)
+
+    def test_rejects_malformed_and_degenerate_specs(self) -> None:
+        for spec in ("bogus", "3/5", "1w/5m", "3w/0m"):
+            with self.subTest(spec=spec):
+                with self.assertRaises(ValueError):
+                    backtest.parse_configs(spec)
