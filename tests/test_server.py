@@ -4994,6 +4994,11 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("1. BUY BTC (LONG) - NEW", sent_message)
 
     def test_check_alerts_notifies_on_new_large_positions(self) -> None:
+        # Pins the new policy from server.py: a single-wallet position event
+        # (here, a new large position) no longer makes shouldNotify true on
+        # its own (SINGLE_WALLET_EVENTS_NOTIFY defaults False). It still
+        # notifies when the flag is restored, and it still renders inside a
+        # message sent for a stronger reason (a clustered open position).
         now_ms = 1_700_000_000_000
         previous_summary = {
             "overallBias": "mixed",
@@ -5005,7 +5010,7 @@ class AlertSummaryTests(unittest.TestCase):
             "consensus": [],
             "hip3Consensus": [],
         }
-        dashboard = {
+        single_wallet_dashboard = {
             "wallets": [
                 {
                     "address": "0x1111111111111111111111111111111111111111",
@@ -5020,22 +5025,98 @@ class AlertSummaryTests(unittest.TestCase):
             ]
         }
 
+        # 1. Alone, the new large position does not notify.
         with patch("server.load_json_file", return_value={"config": {"enabled": True, "botToken": "token", "chatId": "chat"}, "state": {"summary": previous_summary, "largePositions": {}}}), patch(
             "server.save_json_file"
-        ), patch("server.current_time_ms", return_value=now_ms), patch.object(self.service, "dashboard", return_value=dashboard), patch.object(
+        ), patch("server.current_time_ms", return_value=now_ms), patch.object(self.service, "dashboard", return_value=single_wallet_dashboard), patch.object(
+            self.service, "build_sentiment_summary", return_value=current_summary
+        ), patch.object(self.service, "send_telegram_message") as send_telegram_message:
+            result = self.service.check_alerts(send_notification=True)
+
+        self.assertFalse(result["shouldNotify"])
+        self.assertFalse(result["sent"])
+        self.assertEqual(len(result["changes"]["newLargePositions"]), 1)
+        self.assertEqual(result["changes"]["newLargePositions"][0]["coin"], "BTC")
+        send_telegram_message.assert_not_called()
+
+        # 2. With SINGLE_WALLET_EVENTS_NOTIFY restored, the same scenario
+        # does notify and the message still contains the row.
+        with patch("server.SINGLE_WALLET_EVENTS_NOTIFY", True), patch(
+            "server.load_json_file", return_value={"config": {"enabled": True, "botToken": "token", "chatId": "chat"}, "state": {"summary": previous_summary, "largePositions": {}}}
+        ), patch("server.save_json_file"), patch("server.current_time_ms", return_value=now_ms), patch.object(
+            self.service, "dashboard", return_value=single_wallet_dashboard
+        ), patch.object(
             self.service, "build_sentiment_summary", return_value=current_summary
         ), patch.object(self.service, "send_telegram_message") as send_telegram_message:
             result = self.service.check_alerts(send_notification=True)
 
         self.assertTrue(result["shouldNotify"])
         self.assertTrue(result["sent"])
-        self.assertEqual(len(result["changes"]["newLargePositions"]), 1)
-        self.assertEqual(result["changes"]["newLargePositions"][0]["coin"], "BTC")
         sent_message = send_telegram_message.call_args.args[2]
         self.assertIn("New large pos ($1.0M+)", sent_message)
         self.assertIn("Trader One BTC LONG $1.2M @ $100,000", sent_message)
 
+        # 3. When the cycle also carries a clustered open position (a
+        # different coin/side, different wallets), the message is sent for
+        # that stronger reason and the single-wallet row still renders.
+        clustered_dashboard = {
+            "wallets": [
+                *single_wallet_dashboard["wallets"],
+                {
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "alias": "Trader Two",
+                    "positions": [
+                        {"coin": "ETH", "side": "Short", "positionValue": 1_100_000.0, "size": 440.0, "entryPx": 2500.0},
+                    ],
+                    "recentFills": [
+                        {"coin": "ETH", "direction": "Open Short", "price": 2500.0, "size": 440.0, "time": now_ms - 60_000}
+                    ],
+                },
+                {
+                    "address": "0x3333333333333333333333333333333333333333",
+                    "alias": "Trader Three",
+                    "positions": [
+                        {"coin": "ETH", "side": "Short", "positionValue": 1_200_000.0, "size": 480.0, "entryPx": 2500.0},
+                    ],
+                    "recentFills": [
+                        {"coin": "ETH", "direction": "Open Short", "price": 2500.0, "size": 480.0, "time": now_ms - 120_000}
+                    ],
+                },
+                {
+                    "address": "0x4444444444444444444444444444444444444444",
+                    "alias": "Trader Four",
+                    "positions": [
+                        {"coin": "ETH", "side": "Short", "positionValue": 1_300_000.0, "size": 520.0, "entryPx": 2500.0},
+                    ],
+                    "recentFills": [
+                        {"coin": "ETH", "direction": "Open Short", "price": 2500.0, "size": 520.0, "time": now_ms - 240_000}
+                    ],
+                },
+            ]
+        }
+
+        with patch("server.load_json_file", return_value={"config": {"enabled": True, "botToken": "token", "chatId": "chat"}, "state": {"summary": previous_summary, "largePositions": {}}}), patch(
+            "server.save_json_file"
+        ), patch("server.current_time_ms", return_value=now_ms), patch.object(self.service, "dashboard", return_value=clustered_dashboard), patch.object(
+            self.service, "build_sentiment_summary", return_value=current_summary
+        ), patch.object(self.service, "send_telegram_message") as send_telegram_message:
+            result = self.service.check_alerts(send_notification=True)
+
+        self.assertTrue(result["shouldNotify"])
+        self.assertTrue(result["sent"])
+        self.assertEqual(len(result["changes"]["clusteredOpenPositions"]), 1)
+        sent_message = send_telegram_message.call_args.args[2]
+        self.assertIn("Coordinated openings (5 min)", sent_message)
+        self.assertIn("New large pos ($1.0M+)", sent_message)
+        self.assertIn("Trader One BTC LONG $1.2M @ $100,000", sent_message)
+
     def test_check_alerts_notifies_on_closed_large_positions(self) -> None:
+        # Pins the new policy: a single-wallet position event (here, a
+        # closed large position) no longer makes shouldNotify true on its
+        # own. It still notifies with SINGLE_WALLET_EVENTS_NOTIFY restored,
+        # and it still renders inside a message sent for a stronger reason
+        # (a clustered open position on a different wallet/coin).
+        now_ms = 1_700_000_000_000
         previous_summary = {
             "overallBias": "mixed",
             "consensus": [],
@@ -5056,19 +5137,92 @@ class AlertSummaryTests(unittest.TestCase):
                 "totalSize": 400.0,
             }
         }
-        dashboard = {"wallets": [{"address": "0x1111111111111111111111111111111111111111", "alias": "Trader One", "positions": []}]}
+        single_wallet_dashboard = {"wallets": [{"address": "0x1111111111111111111111111111111111111111", "alias": "Trader One", "positions": []}]}
 
+        # 1. Alone, the closed large position does not notify.
         with patch("server.load_json_file", return_value={"config": {"enabled": True, "botToken": "token", "chatId": "chat"}, "state": {"summary": previous_summary, "largePositions": previous_positions}}), patch(
             "server.save_json_file"
-        ), patch.object(self.service, "dashboard", return_value=dashboard), patch.object(
+        ), patch.object(self.service, "dashboard", return_value=single_wallet_dashboard), patch.object(
+            self.service, "build_sentiment_summary", return_value=current_summary
+        ), patch.object(self.service, "send_telegram_message") as send_telegram_message:
+            result = self.service.check_alerts(send_notification=True)
+
+        self.assertFalse(result["shouldNotify"])
+        self.assertFalse(result["sent"])
+        self.assertEqual(len(result["changes"]["closedLargePositions"]), 1)
+        send_telegram_message.assert_not_called()
+
+        # 2. With SINGLE_WALLET_EVENTS_NOTIFY restored, the same scenario
+        # does notify and the message still contains the row.
+        with patch("server.SINGLE_WALLET_EVENTS_NOTIFY", True), patch(
+            "server.load_json_file", return_value={"config": {"enabled": True, "botToken": "token", "chatId": "chat"}, "state": {"summary": previous_summary, "largePositions": previous_positions}}
+        ), patch("server.save_json_file"), patch.object(
+            self.service, "dashboard", return_value=single_wallet_dashboard
+        ), patch.object(
             self.service, "build_sentiment_summary", return_value=current_summary
         ), patch.object(self.service, "send_telegram_message") as send_telegram_message:
             result = self.service.check_alerts(send_notification=True)
 
         self.assertTrue(result["shouldNotify"])
         self.assertTrue(result["sent"])
-        self.assertEqual(len(result["changes"]["closedLargePositions"]), 1)
         sent_message = send_telegram_message.call_args.args[2]
+        self.assertIn("Closed large pos ($1.0M+)", sent_message)
+        self.assertIn("Trader One ETH SHORT $1.2M ~$3,000", sent_message)
+
+        # 3. When the cycle also carries a clustered open position (a
+        # different coin/side, different wallets), the message is sent for
+        # that stronger reason and the single-wallet closed row still
+        # renders.
+        clustered_dashboard = {
+            "wallets": [
+                *single_wallet_dashboard["wallets"],
+                {
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "alias": "Trader Two",
+                    "positions": [
+                        {"coin": "BTC", "side": "Long", "positionValue": 1_100_000.0, "size": 11.0, "entryPx": 100000.0},
+                    ],
+                    "recentFills": [
+                        {"coin": "BTC", "direction": "Open Long", "price": 100000.0, "size": 11.0, "time": now_ms - 60_000}
+                    ],
+                },
+                {
+                    "address": "0x3333333333333333333333333333333333333333",
+                    "alias": "Trader Three",
+                    "positions": [
+                        {"coin": "BTC", "side": "Long", "positionValue": 1_200_000.0, "size": 12.0, "entryPx": 100000.0},
+                    ],
+                    "recentFills": [
+                        {"coin": "BTC", "direction": "Open Long", "price": 100000.0, "size": 12.0, "time": now_ms - 120_000}
+                    ],
+                },
+                {
+                    "address": "0x4444444444444444444444444444444444444444",
+                    "alias": "Trader Four",
+                    "positions": [
+                        {"coin": "BTC", "side": "Long", "positionValue": 1_300_000.0, "size": 13.0, "entryPx": 100000.0},
+                    ],
+                    "recentFills": [
+                        {"coin": "BTC", "direction": "Open Long", "price": 100000.0, "size": 13.0, "time": now_ms - 240_000}
+                    ],
+                },
+            ]
+        }
+
+        with patch("server.load_json_file", return_value={"config": {"enabled": True, "botToken": "token", "chatId": "chat"}, "state": {"summary": previous_summary, "largePositions": previous_positions}}), patch(
+            "server.save_json_file"
+        ), patch("server.current_time_ms", return_value=now_ms), patch.object(
+            self.service, "dashboard", return_value=clustered_dashboard
+        ), patch.object(
+            self.service, "build_sentiment_summary", return_value=current_summary
+        ), patch.object(self.service, "send_telegram_message") as send_telegram_message:
+            result = self.service.check_alerts(send_notification=True)
+
+        self.assertTrue(result["shouldNotify"])
+        self.assertTrue(result["sent"])
+        self.assertEqual(len(result["changes"]["clusteredOpenPositions"]), 1)
+        sent_message = send_telegram_message.call_args.args[2]
+        self.assertIn("Coordinated openings (5 min)", sent_message)
         self.assertIn("Closed large pos ($1.0M+)", sent_message)
         self.assertIn("Trader One ETH SHORT $1.2M ~$3,000", sent_message)
 
@@ -5118,6 +5272,9 @@ class AlertSummaryTests(unittest.TestCase):
             "consensus": [],
             "hip3Consensus": [],
         }
+        # A single-wallet position event alone no longer flips shouldNotify,
+        # so this fixture adds a clustered open position (three wallets,
+        # same coin/side, inside the coordination window) as the trigger.
         dashboard = {
             "wallets": [
                 {
@@ -5127,7 +5284,27 @@ class AlertSummaryTests(unittest.TestCase):
                     "recentFills": [
                         {"coin": "BTC", "direction": "Open Long", "price": 100000.0, "size": 12.0, "time": now_ms - 60_000}
                     ],
-                }
+                },
+                {
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "alias": "Trader Two",
+                    "positions": [
+                        {"coin": "BTC", "side": "Long", "positionValue": 1_100_000.0, "size": 10.0, "entryPx": 110000.0},
+                    ],
+                    "recentFills": [
+                        {"coin": "BTC", "direction": "Open Long", "price": 110000.0, "size": 10.0, "time": now_ms - 300_000}
+                    ],
+                },
+                {
+                    "address": "0x3333333333333333333333333333333333333333",
+                    "alias": "Trader Three",
+                    "positions": [
+                        {"coin": "BTC", "side": "Long", "positionValue": 1_300_000.0, "size": 13.0, "entryPx": 100000.0},
+                    ],
+                    "recentFills": [
+                        {"coin": "BTC", "direction": "Open Long", "price": 100000.0, "size": 13.0, "time": now_ms - 240_000}
+                    ],
+                },
             ]
         }
 
@@ -5147,6 +5324,7 @@ class AlertSummaryTests(unittest.TestCase):
             result = self.service.check_alerts(send_notification=False)
 
         self.assertTrue(result["shouldNotify"])
+        self.assertEqual(len(result["changes"]["clusteredOpenPositions"]), 1)
         self.assertFalse(result["sent"])
         save_json_file.assert_not_called()
         send_telegram_message.assert_not_called()
@@ -5156,6 +5334,12 @@ class AlertSummaryTests(unittest.TestCase):
         previous_summary = {"overallBias": "mixed", "consensus": [], "hip3Consensus": []}
         current_summary = {"overallBias": "mixed", "consensus": [], "hip3Consensus": []}
         address = "0x1111111111111111111111111111111111111111"
+        # A single-wallet position event alone no longer flips shouldNotify
+        # (see server.py's SINGLE_WALLET_EVENTS_NOTIFY note), so this fixture
+        # gives the cycle a clustered open position - three wallets opening
+        # the same side within the coordination window - as the trigger.
+        # `address` keeps its own BTC long position/fill so the assertion
+        # below (baseline sync for a suppressed cycle) still exercises it.
         dashboard = {
             "wallets": [
                 {
@@ -5170,7 +5354,27 @@ class AlertSummaryTests(unittest.TestCase):
                             "time": now_ms - 60_000,
                         }
                     ],
-                }
+                },
+                {
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "alias": "Trader Two",
+                    "positions": [
+                        {"coin": "BTC", "side": "Long", "positionValue": 1_100_000.0, "size": 10.0, "entryPx": 110000.0},
+                    ],
+                    "recentFills": [
+                        {"coin": "BTC", "direction": "Open Long", "price": 110000.0, "size": 10.0, "time": now_ms - 300_000}
+                    ],
+                },
+                {
+                    "address": "0x3333333333333333333333333333333333333333",
+                    "alias": "Trader Three",
+                    "positions": [
+                        {"coin": "BTC", "side": "Long", "positionValue": 1_300_000.0, "size": 13.0, "entryPx": 100000.0},
+                    ],
+                    "recentFills": [
+                        {"coin": "BTC", "direction": "Open Long", "price": 100000.0, "size": 13.0, "time": now_ms - 240_000}
+                    ],
+                },
             ]
         }
 
@@ -5191,6 +5395,7 @@ class AlertSummaryTests(unittest.TestCase):
             )
 
         self.assertTrue(result["shouldNotify"])
+        self.assertEqual(len(result["changes"]["clusteredOpenPositions"]), 1)
         self.assertTrue(result["suppressed"])
         self.assertFalse(result["sent"])
         send_telegram_message.assert_not_called()
@@ -5284,7 +5489,12 @@ class AlertSummaryTests(unittest.TestCase):
             ]
         }
 
-        with patch(
+        # A lone single-wallet position event no longer notifies by default,
+        # and this test is about what dedupe records for such an event, so it
+        # runs with the old behaviour restored rather than adding a second
+        # trigger - a cluster would contribute dedupe keys of its own and the
+        # assertion below counts them.
+        with patch("server.SINGLE_WALLET_EVENTS_NOTIFY", True), patch(
             "server.load_json_file",
             return_value={
                 "config": {"enabled": True, "botToken": "token", "chatId": "chat"},
@@ -5476,6 +5686,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(alerts, [])
 
     def test_check_alerts_does_not_sync_failed_telegram_alert(self) -> None:
+        now_ms = 1_700_000_000_000
         previous_summary = {
             "overallBias": "mixed",
             "consensus": [{"coin": "BTC", "side": "long", "walletCount": 3, "totalValue": 30_000_000.0}],
@@ -5496,13 +5707,49 @@ class AlertSummaryTests(unittest.TestCase):
                 "totalSize": 7.0,
             }
         }
+        # A single-wallet position diff (Trader One's BTC long closing /
+        # ETH short opening) no longer flips shouldNotify by itself, so a
+        # clustered open position (three wallets, same coin/side, inside
+        # the coordination window) is added as the trigger for this cycle.
+        # Trader One's own position diff is left in place unchanged - it's
+        # incidental color now, not the trigger under test.
         dashboard = {
             "wallets": [
                 {
                     "address": "0x69906b0ed626ca01a4b7c001e5711e5714ccf207",
                     "alias": "Trader One",
                     "positions": [{"coin": "ETH", "side": "Short", "positionValue": 1_300_000.0}],
-                }
+                },
+                {
+                    "address": "0x4444444444444444444444444444444444444444",
+                    "alias": "Trader Four",
+                    "positions": [
+                        {"coin": "SOL", "side": "Long", "positionValue": 1_100_000.0, "size": 5000.0, "entryPx": 220.0},
+                    ],
+                    "recentFills": [
+                        {"coin": "SOL", "direction": "Open Long", "price": 220.0, "size": 5000.0, "time": now_ms - 60_000}
+                    ],
+                },
+                {
+                    "address": "0x5555555555555555555555555555555555555555",
+                    "alias": "Trader Five",
+                    "positions": [
+                        {"coin": "SOL", "side": "Long", "positionValue": 1_200_000.0, "size": 5455.0, "entryPx": 220.0},
+                    ],
+                    "recentFills": [
+                        {"coin": "SOL", "direction": "Open Long", "price": 220.0, "size": 5455.0, "time": now_ms - 120_000}
+                    ],
+                },
+                {
+                    "address": "0x6666666666666666666666666666666666666666",
+                    "alias": "Trader Six",
+                    "positions": [
+                        {"coin": "SOL", "side": "Long", "positionValue": 1_300_000.0, "size": 5909.0, "entryPx": 220.0},
+                    ],
+                    "recentFills": [
+                        {"coin": "SOL", "direction": "Open Long", "price": 220.0, "size": 5909.0, "time": now_ms - 240_000}
+                    ],
+                },
             ]
         }
 
@@ -5512,7 +5759,9 @@ class AlertSummaryTests(unittest.TestCase):
                 "config": {"enabled": True, "botToken": "token", "chatId": "chat"},
                 "state": {"summary": previous_summary, "largePositions": previous_positions},
             },
-        ), patch("server.save_json_file") as save_json_file, patch.object(
+        ), patch("server.save_json_file") as save_json_file, patch(
+            "server.current_time_ms", return_value=now_ms
+        ), patch.object(
             self.service, "dashboard", return_value=dashboard
         ), patch.object(
             self.service, "build_sentiment_summary", return_value=current_summary
@@ -5638,6 +5887,12 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(saved_state["largePositions"], previous_positions)
 
     def test_check_alerts_notifies_on_large_position_increases(self) -> None:
+        # Pins the new policy: a single-wallet position event (here, an
+        # increased large position) no longer makes shouldNotify true on its
+        # own. It still notifies with SINGLE_WALLET_EVENTS_NOTIFY restored,
+        # and it still renders inside a message sent for a stronger reason
+        # (a clustered open position on a different wallet/coin).
+        now_ms = 1_700_000_000_000
         previous_summary = {
             "overallBias": "mixed",
             "consensus": [],
@@ -5659,7 +5914,7 @@ class AlertSummaryTests(unittest.TestCase):
                 "entryPx": 75000.0,
             }
         }
-        dashboard = {
+        single_wallet_dashboard = {
             "wallets": [
                 {
                     "address": "0x1111111111111111111111111111111111111111",
@@ -5671,20 +5926,93 @@ class AlertSummaryTests(unittest.TestCase):
             ]
         }
 
+        # 1. Alone, the increased large position does not notify.
         with patch("server.load_json_file", return_value={"config": {"enabled": True, "botToken": "token", "chatId": "chat"}, "state": {"summary": previous_summary, "largePositions": previous_positions}}), patch(
             "server.save_json_file"
-        ), patch.object(self.service, "dashboard", return_value=dashboard), patch.object(
+        ), patch.object(self.service, "dashboard", return_value=single_wallet_dashboard), patch.object(
+            self.service, "build_sentiment_summary", return_value=current_summary
+        ), patch.object(self.service, "send_telegram_message") as send_telegram_message:
+            result = self.service.check_alerts(send_notification=True)
+
+        self.assertFalse(result["shouldNotify"])
+        self.assertFalse(result["sent"])
+        self.assertEqual(len(result["changes"]["increasedLargePositions"]), 1)
+        send_telegram_message.assert_not_called()
+
+        # 2. With SINGLE_WALLET_EVENTS_NOTIFY restored, the same scenario
+        # does notify and the message still contains the row.
+        with patch("server.SINGLE_WALLET_EVENTS_NOTIFY", True), patch(
+            "server.load_json_file", return_value={"config": {"enabled": True, "botToken": "token", "chatId": "chat"}, "state": {"summary": previous_summary, "largePositions": previous_positions}}
+        ), patch("server.save_json_file"), patch.object(
+            self.service, "dashboard", return_value=single_wallet_dashboard
+        ), patch.object(
             self.service, "build_sentiment_summary", return_value=current_summary
         ), patch.object(self.service, "send_telegram_message") as send_telegram_message:
             result = self.service.check_alerts(send_notification=True)
 
         self.assertTrue(result["shouldNotify"])
         self.assertTrue(result["sent"])
-        self.assertEqual(len(result["changes"]["increasedLargePositions"]), 1)
         sent_message = send_telegram_message.call_args.args[2]
         self.assertIn("Large pos additions ($1.0M+)", sent_message)
         self.assertIn("Trader One +$1.2M BTC LONG ~ $120,000 ($1.2M -> $2.4M)", sent_message)
         self.assertNotIn("@$78,000", sent_message)
+
+        # 3. When the cycle also carries a clustered open position (a
+        # different coin/side, different wallets), the message is sent for
+        # that stronger reason and the single-wallet increase row still
+        # renders.
+        clustered_dashboard = {
+            "wallets": [
+                *single_wallet_dashboard["wallets"],
+                {
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "alias": "Trader Two",
+                    "positions": [
+                        {"coin": "ETH", "side": "Short", "positionValue": 1_100_000.0, "size": 440.0, "entryPx": 2500.0},
+                    ],
+                    "recentFills": [
+                        {"coin": "ETH", "direction": "Open Short", "price": 2500.0, "size": 440.0, "time": now_ms - 60_000}
+                    ],
+                },
+                {
+                    "address": "0x3333333333333333333333333333333333333333",
+                    "alias": "Trader Three",
+                    "positions": [
+                        {"coin": "ETH", "side": "Short", "positionValue": 1_200_000.0, "size": 480.0, "entryPx": 2500.0},
+                    ],
+                    "recentFills": [
+                        {"coin": "ETH", "direction": "Open Short", "price": 2500.0, "size": 480.0, "time": now_ms - 120_000}
+                    ],
+                },
+                {
+                    "address": "0x4444444444444444444444444444444444444444",
+                    "alias": "Trader Four",
+                    "positions": [
+                        {"coin": "ETH", "side": "Short", "positionValue": 1_300_000.0, "size": 520.0, "entryPx": 2500.0},
+                    ],
+                    "recentFills": [
+                        {"coin": "ETH", "direction": "Open Short", "price": 2500.0, "size": 520.0, "time": now_ms - 240_000}
+                    ],
+                },
+            ]
+        }
+
+        with patch("server.load_json_file", return_value={"config": {"enabled": True, "botToken": "token", "chatId": "chat"}, "state": {"summary": previous_summary, "largePositions": previous_positions}}), patch(
+            "server.save_json_file"
+        ), patch("server.current_time_ms", return_value=now_ms), patch.object(
+            self.service, "dashboard", return_value=clustered_dashboard
+        ), patch.object(
+            self.service, "build_sentiment_summary", return_value=current_summary
+        ), patch.object(self.service, "send_telegram_message") as send_telegram_message:
+            result = self.service.check_alerts(send_notification=True)
+
+        self.assertTrue(result["shouldNotify"])
+        self.assertTrue(result["sent"])
+        self.assertEqual(len(result["changes"]["clusteredOpenPositions"]), 1)
+        sent_message = send_telegram_message.call_args.args[2]
+        self.assertIn("Coordinated openings (5 min)", sent_message)
+        self.assertIn("Large pos additions ($1.0M+)", sent_message)
+        self.assertIn("Trader One +$1.2M BTC LONG ~ $120,000 ($1.2M -> $2.4M)", sent_message)
 
     def test_large_position_snapshot_filters_after_aggregation(self) -> None:
         dashboard = {
