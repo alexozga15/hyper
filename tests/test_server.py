@@ -2811,7 +2811,8 @@ class AlertSummaryTests(unittest.TestCase):
         message = self.service.build_signals_message(summary)
 
         self.assertIn("Actionable wallet signals", message)
-        self.assertIn("1. BUY BTC (LONG) - 94/100 confidence", message)
+        self.assertIn("1. BUY BTC (LONG) - gate 94/100", message)
+        self.assertIn("Publish gate: 70/100", message)
         self.assertIn("Support: 3 wallets", message)
         self.assertNotIn("$1.2M", message)
 
@@ -4986,8 +4987,11 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertTrue(result["shouldNotify"])
         self.assertTrue(result["sent"])
         sent_message = send_telegram_message.call_args.args[2]
-        self.assertIn("High-confidence signals", sent_message)
-        self.assertIn("1. BUY BTC (LONG) - NEW | conf 82/100", sent_message)
+        self.assertIn("Signal changes", sent_message)
+        # The score is deliberately absent - it ranked the wrong way round
+        # over 1135 measured shadow records.
+        self.assertNotIn("conf ", sent_message)
+        self.assertIn("1. BUY BTC (LONG) - NEW", sent_message)
 
     def test_check_alerts_notifies_on_new_large_positions(self) -> None:
         now_ms = 1_700_000_000_000

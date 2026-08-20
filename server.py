@@ -4660,16 +4660,19 @@ class WalletTrackerService:
         actionable_signals = changes.get("addedSignals", []) + changes.get("changedSignals", [])
         if actionable_signals:
             lines.append("")
-            lines.append("High-confidence signals")
+            # Not "high-confidence", and no score printed: measured over 1135
+            # shadow records with realised outcomes, probabilityScore runs the
+            # wrong way. Hit rate by band was 49.4% below 50 (n=713), 45.0% for
+            # 50-70 (n=302) and 44.2% for 70-85 (n=120), with mean 1h returns
+            # negative throughout - so a higher score marked a slightly worse
+            # trade, and printing it as confidence sold the reader the reverse.
+            # It still gates publication (ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD);
+            # it is just not a number to act on, and /signals shows it as a gate
+            # value for anyone who wants to see it.
+            lines.append("Signal changes")
             for index, item in enumerate(actionable_signals[:8], start=1):
                 action = str(item.get("action") or signal_action_from_side(item.get("side"))).upper()
                 status = str(item.get("status") or "NEW").upper()
-                probability = to_float(item.get("probabilityScore"))
-                confidence_note = f"conf {probability:.0f}/100"
-                if "fromProbabilityScore" in item:
-                    confidence_note += (
-                        f' (was {to_float(item.get("fromProbabilityScore")):.0f})'
-                    )
                 if to_float(item.get("freshAddVwap")) > 0:
                     price_note = (
                         f'add ${format_price(to_float(item.get("freshAddVwap")))} -> '
@@ -4680,7 +4683,7 @@ class WalletTrackerService:
                     price_note = "price unavailable"
                 lines.append(
                     f'{index}. {action} {item.get("coin", "Unknown")} '
-                    f'({str(item.get("side") or "").upper()}) - {status} | {confidence_note}'
+                    f'({str(item.get("side") or "").upper()}) - {status}'
                 )
                 support_note = (
                     f'   {int(to_float(item.get("independentWalletCount", item.get("walletCount"))))} wallets, '
@@ -4900,11 +4903,11 @@ class WalletTrackerService:
             lines.append("Signals ready to act on")
             if signals:
                 for index, item in enumerate(signals[:10], start=1):
-                    probability = to_float(item.get("probabilityScore", item.get("convictionScore")))
+                    # No score here either - see the note in
+                    # build_telegram_message: it ranks the wrong way round.
                     lines.append(
                         f'{index}. {str(item.get("action", "watch")).upper()} '
                         f'{item["coin"]} ({str(item.get("side") or "").upper()}) - '
-                        f'{probability:.0f}/100 | '
                         f'{int(to_float(item.get("independentWalletCount", item.get("walletCount"))))} wallets, '
                         f'net +{int(to_float(item.get("netIndependentWalletCount", item.get("netWalletCount"))))}, '
                         f'quality {to_float(item.get("netIndependentWeightedWalletCount", item.get("netWeightedWalletCount"))):.1f}'
@@ -7210,14 +7213,16 @@ class WalletTrackerService:
         cmm_summary: dict[str, Any] | None = None,
     ) -> str:
         signals = summary.get("signals", [])
-        lines = [title, f'Minimum confidence: {ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD:.0f}/100']
+        # "gate", not "confidence": the score decides what publishes, but a
+        # higher one did not mark a better trade over 1135 measured records.
+        lines = [title, f'Publish gate: {ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD:.0f}/100']
         if signals:
             for index, item in enumerate(signals[:20], start=1):
                 probability = to_float(item.get("probabilityScore", item.get("convictionScore")))
                 lines.append(
                     f'{index}. {str(item.get("action", "watch")).upper()} '
                     f'{item["coin"]} ({str(item.get("side") or "").upper()}) - '
-                    f'{probability:.0f}/100 confidence'
+                    f'gate {probability:.0f}/100'
                 )
                 lines.append(
                     f'   Support: {int(to_float(item.get("walletCount")))} wallets | '
