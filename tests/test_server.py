@@ -3695,8 +3695,12 @@ class AlertSummaryTests(unittest.TestCase):
         )
 
         record = next(iter(measured.values()))
-        self.assertEqual(record["outcomes"]["15m"]["returnPct"], 5.0)
-        self.assertEqual(record["outcomes"]["1h"]["returnPct"], 5.0)
+        # returnPct duplicated grossReturnPct byte for byte and is no longer
+        # written; signal_outcome_net_return_pct still reads it from records
+        # that predate the change.
+        self.assertEqual(record["outcomes"]["15m"]["grossReturnPct"], 5.0)
+        self.assertEqual(record["outcomes"]["1h"]["grossReturnPct"], 5.0)
+        self.assertNotIn("returnPct", record["outcomes"]["15m"])
         self.assertNotIn("4h", record["outcomes"])
 
     def test_signal_outcome_entry_is_mark_price_and_keeps_wallet_vwap(self) -> None:
@@ -3850,8 +3854,14 @@ class AlertSummaryTests(unittest.TestCase):
 
         outcome = next(iter(measured.values()))["outcomes"]["1h"]
         self.assertTrue(outcome["degraded"])
-        self.assertEqual(outcome["measuredAfterMs"], 6 * 60 * 60 * 1000)
-        self.assertEqual(outcome["horizonMs"], 60 * 60 * 1000)
+        # measuredAfterMs and horizonMs are no longer stored: the first is
+        # measuredAt minus the record's startedAt, the second is the horizon
+        # the label already names, and together they cost 345 of the 1915
+        # bytes an average record occupies in the largest store in the state.
+        self.assertNotIn("measuredAfterMs", outcome)
+        self.assertNotIn("horizonMs", outcome)
+        self.assertEqual(outcome["measuredAt"] - started_at, 6 * 60 * 60 * 1000)
+        self.assertEqual(server.SIGNAL_OUTCOME_HORIZONS_MS["1h"], 60 * 60 * 1000)
         # On-time measurement is not flagged.
         self.assertFalse(measured[next(iter(measured))]["outcomes"]["4h"]["degraded"])
 
@@ -6765,3 +6775,30 @@ class WalletQualityHistorySizeTests(unittest.TestCase):
         # And it must hold enough days to split into two halves longer than the
         # 99-day fill window this exists to outgrow.
         self.assertGreaterEqual(server.WALLET_QUALITY_HISTORY_LIMIT / 40, 2 * 99)
+
+
+class LegacyOutcomeFieldTests(unittest.TestCase):
+    """Records already on disk keep working after the write shape shrank."""
+
+    def setUp(self) -> None:
+        self.service = WalletTrackerService(WalletStore(Path(ALERTS_FILE)), HyperliquidClient())
+
+    def test_a_record_predating_grossReturnPct_still_reads(self) -> None:
+        # Removing returnPct from new writes must not orphan the ones stored
+        # before grossReturnPct existed.
+        self.assertAlmostEqual(
+            self.service.signal_outcome_net_return_pct({"returnPct": 5.0}),
+            5.0 - server.SIGNAL_ROUND_TRIP_COST_PCT,
+        )
+
+    def test_the_new_shape_reads_from_grossReturnPct(self) -> None:
+        self.assertAlmostEqual(
+            self.service.signal_outcome_net_return_pct({"grossReturnPct": 5.0}),
+            5.0 - server.SIGNAL_ROUND_TRIP_COST_PCT,
+        )
+
+    def test_net_is_preferred_when_present(self) -> None:
+        self.assertAlmostEqual(
+            self.service.signal_outcome_net_return_pct({"netReturnPct": 4.8, "grossReturnPct": 5.0}),
+            4.8,
+        )
