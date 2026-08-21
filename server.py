@@ -262,7 +262,11 @@ FRESH_ACTIVITY_DIAGNOSTIC_WINDOWS_MS = {
 # of the eleven rows above $2M. Nothing measured says these events predict
 # anything (mean return is negative at every horizon over 1135 shadow
 # records), so the floor is about how loud they are, not what they mean.
-LARGE_POSITION_ALERT_MIN_VALUE = int(os.environ.get("LARGE_POSITION_ALERT_MIN_VALUE", "2000000"))
+# Raised to $2M when size was the only gate and $1M produced 5.5 alerts a day.
+# The floor is now scaled per wallet by conviction weight, so quality does the
+# filtering that the blunt notional was standing in for, and the base can come
+# back down without restoring that volume.
+LARGE_POSITION_ALERT_MIN_VALUE = int(os.environ.get("LARGE_POSITION_ALERT_MIN_VALUE", "1000000"))
 MIN_POSITION_MESSAGE_VALUE = POSITION_GROUP_DISPLAY_MIN_VALUE
 NEW_POSITION_ALERT_MIN_VALUE = LARGE_POSITION_ALERT_MIN_VALUE
 POSITION_INCREASE_ALERT_MIN_DELTA = LARGE_POSITION_ALERT_MIN_VALUE
@@ -3997,7 +4001,12 @@ class WalletTrackerService:
                     str(item.get("candidateTier")), 4
                 ),
                 -int(to_float(item.get("independentTopWalletCount"))),
-                -to_float(item.get("freshNotional")),
+                # Was freshNotional. Measured over 99 days across 31 wallets,
+                # ranking by size or by past profit predicted the next period's
+                # return on turnover at rho +0.04 (p=0.86); the conviction
+                # weight behind this count is built from hit rate, the only
+                # wallet metric that persisted (rho +0.42, p=0.056).
+                -to_float(item.get("netIndependentWeightedWalletCount")),
                 str(item.get("coin")),
             )
         )
@@ -4060,10 +4069,8 @@ class WalletTrackerService:
                 coin = normalize_position_coin(position.get("coin"))
                 if not should_count_open_position(address, coin, position):
                     continue
-                scaled = quality_scaled_threshold(
-                    NEW_POSITION_ALERT_MIN_VALUE,
-                    self.wallet_conviction_weight(wallet, coin=coin),
-                )
+                weight = self.wallet_conviction_weight(wallet, coin=coin)
+                scaled = quality_scaled_threshold(NEW_POSITION_ALERT_MIN_VALUE, weight)
                 key = f"{address}:{coin}:{side}"
                 bucket = positions.setdefault(
                     key,
@@ -4081,6 +4088,10 @@ class WalletTrackerService:
                         "alertThreshold": (
                             0.0 if scaled == float("inf") else scaled
                         ),
+                        # Carried so downstream ordering can rank by quality
+                        # directly instead of inferring it from the threshold,
+                        # where the 0.0 sentinel means the opposite of small.
+                        "convictionWeight": round(weight, 3),
                         "totalValue": 0.0,
                         "totalSize": 0.0,
                         "entryValue": 0.0,
@@ -4280,7 +4291,14 @@ class WalletTrackerService:
                 continue
             total_size = to_float(group.get("totalSize"))
             open_fill_size = to_float(group.get("openFillSize"))
-            wallets = sorted(group["wallets"], key=lambda item: to_float(item.get("totalValue")), reverse=True)
+            wallets = sorted(
+                group["wallets"],
+                key=lambda item: (
+                    to_float(item.get("convictionWeight")),
+                    to_float(item.get("totalValue")),
+                ),
+                reverse=True,
+            )
             alerts.append(
                 {
                     **group,
@@ -5251,6 +5269,11 @@ class WalletTrackerService:
                         "coin": coin,
                         "side": side,
                         "walletCount": 0,
+                        # Wallet count weighted by the same conviction machinery
+                        # the consensus board already orders on, so a group of
+                        # three well-rated wallets outranks four poorly rated
+                        # ones instead of losing to them on a raw headcount.
+                        "qualityWeight": 0.0,
                         "positionCount": 0,
                         "totalValue": 0.0,
                         "totalSize": 0.0,
@@ -5272,6 +5295,7 @@ class WalletTrackerService:
                 if address and address not in bucket["walletAddresses"]:
                     bucket["walletAddresses"].add(address)
                     bucket["walletCount"] += 1
+                    bucket["qualityWeight"] += self.wallet_conviction_weight(wallet, coin=coin)
                     entry_px = to_float(position.get("entryPx"))
                     if entry_px > 0:
                         bucket["entrySum"] += entry_px
@@ -5301,6 +5325,7 @@ class WalletTrackerService:
                     "coin": item["coin"],
                     "side": item["side"],
                     "walletCount": item["walletCount"],
+                    "qualityWeight": round(to_float(item["qualityWeight"]), 3),
                     "positionCount": item["positionCount"],
                     "totalValue": round(item["totalValue"], 2),
                     "totalSize": round(total_size, 8),
@@ -5320,7 +5345,12 @@ class WalletTrackerService:
 
         return sorted(
             rows,
-            key=lambda item: (-item["walletCount"], item["coin"], item["side"]),
+            key=lambda item: (
+                -to_float(item.get("qualityWeight")),
+                -item["walletCount"],
+                item["coin"],
+                item["side"],
+            ),
         )
 
     def cmm_signal_coins(self) -> list[str]:
