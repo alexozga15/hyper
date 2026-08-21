@@ -6672,3 +6672,96 @@ class QualityOrderedBoardTests(unittest.TestCase):
         snapshot = self.service.build_large_position_snapshot(self._dashboard())
         item = next(iter(snapshot.values()))
         self.assertIn("convictionWeight", item)
+
+
+class WalletQualityHistoryTests(unittest.TestCase):
+    """Nothing recorded a history of wallet quality, so every question about it
+    had to be answered from the 99-day fill window - the ceiling Hyperliquid
+    retains, which does not move. A veto on open unrealised loss could not be
+    tested at all, because historical marks are not reconstructible from fills.
+    """
+
+    def wallet(self, address: str, *, unrealized: float = 0.0, score: float = 60.0) -> dict:
+        return {
+            "address": address,
+            "realizedPnl30d": 1234.5,
+            "unrealizedPnl": unrealized,
+            "recentWinRateRank": {"score": score},
+            "positions": [
+                {"coin": "BTC", "side": "Long"},
+                {"coin": "ETH", "side": "Flat"},
+            ],
+        }
+
+    def test_a_snapshot_stores_inputs_rather_than_a_score(self) -> None:
+        # A rule invented later has to be measurable against what was true at
+        # the time, not against today's formula applied backwards.
+        snapshot = server.wallet_quality_snapshot(self.wallet("0xAB"), 1.25, "2026-08-21")
+        self.assertEqual(snapshot["address"], "0xab")
+        self.assertEqual(snapshot["day"], "2026-08-21")
+        self.assertEqual(snapshot["convictionWeight"], 1.25)
+        self.assertEqual(snapshot["realizedPnl30d"], 1234.5)
+        self.assertEqual(snapshot["positionCount"], 1)  # Flat is not a position
+
+    def test_the_same_day_replaces_rather_than_appends(self) -> None:
+        # The alert cycle runs many times a day; a per-cycle record would fill
+        # the retention window in a fortnight and say nothing extra.
+        day = "2026-08-21"
+        first = [server.wallet_quality_snapshot(self.wallet("0xAB", unrealized=-10.0), 1.0, day)]
+        history = server.append_wallet_quality_history([], first)
+        second = [server.wallet_quality_snapshot(self.wallet("0xAB", unrealized=-99.0), 1.0, day)]
+        history = server.append_wallet_quality_history(history, second)
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["unrealizedPnl"], -99.0)
+
+    def test_different_days_accumulate(self) -> None:
+        history: list = []
+        for day in ("2026-08-19", "2026-08-20", "2026-08-21"):
+            history = server.append_wallet_quality_history(
+                history, [server.wallet_quality_snapshot(self.wallet("0xAB"), 1.0, day)]
+            )
+        self.assertEqual([entry["day"] for entry in history], ["2026-08-19", "2026-08-20", "2026-08-21"])
+
+    def test_the_oldest_entries_are_dropped_at_the_limit(self) -> None:
+        history: list = []
+        for index in range(6):
+            history = server.append_wallet_quality_history(
+                history,
+                [server.wallet_quality_snapshot(self.wallet("0xAB"), 1.0, f"2026-08-{10 + index:02d}")],
+                limit=3,
+            )
+        self.assertEqual([entry["day"] for entry in history], ["2026-08-13", "2026-08-14", "2026-08-15"])
+
+    def test_malformed_stored_entries_are_dropped_not_carried(self) -> None:
+        history = server.append_wallet_quality_history(
+            ["junk", {"no": "day"}, {"day": "2026-08-01", "address": "0xcd"}],
+            [server.wallet_quality_snapshot(self.wallet("0xAB"), 1.0, "2026-08-21")],
+        )
+        self.assertEqual(
+            [(entry["day"], entry["address"]) for entry in history],
+            [("2026-08-01", "0xcd"), ("2026-08-21", "0xab")],
+        )
+
+
+class WalletQualityHistorySizeTests(unittest.TestCase):
+    def test_full_retention_stays_within_its_stated_budget(self) -> None:
+        # This is persisted state and alerts.json already sits at 2.8 MB
+        # against a projected 8 MB plateau, so the limit is a size decision,
+        # not a round number.
+        entry = server.wallet_quality_snapshot(
+            {
+                "address": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
+                "realizedPnl30d": 530489.12,
+                "unrealizedPnl": -73481.55,
+                "recentWinRateRank": {"score": 64.125},
+                "positions": [{"coin": "BTC", "side": "Long"}] * 4,
+            },
+            1.234,
+            "2026-08-21",
+        )
+        per_entry = len(json.dumps(entry, separators=(",", ":")))
+        projected_mb = server.WALLET_QUALITY_HISTORY_LIMIT * per_entry / 1e6
+        self.assertLess(projected_mb, 2.6, f"{projected_mb:.2f} MB at full retention")
+        # And it must hold enough days to split into two halves longer than the
+        # 99-day fill window this exists to outgrow.
+        self.assertGreaterEqual(server.WALLET_QUALITY_HISTORY_LIMIT / 40, 2 * 99)

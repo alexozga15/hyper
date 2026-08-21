@@ -241,6 +241,20 @@ POSITION_GROUP_DISPLAY_MIN_VALUE = 1_000_000
 MIN_POSITION_MESSAGE_WALLETS = 3
 # 10-minute cycles, so this holds roughly a month of "Market view" values.
 MARKET_VIEW_HISTORY_LIMIT = int(os.environ.get("MARKET_VIEW_HISTORY_LIMIT", "4400"))
+# One quality reading per wallet per UTC day. Every question asked about wallet
+# quality so far had to be answered from a 99-day window of fills, because that
+# is all Hyperliquid retains and nothing here kept a record of its own: probing
+# 30, 90, 180 and 365 day windows all returned the same oldest fill, 99.8 days
+# back. That ceiling does not move, so a veto on open unrealised loss - the one
+# half of the production toxic-wallet rule that actually fires - cannot be
+# tested at all, since historical marks are not reconstructible from fills.
+# Sized deliberately, because this is persisted state and alerts.json is
+# already 2.8 MB against a projected 8 MB plateau. An entry serialises to 215
+# bytes, so 40 wallets x 270 days = 10800 entries costs about 2.3 MB at full
+# retention. 270 days buys two 135-day halves, comfortably more than the 99-day
+# window that everything measured so far had to make do with; 400 days would
+# have cost 3.4 MB for resolution nothing needs yet.
+WALLET_QUALITY_HISTORY_LIMIT = int(os.environ.get("WALLET_QUALITY_HISTORY_LIMIT", "10800"))
 FRESH_WALLET_FLOW_MIN_VALUE = int(os.environ.get("FRESH_WALLET_FLOW_MIN_VALUE", "500000"))
 # Diagnostic-only windows for measuring how fresh-add clustering behaves at
 # widths other than WALLET_SIGNAL_ACTIVITY_WINDOW_MS. Deliberately hard-coded
@@ -609,6 +623,55 @@ def append_market_view_history(
         if isinstance(entry, dict) and entry.get("bias")
     ]
     kept.append({"at": at, "bias": str(bias or "mixed")})
+    return kept[-limit:]
+
+
+def wallet_quality_snapshot(wallet: dict[str, Any], weight: float, day: str) -> dict[str, Any]:
+    """One day's readable facts about a wallet, and nothing derived.
+
+    Stores the inputs a future test would need rather than a score, so that a
+    weighting or veto rule invented later can be measured against what was
+    actually true at the time instead of against today's formula applied
+    backwards.
+    """
+    rank = wallet.get("recentWinRateRank")
+    rank = rank if isinstance(rank, dict) else {}
+    return {
+        "day": day,
+        "address": str(wallet.get("address") or "").lower(),
+        "realizedPnl30d": round(to_float(wallet.get("realizedPnl30d")), 2),
+        "unrealizedPnl": round(to_float(wallet.get("unrealizedPnl")), 2),
+        "winRateScore": round(to_float(rank.get("score")), 3),
+        "convictionWeight": round(to_float(weight), 3),
+        "qualityTrusted": bool(wallet_quality_window_trusted(wallet)),
+        "positionCount": len([
+            item for item in (wallet.get("positions") or [])
+            if str(item.get("side") or "").lower() in {"long", "short"}
+        ]),
+    }
+
+
+def append_wallet_quality_history(
+    history: Any,
+    snapshots: list[dict[str, Any]],
+    *,
+    limit: int = WALLET_QUALITY_HISTORY_LIMIT,
+) -> list[dict[str, Any]]:
+    """Append today's readings, one per wallet per day.
+
+    Re-running on the same day replaces that day's entry for the wallets in
+    the snapshot rather than appending a second one: the alert cycle runs many
+    times a day, and a per-cycle record would fill the retention window in a
+    fortnight while saying nothing a daily reading does not.
+    """
+    kept = [
+        entry for entry in (history or [])
+        if isinstance(entry, dict) and entry.get("day") and entry.get("address")
+    ]
+    replacing = {(item["day"], item["address"]) for item in snapshots}
+    kept = [entry for entry in kept if (entry["day"], entry["address"]) not in replacing]
+    kept.extend(snapshots)
+    kept.sort(key=lambda entry: (str(entry.get("day")), str(entry.get("address"))))
     return kept[-limit:]
 
 
@@ -8001,9 +8064,19 @@ class WalletTrackerService:
             checked_at,
             alert_summary.get("overallBias"),
         )
+        quality_day = str(checked_at)[:10]
+        quality_history = append_wallet_quality_history(
+            state.get("walletQualityHistory"),
+            [
+                wallet_quality_snapshot(wallet, self.wallet_conviction_weight(wallet), quality_day)
+                for wallet in dashboard.get("wallets", [])
+                if str(wallet.get("address") or "").strip()
+            ],
+        )
         new_state = {
             **state,
             "marketViewHistory": bias_history,
+            "walletQualityHistory": quality_history,
             "lastCheckedAt": checked_at,
             "lastSentAt": checked_at if sent else state.get("lastSentAt"),
             "topConvictionWallets": top_cohort,
