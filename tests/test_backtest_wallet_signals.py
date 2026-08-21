@@ -301,3 +301,44 @@ class ParseConfigsTests(unittest.TestCase):
             with self.subTest(spec=spec):
                 with self.assertRaises(ValueError):
                     backtest.parse_configs(spec)
+
+
+class RawMarketLabelTests(unittest.TestCase):
+    """HIP-3 markets are only identifiable before the venue prefix is stripped.
+
+    Measured over 99 days of tracked-wallet history: 1162 of 2670 large fills
+    were HIP-3 markets, and none could be scored, because candleSnapshot
+    answers HTTP 500 to a bare "SP500" and SILVER alone resolves to six
+    different venues.
+    """
+
+    def test_normalize_fill_keeps_the_qualified_name(self) -> None:
+        raw = {"dir": "Open Long", "px": "100", "sz": "2", "time": 1, "coin": "xyz:NVDA"}
+        normalized = backtest.normalize_fill("0xabc", raw)
+        assert normalized is not None
+        self.assertEqual(normalized["coin"], "NVDA")
+        self.assertEqual(normalized["marketCoin"], "xyz:NVDA")
+
+    def test_crypto_is_unchanged(self) -> None:
+        raw = {"dir": "Open Long", "px": "100", "sz": "2", "time": 1, "coin": "BTC"}
+        normalized = backtest.normalize_fill("0xabc", raw)
+        assert normalized is not None
+        self.assertEqual(normalized["coin"], normalized["marketCoin"], "BTC")
+
+    def test_the_same_ticker_on_two_venues_is_two_markets(self) -> None:
+        # Pooling them produced one event whose entry price was a VWAP across
+        # markets that cannot be traded against one another.
+        fills = []
+        for index, market in enumerate(("xyz:GOLD", "xyz:GOLD", "xyz:GOLD", "flx:GOLD", "flx:GOLD", "flx:GOLD")):
+            item = fill(f"0x{index}", index * 0.1, price=100.0 + index, coin="GOLD")
+            item["marketCoin"] = market
+            fills.append(item)
+        events = backtest.build_consensus_events(fills, min_wallets=3, window_minutes=10)
+        self.assertEqual(sorted({event["marketCoin"] for event in events}), ["flx:GOLD", "xyz:GOLD"])
+        self.assertEqual({event["coin"] for event in events}, {"GOLD"})
+
+    def test_events_fall_back_to_the_bare_coin(self) -> None:
+        # Fills cached before marketCoin existed carry no qualified name.
+        fills = [fill(f"0x{index}", index * 0.1) for index in range(3)]
+        events = backtest.build_consensus_events(fills, min_wallets=3, window_minutes=10)
+        self.assertEqual(events[0]["marketCoin"], "BTC")

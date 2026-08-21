@@ -71,6 +71,13 @@ def normalize_fill(address: str, fill: dict[str, Any]) -> dict[str, Any] | None:
     return {
         "address": address.lower(),
         "coin": normalize_position_coin(fill.get("coin")),
+        # The venue prefix is the only thing that distinguishes one HIP-3
+        # market from another: SILVER alone maps to six of them, and
+        # candleSnapshot answers to the qualified name, not the bare one.
+        # Dropping it made 1162 of 2670 large fills -- 41%, most of them OIL,
+        # SILVER, XYZ100 and SP500 -- impossible to score at all, and they
+        # left the sample silently rather than as an error.
+        "marketCoin": str(fill.get("coin") or ""),
         "side": side,
         "price": price,
         "size": size,
@@ -116,12 +123,19 @@ def build_consensus_events(
     """Emit consensus from a rolling time window, as the live detector does."""
     window_ms = max(int(window_minutes), 0) * 60 * 1000
     refractory_ms = window_ms * max(int(refractory_windows), 0)
+    # Grouped by the tradeable market, not the bare ticker. GOLD alone exists
+    # on six venues at six different prices, so pooling them produced a
+    # consensus whose entry price was a VWAP across markets that cannot be
+    # traded against one another. Crypto is unaffected: its fills carry no
+    # venue prefix, so the key is identical to the bare coin.
     groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for fill in fills:
-        groups[(str(fill["coin"]), str(fill["side"]))].append(fill)
+        market = str(fill.get("marketCoin") or fill["coin"])
+        groups[(market, str(fill["side"]))].append(fill)
 
     events = []
-    for (coin, side), group in groups.items():
+    for (market, side), group in groups.items():
+        coin = str(group[0]["coin"])
         ordered = sorted(group, key=lambda item: (int(item["time"]), str(item["address"])))
         left = 0
         muted_until: int | None = None
@@ -138,7 +152,7 @@ def build_consensus_events(
             weighted_size = sum(to_float(item["price"]) * to_float(item["size"]) for item in window_fills)
             total_size = sum(to_float(item["size"]) for item in window_fills)
             events.append({
-                "coin": coin, "side": side, "time": event_time,
+                "coin": coin, "marketCoin": market, "side": side, "time": event_time,
                 "windowStart": int(window_fills[0]["time"]), "windowMinutes": window_minutes,
                 "walletCount": len(wallets), "fillCount": len(window_fills),
                 "entryPrice": round(weighted_size / total_size, 10) if total_size else 0.0,
@@ -368,7 +382,7 @@ def main() -> int:
     for config in configs:
         events = build_consensus_events(fills, min_wallets=config["minWallets"], window_minutes=config["windowMinutes"])
         all_events[config["name"]] = events
-        coins.update(str(item["coin"]) for item in events)
+        coins.update(str(item.get("marketCoin") or item["coin"]) for item in events)
 
     candle_end_ms = end_ms - min(HORIZONS_HOURS) * 60 * 60 * 1000
     candles_by_coin: dict[str, list[dict[str, Any]]] = {}
@@ -385,7 +399,11 @@ def main() -> int:
     configurations = []
     for config in configs:
         evaluated = [
-            evaluate_event(event, candles_by_coin.get(str(event["coin"]), []), cost_bps_per_side=args.cost_bps_per_side)
+            evaluate_event(
+                event,
+                candles_by_coin.get(str(event.get("marketCoin") or event["coin"]), []),
+                cost_bps_per_side=args.cost_bps_per_side,
+            )
             for event in all_events[config["name"]]
             if int(event["time"]) <= candle_end_ms
         ]
