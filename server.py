@@ -713,6 +713,23 @@ def is_stock_like_position(coin: Any) -> bool:
     return bool(separator and prefix in STOCK_POSITION_PREFIXES and suffix and suffix not in NON_STOCK_MARKET_SUFFIXES)
 
 
+def is_hip3_market_coin(coin: Any) -> bool:
+    """HIP-3 markets as the alert path means them.
+
+    ``filter_signals_for_alerts`` tested only for a leading ``@``, which no
+    tracked market actually carries: measured against a live snapshot, the
+    crypto consensus held SP500 long across 7 wallets and XYZ100 long across 4,
+    plus NVDA, GOOGL, BABA and MU, while the alert path believed it had
+    excluded HIP-3. Pass the raw market label (``marketCoin``) where one is
+    available -- normalising first turns ``xyz:NVDA`` into ``NVDA`` and loses
+    the only evidence that it is a stock.
+    """
+    label = str(coin or "")
+    if label.startswith("@"):
+        return True
+    return is_stock_like_position(label) or is_commodity_like_position(label)
+
+
 def is_commodity_like_position(coin: Any) -> bool:
     label = str(coin or "Unknown")
     if label in OIL_POSITION_ALIASES:
@@ -3449,6 +3466,7 @@ class WalletTrackerService:
             signals.append(
                 {
                     "coin": item.get("coin", "Unknown"),
+                    "marketCoin": item.get("marketCoin") or item.get("coin", "Unknown"),
                     "side": side,
                     "action": action,
                     "strength": strength,
@@ -3743,6 +3761,7 @@ class WalletTrackerService:
         consensus = [
             {
                 "coin": bucket["coin"],
+                "marketCoin": bucket["marketCoin"],
                 "side": bucket["side"],
                 "walletCount": bucket["walletCount"],
                 "independentWalletCount": len(bucket["walletGroups"]),
@@ -4552,7 +4571,11 @@ class WalletTrackerService:
     def filter_signals_for_alerts(self, signals: list[dict[str, Any]], track_hip3: bool) -> list[dict[str, Any]]:
         if track_hip3:
             return signals
-        return [signal for signal in signals if not str(signal.get("coin", "")).startswith("@")]
+        return [
+            signal
+            for signal in signals
+            if not is_hip3_market_coin(signal.get("marketCoin") or signal.get("coin"))
+        ]
 
     def summarize_signal_changes(
         self,
@@ -5012,15 +5035,15 @@ class WalletTrackerService:
             # what these rows actually are - where the tracked wallets are
             # currently crowded - so the order is not read as a recommendation.
             lines.append("Where wallets are crowded")
-            main_consensus = [
-                item
-                for item in consensus
-                if not str(item.get("coin", "")).startswith("@")
-                and not is_commodity_like_position(item.get("coin"))
-                and not is_stock_like_position(item.get("coin"))
+
+            def market_label(item: dict[str, Any]) -> str:
+                return str(item.get("marketCoin") or item.get("coin") or "")
+
+            main_consensus = [item for item in consensus if not is_hip3_market_coin(market_label(item))]
+            commodity_consensus = [
+                item for item in consensus if is_commodity_like_position(market_label(item))
             ]
-            commodity_consensus = [item for item in consensus if is_commodity_like_position(item.get("coin"))]
-            stock_consensus = [item for item in consensus if is_stock_like_position(item.get("coin"))]
+            stock_consensus = [item for item in consensus if is_stock_like_position(market_label(item))]
 
             def append_consensus_items(items: list[dict[str, Any]]) -> None:
                 for item in items[:10]:
