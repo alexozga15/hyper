@@ -352,3 +352,46 @@ class OutcomeCommandTests(unittest.TestCase):
 
         self.assertIn("Outcome report", reply)
         self.assertIn("n=1", reply)
+
+
+class TradesQueryTests(unittest.TestCase):
+    """A full address is unusable on a phone, so /trades matches a prefix."""
+
+    ADDRESSES = [
+        "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
+        "0x35aa11112222333344445555666677778888aaaa",
+        "0x9e8b1e51c642f4c8b87c6ba11c53d516a218afc4",
+    ]
+
+    def test_prefix_resolves_to_one_wallet_with_the_default_window(self) -> None:
+        self.assertEqual(
+            commands.parse_trades_query("/trades 0x350e", self.ADDRESSES),
+            (self.ADDRESSES[0], commands.TRADES_DEFAULT_DAYS),
+        )
+
+    def test_an_explicit_window_is_honoured_and_capped_at_retention(self) -> None:
+        self.assertEqual(commands.parse_trades_query("/trades 0x350e 30", self.ADDRESSES)[1], 30)
+        # The venue clamps userFillsByTime to roughly 100 days, so a larger
+        # request would quietly return the same window.
+        self.assertEqual(
+            commands.parse_trades_query("/trades 0x350e 400", self.ADDRESSES)[1],
+            commands.TRADES_MAX_DAYS,
+        )
+        self.assertEqual(commands.parse_trades_query("/trades 0x350e 0", self.ADDRESSES)[1], 1)
+
+    def test_an_ambiguous_prefix_is_explained_rather_than_guessed(self) -> None:
+        reply = commands.parse_trades_query("/trades 0x35", self.ADDRESSES)
+        self.assertIsInstance(reply, str)
+        self.assertIn("be more specific", reply)
+
+    def test_unknown_prefix_and_missing_argument_are_reported(self) -> None:
+        self.assertIn("No tracked wallet", commands.parse_trades_query("/trades 0xdead", self.ADDRESSES))
+        self.assertIn("Usage:", commands.parse_trades_query("/trades", self.ADDRESSES))
+        self.assertIn("Not a number", commands.parse_trades_query("/trades 0x350e soon", self.ADDRESSES))
+
+    def test_other_commands_are_left_alone(self) -> None:
+        self.assertIsNone(commands.parse_trades_query("/positions", self.ADDRESSES))
+
+    def test_trades_is_a_known_command_so_a_ticker_query_cannot_swallow_it(self) -> None:
+        self.assertIn("/trades", commands.KNOWN_COMMANDS)
+        self.assertNotIn("/trades", commands.LIVE_COMMANDS)
