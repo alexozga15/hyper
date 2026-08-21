@@ -248,12 +248,16 @@ MARKET_VIEW_HISTORY_LIMIT = int(os.environ.get("MARKET_VIEW_HISTORY_LIMIT", "440
 # back. That ceiling does not move, so a veto on open unrealised loss - the one
 # half of the production toxic-wallet rule that actually fires - cannot be
 # tested at all, since historical marks are not reconstructible from fills.
-# Sized deliberately, because this is persisted state and alerts.json is
-# already 2.8 MB against a projected 8 MB plateau. An entry serialises to 215
-# bytes, so 40 wallets x 270 days = 10800 entries costs about 2.3 MB at full
-# retention. 270 days buys two 135-day halves, comfortably more than the 99-day
-# window that everything measured so far had to make do with; 400 days would
-# have cost 3.4 MB for resolution nothing needs yet.
+# Sized deliberately, because this is persisted state. An entry serialises to
+# 213 bytes measured live, so 40 wallets x 270 days = 10800 entries costs about
+# 2.3 MB at full retention. 270 days buys two 135-day halves, comfortably more
+# than the 99-day window that everything measured so far had to make do with;
+# 400 days would have cost 3.4 MB for resolution nothing needs yet.
+#
+# The "projected 8 MB plateau" this was originally sized against was wrong.
+# Measured on the live file: shadowSignalOutcomes is 87% of the state at 1915
+# bytes per record, so its 6000-record cap alone projects to 11.5 MB of state
+# and about 15.9 MB of file once indentation is counted.
 WALLET_QUALITY_HISTORY_LIMIT = int(os.environ.get("WALLET_QUALITY_HISTORY_LIMIT", "10800"))
 FRESH_WALLET_FLOW_MIN_VALUE = int(os.environ.get("FRESH_WALLET_FLOW_MIN_VALUE", "500000"))
 # Diagnostic-only windows for measuring how fresh-add clustering behaves at
@@ -6854,14 +6858,22 @@ class WalletTrackerService:
                 elapsed_ms = now_ms - started_at
                 gross_return = ((mark_price / entry_price) - 1.0) * 100.0 * direction
                 tolerance_ms = horizon_ms * (1.0 + SIGNAL_OUTCOME_HORIZON_TOLERANCE_PCT / 100.0)
+                # Three fields that used to live here are gone, none of them
+                # carrying information the record does not already hold:
+                # returnPct duplicated grossReturnPct byte for byte, horizonMs
+                # is SIGNAL_OUTCOME_HORIZONS_MS[label], and
+                # measuredAfterMs is measuredAt minus the record's startedAt.
+                # At 5 horizons they cost about 345 of the 1915 bytes an
+                # average record occupies, and this store is 87% of the alert
+                # state. Reading old records is unaffected - nothing is removed
+                # from what is already on disk, and signal_outcome_net_return_pct
+                # still falls back to returnPct for entries that predate this.
+                # The candidate-signal writer above already stores this shape.
                 outcomes[label] = {
                     "markPrice": round(mark_price, 8),
                     "grossReturnPct": round(gross_return, 3),
                     "netReturnPct": round(gross_return - SIGNAL_ROUND_TRIP_COST_PCT, 3),
-                    "returnPct": round(gross_return, 3),
                     "measuredAt": now_ms,
-                    "measuredAfterMs": elapsed_ms,
-                    "horizonMs": horizon_ms,
                     "priceSource": price_source,
                     "degraded": elapsed_ms > tolerance_ms,
                 }
