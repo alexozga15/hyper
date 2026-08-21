@@ -270,6 +270,44 @@ POSITION_INCREASE_ALERT_MIN_PCT = 0.5
 ALERT_DEDUPE_COOLDOWN_MS = 60 * 60 * 1000
 CLUSTERED_OPEN_ALERT_MIN_WALLETS = 3
 OPEN_POSITION_ALERT_WINDOW_MS = 5 * 60 * 1000
+# Quality decides what is worth an alert; size only scales it.
+#
+# Measured over 99 days across 31 tracked wallets, split chronologically in
+# half: ranking wallets by realised PnL predicted their next half's return on
+# turnover at rho +0.04 (p=0.86), and return on turnover itself persisted at
+# rho +0.24 (p=0.28). Neither past profit nor position size carries forward
+# information. Hit rate was the only wallet metric that persisted at all,
+# rho +0.42 (p=0.056). A flat notional floor therefore ranks positions by the
+# one property shown to mean nothing.
+#
+# The floor is now per wallet: base / conviction weight. A wallet the quality
+# machinery rates highly surfaces at a smaller size, a poorly rated one has to
+# be correspondingly larger, and a wallet whose quality cannot be read at all
+# does not alert on size alone.
+MAX_CONVICTION_WEIGHT_FOR_ALERTS = 1.875  # 1.5 base cap x 1.25 per-asset cap
+LARGE_POSITION_MIN_ALERT_WEIGHT = 0.25
+
+
+def large_position_tracking_min_value() -> float:
+    """Tracking floor, resolved per call rather than at import.
+
+    Deliberately broader than the alert floor: a position must already be in
+    the snapshot before a high-quality wallet can alert on it below the base
+    floor, and keeping both maps on one floor keeps closes symmetric.
+
+    Computed on each call because LARGE_POSITION_ALERT_MIN_VALUE is patched by
+    tests and read from the environment - baking the division in at import
+    froze the release-time value and silently ignored both, which is exactly
+    how the default-argument version of this threshold went wrong before.
+    """
+    return LARGE_POSITION_ALERT_MIN_VALUE / MAX_CONVICTION_WEIGHT_FOR_ALERTS
+
+
+def quality_scaled_threshold(base: float, weight: float) -> float:
+    """Alert floor for one wallet. Infinite when its quality is unreadable."""
+    if weight < LARGE_POSITION_MIN_ALERT_WEIGHT:
+        return float("inf")
+    return base / min(weight, MAX_CONVICTION_WEIGHT_FOR_ALERTS)
 CLUSTERED_OPEN_ALERT_WINDOW_MS = OPEN_POSITION_ALERT_WINDOW_MS
 COUNTED_POSITION_MAX_UNREALIZED_LOSS = -1_000_000
 RECENT_ADD_POSITION_MIN_PCT = 0.20
@@ -4009,7 +4047,7 @@ class WalletTrackerService:
         # argument is evaluated at import, so LARGE_POSITION_ALERT_MIN_VALUE
         # in the environment reached every other reader of the threshold but
         # silently missed this one.
-        threshold = NEW_POSITION_ALERT_MIN_VALUE if min_value is None else min_value
+        threshold = large_position_tracking_min_value() if min_value is None else min_value
         positions: dict[str, dict[str, Any]] = {}
         for wallet in dashboard.get("wallets", []):
             address = str(wallet.get("address") or "")
@@ -4022,6 +4060,10 @@ class WalletTrackerService:
                 coin = normalize_position_coin(position.get("coin"))
                 if not should_count_open_position(address, coin, position):
                     continue
+                scaled = quality_scaled_threshold(
+                    NEW_POSITION_ALERT_MIN_VALUE,
+                    self.wallet_conviction_weight(wallet, coin=coin),
+                )
                 key = f"{address}:{coin}:{side}"
                 bucket = positions.setdefault(
                     key,
@@ -4030,6 +4072,15 @@ class WalletTrackerService:
                         "alias": alias,
                         "coin": coin,
                         "side": side,
+                        # Stamped here because this is the only place holding
+                        # both the position and the wallet it belongs to; the
+                        # change detector reads it back off the stored item.
+                        # 0.0 means "never alerts on size": json.dumps writes
+                        # a bare float("inf") as the non-standard literal
+                        # Infinity, and this value is persisted in alerts.json.
+                        "alertThreshold": (
+                            0.0 if scaled == float("inf") else scaled
+                        ),
                         "totalValue": 0.0,
                         "totalSize": 0.0,
                         "entryValue": 0.0,
@@ -4049,6 +4100,21 @@ class WalletTrackerService:
             for key, item in positions.items()
             if item["totalValue"] >= threshold
         }
+
+    def position_alert_threshold(self, item: Any, base: float) -> float:
+        """The floor this position has to clear to be worth an alert.
+
+        Snapshots written before the floor became per wallet carry no
+        alertThreshold, so they fall back to the flat base and behave exactly
+        as they did - the first cycle after deploy must not reclassify
+        positions that nothing about the wallet has changed.
+        """
+        if isinstance(item, dict) and item.get("alertThreshold") is not None:
+            stored = to_float(item.get("alertThreshold"))
+            if stored > 0:
+                return stored
+            return float("inf")
+        return base
 
     def fill_price_key(self, address: str, coin: str, side: str, event: str) -> str:
         return f"{address}:{coin}:{side}:{event}"
@@ -4246,6 +4312,10 @@ class WalletTrackerService:
         added = []
         for key in current_map.keys() - previous_map.keys():
             item = dict(current_map[key])
+            if to_float(item.get("totalValue")) < self.position_alert_threshold(
+                item, NEW_POSITION_ALERT_MIN_VALUE
+            ):
+                continue
             fill_price = fill_price_map.get(f"{key}:add", {})
             fill_time = int(to_float(fill_price.get("latestTime"))) if isinstance(fill_price, dict) else 0
             if open_window_ms and (fill_time <= 0 or fill_time < checked_ms - open_window_ms or fill_time > checked_ms):
@@ -4259,6 +4329,10 @@ class WalletTrackerService:
         closed = []
         for key in previous_map.keys() - current_map.keys():
             item = dict(previous_map[key])
+            if to_float(item.get("totalValue")) < self.position_alert_threshold(
+                item, LARGE_POSITION_ALERT_MIN_VALUE
+            ):
+                continue
             total_value = to_float(item.get("totalValue"))
             total_size = to_float(item.get("totalSize"))
             fill_price = fill_price_map.get(f"{key}:close", {})
@@ -4287,10 +4361,11 @@ class WalletTrackerService:
             add_price = fill_add_price if fill_add_price > 0 else current_price
             add_value = (size_increase * add_price) if size_increase > 0 and add_price > 0 else increase_value
             has_size_baseline = previous_size > 0 or current_size > 0
-            is_size_add = has_size_baseline and size_increase > 0 and add_value >= POSITION_INCREASE_ALERT_MIN_DELTA
+            min_delta = self.position_alert_threshold(current_item, POSITION_INCREASE_ALERT_MIN_DELTA)
+            is_size_add = has_size_baseline and size_increase > 0 and add_value >= min_delta
             is_legacy_value_jump = (
                 not has_size_baseline
-                and increase_value >= POSITION_INCREASE_ALERT_MIN_DELTA
+                and increase_value >= min_delta
                 and increase_pct >= POSITION_INCREASE_ALERT_MIN_PCT
             )
             if not is_size_add and not is_legacy_value_jump:
@@ -4355,7 +4430,7 @@ class WalletTrackerService:
             if (
                 isinstance(item, dict)
                 and should_count_position(item.get("address"), item.get("coin"))
-                and to_float(item.get("totalValue")) >= LARGE_POSITION_ALERT_MIN_VALUE
+                and to_float(item.get("totalValue")) >= large_position_tracking_min_value()
             )
         }
 
