@@ -6429,15 +6429,17 @@ if __name__ == "__main__":
 class LargePositionAlertFloorTests(unittest.TestCase):
     """The production floor itself, outside the class that patches it down."""
 
-    def test_default_floor_is_two_million(self) -> None:
-        # Measured over 14 days across the 39 tracked wallets: 5.5 fills/day at
-        # $1M or more, 1.6/day at $2M, 0.4/day at $5M. One stretch sent seven
-        # notifications in 100 minutes, none of them above $2M.
+    def test_default_floor_is_one_million(self) -> None:
+        # It was raised to $2M when size was the only gate: measured over 14
+        # days across 39 wallets, $1M produced 5.5 alerts a day and one stretch
+        # sent seven notifications in 100 minutes. The floor is now scaled per
+        # wallet by conviction weight, so quality does the filtering the blunt
+        # notional was standing in for and the base can come back down.
         import server as server_module
 
-        self.assertEqual(server_module.LARGE_POSITION_ALERT_MIN_VALUE, 2_000_000)
-        self.assertEqual(server_module.NEW_POSITION_ALERT_MIN_VALUE, 2_000_000)
-        self.assertEqual(server_module.POSITION_INCREASE_ALERT_MIN_DELTA, 2_000_000)
+        self.assertEqual(server_module.LARGE_POSITION_ALERT_MIN_VALUE, 1_000_000)
+        self.assertEqual(server_module.NEW_POSITION_ALERT_MIN_VALUE, 1_000_000)
+        self.assertEqual(server_module.POSITION_INCREASE_ALERT_MIN_DELTA, 1_000_000)
 
     def test_snapshot_threshold_follows_the_patched_constant(self) -> None:
         # A default argument would have frozen the import-time value; this is
@@ -6459,7 +6461,7 @@ class LargePositionAlertFloorTests(unittest.TestCase):
         snapshot = service.build_large_position_snapshot(dashboard)
         key = "0x1111111111111111111111111111111111111111:BTC:long"
         self.assertIn(key, snapshot)
-        self.assertEqual(snapshot[key]["alertThreshold"], 2_000_000.0)
+        self.assertEqual(snapshot[key]["alertThreshold"], 1_000_000.0)
         with patch("server.NEW_POSITION_ALERT_MIN_VALUE", 1_000_000):
             self.assertEqual(
                 service.build_large_position_snapshot(dashboard)[key]["alertThreshold"],
@@ -6614,3 +6616,59 @@ class AlertThresholdSerializationTests(unittest.TestCase):
         self.assertNotIn("Infinity", json.dumps(snapshot))
         # And the sentinel still means "never alerts", not "always alerts".
         self.assertEqual(service.position_alert_threshold(item, 2_000_000.0), float("inf"))
+
+
+class QualityOrderedBoardTests(unittest.TestCase):
+    """Ordering by headcount or notional ranks by properties that do not persist.
+
+    Over 99 days across 31 wallets, ranking by size or past profit predicted
+    the next period's return on turnover at rho +0.04 (p=0.86). The conviction
+    weight is built from hit rate, the only metric that persisted at all
+    (rho +0.42, p=0.056), so it is what the boards order on.
+    """
+
+    def setUp(self) -> None:
+        self.service = WalletTrackerService(WalletStore(Path(ALERTS_FILE)), HyperliquidClient())
+
+    def _dashboard(self) -> dict:
+        def wallet(address: str, multiplier: float, coin: str, value: float) -> dict:
+            return {
+                "address": address,
+                "reviewWeightMultiplier": multiplier,
+                "positions": [{"coin": coin, "side": "Long", "positionValue": value, "size": 1.0}],
+            }
+
+        return {
+            "wallets": [
+                # Three wallets at full weight on ETH...
+                wallet("0x" + "1" * 40, 1.0, "ETH", 3_000_000.0),
+                wallet("0x" + "2" * 40, 1.0, "ETH", 3_000_000.0),
+                wallet("0x" + "3" * 40, 1.0, "ETH", 3_000_000.0),
+                # ...against four heavily discounted ones on BTC, holding more.
+                wallet("0x" + "4" * 40, 0.1, "BTC", 9_000_000.0),
+                wallet("0x" + "5" * 40, 0.1, "BTC", 9_000_000.0),
+                wallet("0x" + "6" * 40, 0.1, "BTC", 9_000_000.0),
+                wallet("0x" + "7" * 40, 0.1, "BTC", 9_000_000.0),
+            ]
+        }
+
+    def test_quality_outranks_both_headcount_and_notional(self) -> None:
+        groups = self.service.build_position_groups(self._dashboard(), min_value=0.0, min_wallets=1)
+        rows = [(item["coin"], item["walletCount"], item["qualityWeight"]) for item in groups]
+        self.assertEqual(rows[0][0], "ETH", rows)
+        # BTC wins on both of the properties the old ordering used.
+        btc = next(item for item in rows if item[0] == "BTC")
+        eth = next(item for item in rows if item[0] == "ETH")
+        self.assertGreater(btc[1], eth[1])
+        self.assertGreater(eth[2], btc[2])
+
+    def test_group_rows_expose_the_weight_they_are_ordered_on(self) -> None:
+        groups = self.service.build_position_groups(self._dashboard(), min_value=0.0, min_wallets=1)
+        self.assertTrue(all("qualityWeight" in item for item in groups))
+
+    def test_snapshot_carries_the_weight_for_downstream_ordering(self) -> None:
+        # Inferring quality from alertThreshold would invert on the 0.0
+        # sentinel, which means "never alerts", not "alerts at any size".
+        snapshot = self.service.build_large_position_snapshot(self._dashboard())
+        item = next(iter(snapshot.values()))
+        self.assertIn("convictionWeight", item)
