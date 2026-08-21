@@ -26,9 +26,11 @@ from server import (
     WALLETS_FILE,
     WALLET_LIVE_FILL_LOOKBACK_MS,
     WALLET_RECENT_FILL_CONSUMER_WINDOW_MS,
+    WALLET_WINDOW_FILL_CAP,
     WalletStore,
     WalletTrackerService,
     build_wallet_quality_rank,
+    collapse_twap_slice_fills,
     current_time_ms,
     classify_profitability,
     classify_wallet_size,
@@ -221,6 +223,15 @@ class AlertSummaryTests(unittest.TestCase):
             patcher = patch(f"server.{name}", 1_000_000)
             patcher.start()
             self.addCleanup(patcher.stop)
+        # Every fetch_wallet_snapshot test below predates TWAP slice fills and
+        # exercises userFillsByTime behaviour, not this endpoint, so default it
+        # to "no TWAP activity" here rather than adding the same mock to every
+        # call site. Tests about TWAP collapsing override this explicitly.
+        twap_patcher = patch.object(
+            self.service, "fetch_twap_slice_fills_result", return_value={"ok": True, "data": [], "error": ""}
+        )
+        twap_patcher.start()
+        self.addCleanup(twap_patcher.stop)
 
     def test_elite_override_wallet_is_configured(self) -> None:
         self.assertIn("0xc9e839a529d1a3a46e2b48d20c461d4afecb72e4", ELITE_WALLET_OVERRIDES)
@@ -5997,6 +6008,178 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(closed, [])
 
 
+class TwapSliceFillTests(unittest.TestCase):
+    """userTwapSliceFillsByTime slices must collapse to one fill per TWAP order.
+
+    A TWAP order is one trading decision executed as many slices, so treating
+    each slice as its own fill would swamp win/loss counts and the 5-minute
+    quality_events buckets with execution mechanics instead of decisions.
+    """
+
+    @staticmethod
+    def _slice(
+        time_ms: int,
+        twap_id: Any,
+        tid: int,
+        *,
+        coin: str = "BTC",
+        direction: str = "Close Long",
+        px: float = 100.0,
+        sz: float = 1.0,
+        closed_pnl: float = 0.0,
+        fee: float = 0.0,
+        start_position: str = "0",
+    ) -> dict[str, Any]:
+        return {
+            "fill": {
+                "coin": coin,
+                "px": str(px),
+                "sz": str(sz),
+                "side": "A",
+                "dir": direction,
+                "closedPnl": str(closed_pnl),
+                "fee": str(fee),
+                "feeToken": "USDC",
+                "hash": f"0x{tid:03x}",
+                "oid": tid,
+                "startPosition": start_position,
+                "tid": tid,
+                "time": time_ms,
+                "twapId": None,
+                "crossed": True,
+            },
+            "twapId": twap_id,
+        }
+
+    def test_slices_of_one_twap_order_collapse_into_a_single_fill(self) -> None:
+        slices = [
+            self._slice(1000, 42, 1, px=100.0, sz=2.0, closed_pnl=10.0, fee=1.0, start_position="50"),
+            self._slice(2000, 42, 2, px=110.0, sz=3.0, closed_pnl=20.0, fee=2.0, start_position="48"),
+            self._slice(3000, 42, 3, px=105.0, sz=5.0, closed_pnl=-5.0, fee=1.5, start_position="45"),
+        ]
+
+        collapsed = collapse_twap_slice_fills(slices)
+
+        self.assertEqual(len(collapsed), 1)
+        fill = collapsed[0]
+        self.assertEqual(fill["twapId"], 42)
+        self.assertEqual(fill["twapSliceCount"], 3)
+        self.assertAlmostEqual(float(fill["sz"]), 10.0)
+        self.assertAlmostEqual(float(fill["closedPnl"]), 25.0)
+        self.assertAlmostEqual(float(fill["fee"]), 4.5)
+        # Notional-weighted mean: (100*2 + 110*3 + 105*5) / 10 = 105.5.
+        self.assertAlmostEqual(float(fill["px"]), 105.5)
+        self.assertEqual(fill["time"], 3000)
+        # Position-before-the-TWAP and identity fields come from the earliest slice.
+        self.assertEqual(fill["startPosition"], "50")
+        self.assertEqual(fill["tid"], 1)
+
+    def test_different_twap_ids_or_directions_stay_separate(self) -> None:
+        different_orders = [
+            self._slice(1000, 1, 1, sz=1.0),
+            self._slice(1000, 2, 2, sz=1.0),
+        ]
+        self.assertEqual(len(collapse_twap_slice_fills(different_orders)), 2)
+
+        same_order_different_dir = [
+            self._slice(1000, 1, 1, direction="Close Long", sz=1.0),
+            self._slice(1000, 1, 2, direction="Open Short", sz=1.0),
+        ]
+        self.assertEqual(len(collapse_twap_slice_fills(same_order_different_dir)), 2)
+
+    def test_malformed_input_is_skipped_without_raising(self) -> None:
+        self.assertEqual(collapse_twap_slice_fills(None), [])
+        self.assertEqual(collapse_twap_slice_fills("not a list"), [])
+        self.assertEqual(collapse_twap_slice_fills({"twapId": 1}), [])
+
+        mixed = [
+            "not a dict",
+            {"twapId": 1},  # missing "fill"
+            {"twapId": 1, "fill": "not a dict"},
+            self._slice(1000, 9, 1, sz=1.0, closed_pnl=5.0),
+        ]
+        collapsed = collapse_twap_slice_fills(mixed)
+        self.assertEqual(len(collapsed), 1)
+        self.assertEqual(collapsed[0]["twapId"], 9)
+
+    def _minimal_snapshot_state(self) -> dict[str, Any]:
+        return {
+            "marginSummary": {"accountValue": "1000000", "totalNtlPos": "0", "totalMarginUsed": "0"},
+            "withdrawable": "1000000",
+            "assetPositions": [],
+        }
+
+    def test_twap_page_at_the_cap_still_truncates_the_quality_window_after_collapsing(self) -> None:
+        # This is the regression that matters most: a TWAP page hitting its own
+        # WALLET_WINDOW_FILL_CAP truncates the 30-day quality window exactly as
+        # a capped userFillsByTime page does, and collapsing thousands of
+        # slices into a handful of synthetic fills must not hide that.
+        wallet = TrackedWallet(address="0x1111111111111111111111111111111111111111", alias="", notes="", created_at="")
+        now_ms = current_time_ms()
+        slice_count = WALLET_WINDOW_FILL_CAP
+        twap_id_count = 5
+        slices = [
+            self._slice(
+                now_ms - (slice_count - index) * 1000,
+                index % twap_id_count,
+                index,
+                sz=1.0,
+            )
+            for index in range(slice_count)
+        ]
+        self.assertEqual(len(slices), WALLET_WINDOW_FILL_CAP)
+
+        service = WalletTrackerService(WalletStore(Path(ALERTS_FILE)), HyperliquidClient())
+        with patch.object(
+            service.client, "safe_subscribe_all_dexs_clearinghouse_state", return_value=self._minimal_snapshot_state()
+        ), patch.object(
+            service, "fetch_fills_result", return_value={"ok": True, "data": [], "error": ""}
+        ), patch.object(
+            service, "fetch_twap_slice_fills_result", return_value={"ok": True, "data": slices, "error": ""}
+        ), patch.object(
+            service, "fetch_recent_fills_result", return_value={"ok": True, "data": [], "error": ""}
+        ), patch.object(
+            service, "fetch_open_orders_result", return_value={"ok": True, "data": [], "error": ""}
+        ), patch.object(
+            service, "fetch_portfolio_result", return_value={"ok": True, "data": {}, "error": ""}
+        ), patch.object(service, "fetch_wallet_role", return_value="user"):
+            snapshot = service.fetch_wallet_snapshot(wallet)
+
+        # Collapsed down to one synthetic fill per twapId, far fewer than the
+        # capped page's raw row count.
+        self.assertEqual(snapshot["qualityWindowFillCount"], twap_id_count)
+        self.assertTrue(snapshot["qualityWindowTruncated"])
+        self.assertTrue(snapshot["dataQuality"]["twapFillsOk"])
+        self.assertEqual(snapshot["dataQuality"]["twapSliceCount"], WALLET_WINDOW_FILL_CAP)
+
+    def test_twap_fills_reach_the_thirty_day_aggregates_with_no_regular_fills(self) -> None:
+        wallet = TrackedWallet(address="0x1111111111111111111111111111111111111111", alias="", notes="", created_at="")
+        now_ms = current_time_ms()
+        slices = [
+            self._slice(now_ms - 60_000, 7, 1, closed_pnl=500.0, fee=1.0, sz=1.0),
+            self._slice(now_ms - 30_000, 7, 2, closed_pnl=250.0, fee=1.0, sz=1.0),
+        ]
+
+        service = WalletTrackerService(WalletStore(Path(ALERTS_FILE)), HyperliquidClient())
+        with patch.object(
+            service.client, "safe_subscribe_all_dexs_clearinghouse_state", return_value=self._minimal_snapshot_state()
+        ), patch.object(
+            service, "fetch_fills_result", return_value={"ok": True, "data": [], "error": ""}
+        ), patch.object(
+            service, "fetch_twap_slice_fills_result", return_value={"ok": True, "data": slices, "error": ""}
+        ), patch.object(
+            service, "fetch_recent_fills_result", return_value={"ok": True, "data": [], "error": ""}
+        ), patch.object(
+            service, "fetch_open_orders_result", return_value={"ok": True, "data": [], "error": ""}
+        ), patch.object(
+            service, "fetch_portfolio_result", return_value={"ok": True, "data": {}, "error": ""}
+        ), patch.object(service, "fetch_wallet_role", return_value="user"):
+            snapshot = service.fetch_wallet_snapshot(wallet)
+
+        self.assertGreater(snapshot["realizedPnl30d"], 0.0)
+        self.assertAlmostEqual(snapshot["realizedPnl30d"], 750.0)
+
+
 class HyperliquidClientTests(unittest.TestCase):
     def test_merge_all_dexs_clearinghouse_state_combines_positions_and_balances(self) -> None:
         client = HyperliquidClient()
@@ -6117,6 +6300,11 @@ class TransientFillFailureTests(unittest.TestCase):
             "fee": 0.0,
             "time": self.now_ms - 5 * 60 * 1000,
         }
+        twap_patcher = patch.object(
+            self.service, "fetch_twap_slice_fills_result", return_value={"ok": True, "data": [], "error": ""}
+        )
+        twap_patcher.start()
+        self.addCleanup(twap_patcher.stop)
 
     def snapshot_with_failed_fills(self, cached: dict[str, Any] | None) -> dict[str, Any]:
         failure = {"ok": False, "data": [], "error": "HTTP 429: Too Many Requests"}

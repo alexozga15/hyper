@@ -759,6 +759,68 @@ def raw_fill_identity(fill: Any) -> tuple[Any, ...]:
     )
 
 
+def collapse_twap_slice_fills(slices: Any) -> list[dict[str, Any]]:
+    """Fold userTwapSliceFillsByTime rows into one synthetic fill per TWAP order.
+
+    A TWAP order is one trading decision executed as many slices - one tracked
+    wallet produced 2000+ slices from a single order - so counting each slice
+    as its own fill would swamp win/loss counts and the 5-minute quality_events
+    buckets with execution mechanics rather than decisions. The endpoint has no
+    aggregateByTime option, so this collapsing has to happen here. Malformed
+    entries are skipped rather than raised on, because a reshaped or partial
+    API response should degrade the quality window, not crash the fetch. The
+    inner ``fill.twapId`` is always null; the real id is the outer ``twapId``.
+    """
+    if not isinstance(slices, list):
+        return []
+    groups: dict[tuple[Any, Any, str], list[dict[str, Any]]] = {}
+    for entry in slices:
+        if not isinstance(entry, dict):
+            continue
+        fill = entry.get("fill")
+        if not isinstance(fill, dict):
+            continue
+        key = (entry.get("twapId"), fill.get("coin", "Unknown"), str(fill.get("dir") or ""))
+        groups.setdefault(key, []).append(fill)
+
+    collapsed: list[dict[str, Any]] = []
+    for (twap_id, _coin, _direction), group_fills in groups.items():
+        # "Earliest" needs a stable order across slices that can share a
+        # timestamp; tid is monotonically assigned by the exchange so it is
+        # the tiebreaker.
+        ordered = sorted(group_fills, key=lambda f: (int(to_float(f.get("time"))), str(f.get("tid") or "")))
+        earliest = ordered[0]
+        total_sz = sum(to_float(f.get("sz")) for f in ordered)
+        total_pnl = sum(to_float(f.get("closedPnl")) for f in ordered)
+        total_fee = sum(to_float(f.get("fee")) for f in ordered)
+        notional = sum(to_float(f.get("px")) * to_float(f.get("sz")) for f in ordered)
+        weighted_px = (notional / total_sz) if total_sz else to_float(ordered[-1].get("px"))
+        collapsed.append(
+            {
+                "coin": earliest.get("coin", "Unknown"),
+                "dir": earliest.get("dir", "Unknown"),
+                "side": earliest.get("side"),
+                "crossed": earliest.get("crossed"),
+                "feeToken": earliest.get("feeToken"),
+                "hash": earliest.get("hash"),
+                "oid": earliest.get("oid"),
+                "tid": earliest.get("tid"),
+                "startPosition": str(earliest.get("startPosition", "0")),
+                # Emitted as strings, matching the raw API schema, because
+                # every downstream consumer runs these fields through to_float.
+                "closedPnl": str(total_pnl),
+                "fee": str(total_fee),
+                "px": str(weighted_px),
+                "sz": str(total_sz),
+                "time": max(int(to_float(f.get("time"))) for f in ordered),
+                "twapId": twap_id,
+                "twapSliceCount": len(ordered),
+            }
+        )
+    collapsed.sort(key=lambda f: int(to_float(f.get("time"))))
+    return collapsed
+
+
 def cached_window_fill_count(entry: Any) -> int | None:
     """Rows the wallet's last windowed fill page returned, or None if unknown.
 
@@ -1747,6 +1809,24 @@ class WalletTrackerService:
         ok = bool(result.get("ok")) and isinstance(fills, list)
         return {"ok": ok, "data": fills if isinstance(fills, list) else [], "error": result.get("error", "")}
 
+    def fetch_twap_slice_fills_result(self, address: str, start_time: int) -> dict[str, Any]:
+        # userFillsByTime does not return TWAP slice fills at all - measured
+        # over 3 days across 30 tracked wallets, 100% of slices on the wallets
+        # that had them were absent from userFillsByTime, one wallet alone
+        # showing 10 regular fills against 2000+ TWAP slices (~$6.5M notional).
+        # This endpoint has no aggregateByTime option.
+        result = self.client.safe_post_result(
+            {
+                "type": "userTwapSliceFillsByTime",
+                "user": address,
+                "startTime": start_time,
+            },
+            [],
+        )
+        slices = result.get("data") if result.get("ok") else []
+        ok = bool(result.get("ok")) and isinstance(slices, list)
+        return {"ok": ok, "data": slices if isinstance(slices, list) else [], "error": result.get("error", "")}
+
     def fetch_fills_paginated_result(
         self,
         address: str,
@@ -1886,6 +1966,9 @@ class WalletTrackerService:
             }
             if not skip_fills:
                 futures["fills"] = executor.submit(self.fetch_fills_result, wallet.address, fills_start_ms)
+                futures["twapFills"] = executor.submit(
+                    self.fetch_twap_slice_fills_result, wallet.address, fills_start_ms
+                )
                 if not skip_live_fills:
                     futures["recentFills"] = executor.submit(self.fetch_recent_fills_result, wallet.address)
             if full_quality_refresh:
@@ -1900,6 +1983,7 @@ class WalletTrackerService:
         # the fetch-failure counts.
         skipped_result = {"ok": False, "data": [], "error": "", "skipped": True}
         fills_result = futures["fills"].result() if "fills" in futures else dict(skipped_result)
+        twap_fills_result = futures["twapFills"].result() if "twapFills" in futures else dict(skipped_result)
         recent_fills_result = (
             futures["recentFills"].result() if "recentFills" in futures else dict(skipped_result)
         )
@@ -1918,16 +2002,31 @@ class WalletTrackerService:
             else {"ok": True, "data": cached.get("portfolio", {}), "error": ""}
         )
         open_orders = orders_result.get("data", []) if isinstance(orders_result, dict) else []
-        fills = fills_result.get("data", []) if isinstance(fills_result, dict) else []
-        # Length of the raw windowed page, before any 30-day filtering, because
-        # it is the page hitting WALLET_WINDOW_FILL_CAP that decides whether the
-        # live request is worth issuing next cycle. A skipped fetch yields an
-        # empty list meaning "not asked", not "no fills", so the cached count is
-        # carried forward instead of being overwritten with a 0 that would read
-        # as a wallet safely under the cap.
-        window_fill_count = len(fills) if not skip_fills else cached_window_fill_count(cached)
+        base_fills = fills_result.get("data", []) if isinstance(fills_result, dict) else []
+        twap_slices = twap_fills_result.get("data", []) if isinstance(twap_fills_result, dict) else []
+        # Length of the raw windowed userFillsByTime page, before any 30-day
+        # filtering or TWAP collapsing, because it is that page hitting
+        # WALLET_WINDOW_FILL_CAP that decides whether the live request is
+        # worth issuing next cycle. A skipped fetch yields an empty list
+        # meaning "not asked", not "no fills", so the cached count is carried
+        # forward instead of being overwritten with a 0 that would read as a
+        # wallet safely under the cap.
+        window_fill_count = len(base_fills) if not skip_fills else cached_window_fill_count(cached)
         portfolio = portfolio_result.get("data", {}) if isinstance(portfolio_result, dict) else {}
         fills_ok = bool(isinstance(fills_result, dict) and fills_result.get("ok"))
+        twap_fills_ok = bool(isinstance(twap_fills_result, dict) and twap_fills_result.get("ok"))
+        # userFillsByTime never returns TWAP slice fills at all (see
+        # fetch_twap_slice_fills_result); one wallet showed 10 regular fills
+        # against 2000+ TWAP slices. Each TWAP order is one trading decision,
+        # so slices are collapsed to a single synthetic fill per order before
+        # joining the raw fills - otherwise execution mechanics would swamp
+        # the win/loss counts and quality_events buckets below. A failed TWAP
+        # fetch must never fail the whole snapshot, so it just contributes
+        # nothing here; twap_fills_ok still records whether it succeeded.
+        fills = sorted(
+            base_fills + collapse_twap_slice_fills(twap_slices),
+            key=lambda f: int(to_float(f.get("time"))),
+        )
         recent_fills_ok = bool(isinstance(recent_fills_result, dict) and recent_fills_result.get("ok"))
         live_fills = recent_fills_result.get("data", []) if recent_fills_ok else []
         if not isinstance(live_fills, list):
@@ -2043,7 +2142,19 @@ class WalletTrackerService:
         # - newest fill time in the page minus where the page started - so
         # wallet_quality_window_trusted can tell the two cases apart. 0 when
         # the page came back empty.
-        quality_window_truncated = bool(full_quality_refresh and fills_ok and len(fills) >= WALLET_WINDOW_FILL_CAP)
+        # ``fills`` is the merged-and-collapsed list: 2000 TWAP slices can fold
+        # into a handful of synthetic fills, so its length no longer reveals
+        # whether either raw page hit its own WALLET_WINDOW_FILL_CAP. Test the
+        # two raw page lengths independently instead - either one capping out
+        # means the 30-day window may be missing data, and collapsing must not
+        # be allowed to hide that.
+        quality_window_truncated = bool(
+            full_quality_refresh
+            and (
+                (fills_ok and len(base_fills) >= WALLET_WINDOW_FILL_CAP)
+                or (twap_fills_ok and len(twap_slices) >= WALLET_WINDOW_FILL_CAP)
+            )
+        )
         quality_window_coverage_ms = (last_fill_time - fills_start_ms) if fills else 0
 
         # userFillsByTime caps at 2000 rows ascending from startTime, so a busy
@@ -2230,6 +2341,8 @@ class WalletTrackerService:
                 "ordersOk": orders_ok if orders_fetched else None,
                 "ordersFetched": orders_fetched,
                 "recentFillsOk": recent_fills_ok,
+                "twapFillsOk": twap_fills_ok,
+                "twapSliceCount": len(twap_slices),
                 "recentFillsError": (
                     recent_fills_result.get("error", "") if isinstance(recent_fills_result, dict) else ""
                 ),
