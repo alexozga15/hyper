@@ -7,6 +7,7 @@ from unittest.mock import patch
 from pathlib import Path
 from typing import Any
 
+import server
 from coinmarketman import CoinMarketManApiError
 from server import (
     ALERTS_FILE,
@@ -6451,3 +6452,49 @@ class LargePositionAlertFloorTests(unittest.TestCase):
                 "0x1111111111111111111111111111111111111111:BTC:long",
                 service.build_large_position_snapshot(dashboard),
             )
+
+
+class Hip3MarketClassTests(unittest.TestCase):
+    """The alert path claimed to exclude HIP-3 and excluded nothing.
+
+    Its test was a leading "@", which no tracked market carries. Measured
+    against a live snapshot: SP500 sat in the crypto consensus long across 7
+    wallets, XYZ100 across 4, alongside NVDA, GOOGL, BABA and MU.
+    """
+
+    def test_bare_index_and_commodity_names_are_hip3(self) -> None:
+        for coin in ("SP500", "XYZ100", "NAS100", "GOLD", "SILVER", "@123"):
+            self.assertTrue(server.is_hip3_market_coin(coin), coin)
+
+    def test_prefixed_stock_needs_the_raw_label(self) -> None:
+        # normalize_position_coin turns "xyz:NVDA" into "NVDA", which is
+        # indistinguishable from a crypto ticker -- so the raw label is the
+        # only thing that can classify it.
+        self.assertTrue(server.is_hip3_market_coin("xyz:NVDA"))
+        self.assertFalse(server.is_hip3_market_coin(server.normalize_position_coin("xyz:NVDA")))
+
+    def test_crypto_is_left_alone(self) -> None:
+        for coin in ("BTC", "ETH", "SOL", "HYPE", "PUMP"):
+            self.assertFalse(server.is_hip3_market_coin(coin), coin)
+
+    def test_alert_filter_drops_hip3_signals_when_not_tracking(self) -> None:
+        service = WalletTrackerService(WalletStore(Path(ALERTS_FILE)), HyperliquidClient())
+        signals = [
+            {"coin": "BTC", "marketCoin": "BTC", "side": "long"},
+            {"coin": "SP500", "marketCoin": "SP500", "side": "long"},
+            {"coin": "NVDA", "marketCoin": "xyz:NVDA", "side": "long"},
+            {"coin": "GOLD", "marketCoin": "GOLD", "side": "short"},
+        ]
+        kept = service.filter_signals_for_alerts(signals, False)
+        self.assertEqual([item["coin"] for item in kept], ["BTC"])
+        self.assertEqual(service.filter_signals_for_alerts(signals, True), signals)
+
+    def test_filter_falls_back_to_coin_when_the_raw_label_is_absent(self) -> None:
+        # Summaries written before marketCoin reached consensus items have no
+        # raw label; the bare index names must still be caught.
+        service = WalletTrackerService(WalletStore(Path(ALERTS_FILE)), HyperliquidClient())
+        signals = [{"coin": "BTC", "side": "long"}, {"coin": "SP500", "side": "long"}]
+        self.assertEqual(
+            [item["coin"] for item in service.filter_signals_for_alerts(signals, False)],
+            ["BTC"],
+        )
