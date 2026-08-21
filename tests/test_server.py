@@ -5734,8 +5734,15 @@ class AlertSummaryTests(unittest.TestCase):
 
         snapshot = self.service.build_large_position_snapshot(dashboard)
 
-        self.assertNotIn("0x1111111111111111111111111111111111111111:BTC:long", snapshot)
+        # Tracking is broader than alerting now: both positions are followed,
+        # and the floor each has to clear rides along as alertThreshold so the
+        # change detector can apply it per wallet.
+        self.assertIn("0x1111111111111111111111111111111111111111:BTC:long", snapshot)
         self.assertIn("0x1111111111111111111111111111111111111111:ETH:short", snapshot)
+        self.assertEqual(
+            snapshot["0x1111111111111111111111111111111111111111:BTC:long"]["alertThreshold"],
+            1_000_000.0,
+        )
 
     def test_threshold_migration_does_not_report_sub_1m_position_as_closed(self) -> None:
         previous = {
@@ -5885,7 +5892,7 @@ class AlertSummaryTests(unittest.TestCase):
                 "alias": "wallet",
                 "coin": "ETH",
                 "side": "short",
-                "totalValue": 900000.0,
+                "totalValue": 1_400_000.0,
                 "totalSize": 300.0,
             }
         }
@@ -6446,12 +6453,22 @@ class LargePositionAlertFloorTests(unittest.TestCase):
             ]
         }
 
-        self.assertEqual(service.build_large_position_snapshot(dashboard), {})
+        # $1.5M is above the tracking floor (base / the largest conviction
+        # weight) so it is followed, but the alert floor stamped on it is the
+        # unscaled $2M this wallet has no quality record to beat.
+        snapshot = service.build_large_position_snapshot(dashboard)
+        key = "0x1111111111111111111111111111111111111111:BTC:long"
+        self.assertIn(key, snapshot)
+        self.assertEqual(snapshot[key]["alertThreshold"], 2_000_000.0)
         with patch("server.NEW_POSITION_ALERT_MIN_VALUE", 1_000_000):
-            self.assertIn(
-                "0x1111111111111111111111111111111111111111:BTC:long",
-                service.build_large_position_snapshot(dashboard),
+            self.assertEqual(
+                service.build_large_position_snapshot(dashboard)[key]["alertThreshold"],
+                1_000_000.0,
             )
+        # And the tracking floor follows the patched base rather than a value
+        # frozen at import.
+        with patch("server.LARGE_POSITION_ALERT_MIN_VALUE", 100_000_000):
+            self.assertEqual(service.build_large_position_snapshot(dashboard), {})
 
 
 class Hip3MarketClassTests(unittest.TestCase):
@@ -6498,3 +6515,102 @@ class Hip3MarketClassTests(unittest.TestCase):
             [item["coin"] for item in service.filter_signals_for_alerts(signals, False)],
             ["BTC"],
         )
+
+
+class QualityScaledPositionAlertTests(unittest.TestCase):
+    """Size is the property measurement showed carries no forward information.
+
+    Over 99 days across 31 tracked wallets, split chronologically: ranking
+    wallets by realised PnL predicted their next half's return on turnover at
+    rho +0.04 (p=0.86). Hit rate was the only wallet metric that persisted,
+    rho +0.42 (p=0.056). So the alert floor is scaled by the quality machinery
+    rather than being one flat notional for everyone.
+    """
+
+    def setUp(self) -> None:
+        self.service = WalletTrackerService(WalletStore(Path(ALERTS_FILE)), HyperliquidClient())
+
+    def test_threshold_falls_for_a_good_wallet_and_rises_for_a_poor_one(self) -> None:
+        base = 2_000_000.0
+        self.assertLess(server.quality_scaled_threshold(base, 1.5), base)
+        self.assertGreater(server.quality_scaled_threshold(base, 0.5), base)
+        self.assertEqual(server.quality_scaled_threshold(base, 1.0), base)
+
+    def test_an_unreadable_wallet_never_alerts_on_size_alone(self) -> None:
+        # wallet_conviction_weight returns 0 for a quarantined wallet or one
+        # whose quality window has aged out; dividing by that would be a
+        # crash, and treating it as neutral would let size decide again.
+        self.assertEqual(server.quality_scaled_threshold(2_000_000.0, 0.0), float("inf"))
+
+    def test_the_scaled_floor_is_capped_so_tracking_can_always_reach_it(self) -> None:
+        # A floor below the tracking floor would be unreachable: the position
+        # would never enter the snapshot to be compared in the first place.
+        floor = server.quality_scaled_threshold(2_000_000.0, 99.0)
+        with patch("server.LARGE_POSITION_ALERT_MIN_VALUE", 2_000_000):
+            self.assertGreaterEqual(floor, server.large_position_tracking_min_value())
+
+    def test_stored_positions_without_a_threshold_keep_the_flat_floor(self) -> None:
+        # Snapshots written before the floor became per wallet must not be
+        # reclassified on the first cycle after deploy.
+        self.assertEqual(
+            self.service.position_alert_threshold({"totalValue": 1.0}, 2_000_000.0),
+            2_000_000.0,
+        )
+        self.assertEqual(
+            self.service.position_alert_threshold({"alertThreshold": 1_300_000.0}, 2_000_000.0),
+            1_300_000.0,
+        )
+
+    def test_a_new_position_below_its_wallets_floor_does_not_alert(self) -> None:
+        now = 1_800_000_000_000
+        current = {
+            "w:BTC:long": {
+                "address": "w", "coin": "BTC", "side": "long",
+                "totalValue": 2_500_000.0, "totalSize": 25.0,
+                "alertThreshold": 4_000_000.0,
+            }
+        }
+        fills = {"w:BTC:long:add": {"price": 100_000.0, "size": 25.0, "latestTime": now}}
+        added, _increased, _closed = self.service.summarize_large_position_changes(
+            {}, current, fills, now_ms=now
+        )
+        self.assertEqual(added, [])
+
+        current["w:BTC:long"]["alertThreshold"] = 1_500_000.0
+        added, _increased, _closed = self.service.summarize_large_position_changes(
+            {}, current, fills, now_ms=now
+        )
+        self.assertEqual([item["coin"] for item in added], ["BTC"])
+
+    def test_a_close_is_gated_by_the_same_floor_that_governed_the_open(self) -> None:
+        previous = {
+            "w:BTC:long": {
+                "address": "w", "coin": "BTC", "side": "long",
+                "totalValue": 2_500_000.0, "totalSize": 25.0,
+                "alertThreshold": 4_000_000.0,
+            }
+        }
+        _added, _increased, closed = self.service.summarize_large_position_changes(previous, {}, {})
+        self.assertEqual(closed, [])
+
+
+class AlertThresholdSerializationTests(unittest.TestCase):
+    def test_an_unalertable_position_stores_a_json_safe_sentinel(self) -> None:
+        # json.dumps writes float("inf") as the non-standard literal Infinity,
+        # and this value is persisted in alerts.json.
+        service = WalletTrackerService(WalletStore(Path(ALERTS_FILE)), HyperliquidClient())
+        dashboard = {
+            "wallets": [
+                {
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "reviewWeightMultiplier": 0.0,  # forces conviction weight to 0
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 5_000_000.0}],
+                }
+            ]
+        }
+        snapshot = service.build_large_position_snapshot(dashboard)
+        item = snapshot["0x2222222222222222222222222222222222222222:BTC:long"]
+        self.assertEqual(item["alertThreshold"], 0.0)
+        self.assertNotIn("Infinity", json.dumps(snapshot))
+        # And the sentinel still means "never alerts", not "always alerts".
+        self.assertEqual(service.position_alert_threshold(item, 2_000_000.0), float("inf"))
