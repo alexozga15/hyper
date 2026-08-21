@@ -40,12 +40,26 @@ assert _OUTCOME_SPEC and _OUTCOME_SPEC.loader
 outcome_report = importlib.util.module_from_spec(_OUTCOME_SPEC)
 _OUTCOME_SPEC.loader.exec_module(outcome_report)
 
+_TRADES_SPEC = importlib.util.spec_from_file_location(
+    "build_trade_history", ROOT / "scripts" / "build_trade_history.py"
+)
+assert _TRADES_SPEC and _TRADES_SPEC.loader
+trade_history = importlib.util.module_from_spec(_TRADES_SPEC)
+_TRADES_SPEC.loader.exec_module(trade_history)
+
+# How far back /trades looks when no window is given, and the ceiling: the
+# venue clamps userFillsByTime to roughly 100 days of retention, so asking for
+# more silently returns the same window.
+TRADES_DEFAULT_DAYS = 7
+TRADES_MAX_DAYS = 99
+
 # Commands here trigger a live dashboard fetch before the reply is built.
 # /outcomes reads stored outcomes only, so it stays out - listing it would
 # make a report about past calls pay for a fresh snapshot it never reads.
 LIVE_COMMANDS = {"/update", "/sentiment", "/consensus", "/signals", "/cmm", "/hip3", "/positions", "/ranks", "/elite"}
 # Every command name, live or not: a ticker query must never swallow one.
-KNOWN_COMMANDS = LIVE_COMMANDS | {"/moni", "/outcomes", "/help"}
+# /trades fetches one wallet's fills directly, so it needs no dashboard.
+KNOWN_COMMANDS = LIVE_COMMANDS | {"/moni", "/outcomes", "/trades", "/help"}
 SUMMARY_COMMANDS = {"/update", "/sentiment", "/consensus", "/signals", "/hip3"}
 CMM_COMMANDS = {"/signals", "/cmm"}
 MONI_COMMANDS = {"/signals", "/moni"}
@@ -79,6 +93,35 @@ def parse_position_wallet_query(text: str) -> tuple[str, str] | None:
     return ticker.upper(), side
 
 
+def parse_trades_query(text: str, addresses: list[str]) -> tuple[str, int] | str | None:
+    """Resolve "/trades <address or prefix> [days]".
+
+    A full address is unusable on a phone, so a prefix is accepted and matched
+    against the tracked list. An ambiguous or unknown prefix returns an
+    explanatory string rather than silently picking one of the matches.
+    """
+    message = (text or "").strip().split()
+    if not message or normalize_command(text) != "/trades":
+        return None
+    if len(message) < 2:
+        return "Usage: /trades <address or prefix> [days]"
+    needle = message[1].strip().lower()
+    matches = [item for item in addresses if item.lower().startswith(needle)]
+    if not matches:
+        return f"No tracked wallet starts with {message[1].strip()}"
+    if len(matches) > 1:
+        listed = ", ".join(f"{item[:10]}…" for item in matches[:5])
+        return f"{len(matches)} tracked wallets start with that; be more specific: {listed}"
+    days = TRADES_DEFAULT_DAYS
+    if len(message) > 2:
+        try:
+            days = int(message[2])
+        except ValueError:
+            return f"Not a number of days: {message[2]}"
+        days = max(1, min(days, TRADES_MAX_DAYS))
+    return matches[0], days
+
+
 def build_help_message() -> str:
     return "\n".join(
         [
@@ -93,6 +136,7 @@ def build_help_message() -> str:
             "/positions - all open positions now",
             "/ranks - tracked wallets ranked by 7D hit rate plus 7D PnL",
             "/outcomes - what the last 7 days of calls actually returned",
+            "/trades 0x350e 30 - one wallet's closed round trips, entry to exit",
             "/elite - open positions for Elite-ranked wallets",
             "/btc long - wallets currently long BTC",
             "/hype short - wallets currently short HYPE",
@@ -193,6 +237,7 @@ def build_reply(
     cmm_cache: dict[str, Any] | None,
     min_wallets: int,
     moni_cache: dict[str, Any] | None = None,
+    trades_query: tuple[str, int] | str | None = None,
 ) -> str:
     if command == "/update":
         return "\n\n".join(
@@ -266,6 +311,21 @@ def build_reply(
                 now_ms=current_time_ms(),
             )
         )
+    if command == "/trades":
+        if isinstance(trades_query, str):
+            return trades_query
+        if not trades_query:
+            return "Usage: /trades <address or prefix> [days]"
+        address, days = trades_query
+        start_ms = current_time_ms() - days * 24 * 60 * 60 * 1000
+        result = service.fetch_fills_paginated_result(address, start_ms)
+        if not result["ok"] and not result["data"]:
+            return f"Could not read fills for {address[:10]}…: {result['error']}"
+        reconstructed, checks = trade_history.reconstruct(result["data"])
+        message = trade_history.build_message(address, reconstructed, checks, days=days)
+        if result.get("truncated"):
+            message += f"\n\n⚠ history truncated after {result.get('pages')} pages; older trades missing"
+        return message
     if position_query:
         coin, side = position_query
         return service.build_position_wallets_message(dashboard_cache, coin, side)
@@ -385,6 +445,11 @@ def main() -> int:
             continue
 
         position_query = parse_position_wallet_query(message_text)
+        trades_query = None
+        if command == "/trades":
+            trades_query = parse_trades_query(
+                message_text, [wallet.address for wallet in service.store.list_wallets()]
+            )
         if command in LIVE_COMMANDS or position_query:
             if dashboard_cache is None:
                 dashboard_cache = resolve_dashboard(service)
@@ -405,6 +470,7 @@ def main() -> int:
             cmm_cache,
             min_wallets,
             moni_cache=moni_cache,
+            trades_query=trades_query,
         )
 
         service.send_telegram_message(bot_token, chat_id, reply)
