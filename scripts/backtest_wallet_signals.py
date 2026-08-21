@@ -14,10 +14,12 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import random
 import re
 import statistics
 import sys
+import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -40,6 +42,11 @@ CONSENSUS_REFRACTORY_WINDOWS = 1
 BOOTSTRAP_SEED = 20240517
 BOOTSTRAP_RESAMPLES = 2000
 BOOTSTRAP_CONFIDENCE = 0.95
+# Pacing for the paginated fill walk; see the fetch loop for the measurement.
+WALLET_FETCH_ATTEMPTS = int(os.environ.get("BACKTEST_WALLET_FETCH_ATTEMPTS", "3"))
+WALLET_FETCH_RETRY_SECONDS = (20.0, 60.0)
+WALLET_FETCH_SPACING_SECONDS = float(os.environ.get("BACKTEST_WALLET_FETCH_SPACING_SECONDS", "1.0"))
+
 MIN_OBSERVATIONS_FOR_SELECTION = 30
 
 
@@ -319,17 +326,30 @@ def main() -> int:
     wallets = service.store.list_wallets()
     if args.max_wallets:
         wallets = wallets[: args.max_wallets]
-    end_ms = int(__import__("time").time() * 1000)
+    end_ms = int(time.time() * 1000)
     start_ms = end_ms - args.days * 24 * 60 * 60 * 1000
     fills: list[dict[str, Any]] = []
     errors: list[str] = []
-    for wallet in wallets:
+    for index, wallet in enumerate(wallets):
         # Paginated: a single userFillsByTime page stops at 2000 rows counted
         # from start_ms, so for a busy wallet the window this evaluates was
         # only its oldest hours. Measured over 30 days, 17 of 38 tracked
         # wallets exhausted one page, which is why per-wallet attribution
         # could not reach 30 observations for all but two of them.
-        result = service.fetch_fills_paginated_result(wallet.address, start_ms)
+        #
+        # Paginating raises request volume roughly tenfold, and the client's
+        # own three attempts at 0.25s*2^n back off far too fast for that: the
+        # first paginated 30-day run lost 8 of 38 wallets outright to HTTP 429,
+        # and a wallet that returns nothing is indistinguishable in the results
+        # from a wallet that simply did not trade. These pace the walk.
+        if index:
+            time.sleep(WALLET_FETCH_SPACING_SECONDS)
+        for attempt in range(WALLET_FETCH_ATTEMPTS):
+            result = service.fetch_fills_paginated_result(wallet.address, start_ms)
+            if result["ok"]:
+                break
+            if attempt < WALLET_FETCH_ATTEMPTS - 1:
+                time.sleep(WALLET_FETCH_RETRY_SECONDS[min(attempt, len(WALLET_FETCH_RETRY_SECONDS) - 1)])
         if not result["ok"]:
             errors.append(f"{wallet.address}: {result['error']}")
         if result.get("truncated"):
