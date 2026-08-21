@@ -6179,6 +6179,59 @@ class TwapSliceFillTests(unittest.TestCase):
         self.assertGreater(snapshot["realizedPnl30d"], 0.0)
         self.assertAlmostEqual(snapshot["realizedPnl30d"], 750.0)
 
+    def test_non_refresh_cycle_does_not_fetch_twap_fills(self) -> None:
+        # Two fill requests per wallet per cycle are already the largest
+        # traffic block (see WALLET_IDLE_FILL_THRESHOLD_MS in server.py), so a
+        # third one must not fire on the incremental cycles that run between
+        # full refreshes - only full_quality_refresh commits the 30-day
+        # aggregates a TWAP fetch would feed.
+        wallet = TrackedWallet(address="0x1111111111111111111111111111111111111111", alias="", notes="", created_at="")
+        service = WalletTrackerService(WalletStore(Path(ALERTS_FILE)), HyperliquidClient())
+        with patch.object(
+            service.client, "safe_subscribe_all_dexs_clearinghouse_state", return_value=self._minimal_snapshot_state()
+        ), patch.object(
+            service, "fetch_fills_result", return_value={"ok": True, "data": [], "error": ""}
+        ), patch.object(
+            service, "fetch_twap_slice_fills_result"
+        ) as twap_fetch, patch.object(
+            service, "fetch_recent_fills_result", return_value={"ok": True, "data": [], "error": ""}
+        ):
+            snapshot = service.fetch_wallet_snapshot(
+                wallet,
+                full_quality_refresh=False,
+                cached_snapshot={"recentFills": []},
+            )
+
+        twap_fetch.assert_not_called()
+        # None means "not asked this cycle", distinct from False/0 meaning
+        # "asked and came back empty" - a missing TWAP fetch must never read
+        # as "we checked and this wallet has no TWAP activity".
+        self.assertIsNone(snapshot["dataQuality"]["twapFillsOk"])
+        self.assertIsNone(snapshot["dataQuality"]["twapSliceCount"])
+
+    def test_full_refresh_cycle_fetches_twap_fills_and_records_result(self) -> None:
+        wallet = TrackedWallet(address="0x1111111111111111111111111111111111111111", alias="", notes="", created_at="")
+        slices = [self._slice(current_time_ms() - 60_000, 3, 1, sz=1.0)]
+        service = WalletTrackerService(WalletStore(Path(ALERTS_FILE)), HyperliquidClient())
+        with patch.object(
+            service.client, "safe_subscribe_all_dexs_clearinghouse_state", return_value=self._minimal_snapshot_state()
+        ), patch.object(
+            service, "fetch_fills_result", return_value={"ok": True, "data": [], "error": ""}
+        ), patch.object(
+            service, "fetch_twap_slice_fills_result", return_value={"ok": True, "data": slices, "error": ""}
+        ) as twap_fetch, patch.object(
+            service, "fetch_recent_fills_result", return_value={"ok": True, "data": [], "error": ""}
+        ), patch.object(
+            service, "fetch_open_orders_result", return_value={"ok": True, "data": [], "error": ""}
+        ), patch.object(
+            service, "fetch_portfolio_result", return_value={"ok": True, "data": {}, "error": ""}
+        ), patch.object(service, "fetch_wallet_role", return_value="user"):
+            snapshot = service.fetch_wallet_snapshot(wallet)
+
+        twap_fetch.assert_called_once()
+        self.assertTrue(snapshot["dataQuality"]["twapFillsOk"])
+        self.assertEqual(snapshot["dataQuality"]["twapSliceCount"], 1)
+
 
 class HyperliquidClientTests(unittest.TestCase):
     def test_merge_all_dexs_clearinghouse_state_combines_positions_and_balances(self) -> None:

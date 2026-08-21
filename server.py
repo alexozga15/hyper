@@ -1966,15 +1966,25 @@ class WalletTrackerService:
             }
             if not skip_fills:
                 futures["fills"] = executor.submit(self.fetch_fills_result, wallet.address, fills_start_ms)
-                futures["twapFills"] = executor.submit(
-                    self.fetch_twap_slice_fills_result, wallet.address, fills_start_ms
-                )
                 if not skip_live_fills:
                     futures["recentFills"] = executor.submit(self.fetch_recent_fills_result, wallet.address)
             if full_quality_refresh:
                 futures["orders"] = executor.submit(self.fetch_open_orders_result, wallet.address)
                 futures["role"] = executor.submit(self.fetch_wallet_role, wallet.address)
                 futures["portfolio"] = executor.submit(self.fetch_portfolio_result, wallet.address)
+                # Two fill requests per wallet per cycle are already the
+                # largest traffic block (see WALLET_IDLE_FILL_THRESHOLD_MS
+                # above), so this must not become a third one every cycle. The
+                # 30-day quality aggregates that consume TWAP fills are only
+                # committed on a full refresh (quality_refresh_succeeded
+                # requires it) and quality_window_truncated below already ANDs
+                # full_quality_refresh, so tying this fetch to the same flag
+                # costs +3 calls a cycle instead of +30 and its request window
+                # (fills_start_ms == cutoff_30d_ms here) always matches the
+                # 30-day window it feeds.
+                futures["twapFills"] = executor.submit(
+                    self.fetch_twap_slice_fills_result, wallet.address, fills_start_ms
+                )
 
         state = futures["state"].result()
         # A skipped fetch is not a failed one. It reports ok=False so the merge
@@ -1990,6 +2000,7 @@ class WalletTrackerService:
         cached = cached_snapshot if isinstance(cached_snapshot, dict) else {}
         orders_fetched = "orders" in futures
         portfolio_fetched = "portfolio" in futures
+        twap_fetched = "twapFills" in futures
         orders_result = (
             futures["orders"].result()
             if orders_fetched
@@ -2341,8 +2352,14 @@ class WalletTrackerService:
                 "ordersOk": orders_ok if orders_fetched else None,
                 "ordersFetched": orders_fetched,
                 "recentFillsOk": recent_fills_ok,
-                "twapFillsOk": twap_fills_ok,
-                "twapSliceCount": len(twap_slices),
+                # None means the TWAP fetch was not attempted this cycle
+                # (non-refresh cycle, see the full_quality_refresh gate
+                # above) - distinct from False/0, which means it was asked
+                # and came back empty. Old cached state predates this field
+                # entirely, so it must read the same way: not known, not "no
+                # TWAP activity".
+                "twapFillsOk": twap_fills_ok if twap_fetched else None,
+                "twapSliceCount": len(twap_slices) if twap_fetched else None,
                 "recentFillsError": (
                     recent_fills_result.get("error", "") if isinstance(recent_fills_result, dict) else ""
                 ),
