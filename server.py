@@ -237,7 +237,7 @@ MONI_SOCIAL_PROJECT_HANDLES = {
     "XRP": "Ripple",
     "ZRO": "LayerZero_Core",
 }
-POSITION_GROUP_DISPLAY_MIN_VALUE = 1_000_000
+POSITION_GROUP_DISPLAY_MIN_VALUE = 2_000_000
 MIN_POSITION_MESSAGE_WALLETS = 3
 # 10-minute cycles, so this holds roughly a month of "Market view" values.
 MARKET_VIEW_HISTORY_LIMIT = int(os.environ.get("MARKET_VIEW_HISTORY_LIMIT", "4400"))
@@ -5401,13 +5401,20 @@ class WalletTrackerService:
         self,
         dashboard: dict[str, Any],
         *,
-        min_value: float = MIN_POSITION_MESSAGE_VALUE,
-        min_wallets: int = MIN_POSITION_MESSAGE_WALLETS,
+        min_value: float | None = None,
+        min_wallets: int | None = None,
         hip3_only: bool | None = None,
         stock_like_only: bool | None = None,
         commodity_like_only: bool | None = None,
         now_ms: int | None = None,
     ) -> list[dict[str, Any]]:
+        # Resolve the floors at call time rather than binding them as argument
+        # defaults at import. Tests pin the module constants (see
+        # AlertSummaryTests.setUp) and a def-time default would ignore that.
+        if min_value is None:
+            min_value = MIN_POSITION_MESSAGE_VALUE
+        if min_wallets is None:
+            min_wallets = MIN_POSITION_MESSAGE_WALLETS
         groups: dict[tuple[str, str], dict[str, Any]] = {}
         checked_ms = current_time_ms() if now_ms is None else now_ms
         recent_add_cutoff = checked_ms - POSITION_RECENT_ADD_WINDOW_MS
