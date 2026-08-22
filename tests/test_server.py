@@ -219,6 +219,9 @@ class AlertSummaryTests(unittest.TestCase):
             "LARGE_POSITION_ALERT_MIN_VALUE",
             "NEW_POSITION_ALERT_MIN_VALUE",
             "POSITION_INCREASE_ALERT_MIN_DELTA",
+            # Same reasoning for the digest's position-group floor, raised to
+            # $2M separately; see test_position_group_display_floor_default.
+            "MIN_POSITION_MESSAGE_VALUE",
         ):
             patcher = patch(f"server.{name}", 1_000_000)
             patcher.start()
@@ -6691,6 +6694,39 @@ class LargePositionAlertFloorTests(unittest.TestCase):
         self.assertEqual(server_module.LARGE_POSITION_ALERT_MIN_VALUE, 1_000_000)
         self.assertEqual(server_module.NEW_POSITION_ALERT_MIN_VALUE, 1_000_000)
         self.assertEqual(server_module.POSITION_INCREASE_ALERT_MIN_DELTA, 1_000_000)
+
+    def test_position_group_display_floor_default(self) -> None:
+        # The digest's "Open pos now" floor, separate from the single-wallet
+        # alert floor above. Raised $1M -> $2M: measured against the live
+        # dashboard on 2026-08-22 it takes Crypto from 21 groups to 11 and
+        # Stocks from 12 to 10, dropping clusters like NEAR short (5 wallets,
+        # $1.70M) that were padding the digest without changing a decision.
+        import server as server_module
+
+        self.assertEqual(server_module.POSITION_GROUP_DISPLAY_MIN_VALUE, 2_000_000)
+        self.assertEqual(server_module.MIN_POSITION_MESSAGE_VALUE, 2_000_000)
+
+    def test_position_group_floor_follows_the_patched_constant(self) -> None:
+        # Same regression guard as below: the floor must be read at call time,
+        # not frozen as an argument default at import.
+        import server as server_module
+
+        service = WalletTrackerService(WalletStore(Path(ALERTS_FILE)), HyperliquidClient())
+        dashboard = {
+            "generatedAt": "2026-04-09T06:00:00Z",
+            "wallets": [
+                {
+                    "alias": f"w{i}",
+                    "address": f"0x{i}" + "0" * 39,
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 500_000.0}],
+                }
+                for i in range(1, 4)
+            ],
+        }
+        with patch.object(server_module, "MIN_POSITION_MESSAGE_VALUE", 1_000_000):
+            self.assertEqual(len(service.build_position_groups(dashboard)), 1)
+        with patch.object(server_module, "MIN_POSITION_MESSAGE_VALUE", 2_000_000):
+            self.assertEqual(service.build_position_groups(dashboard), [])
 
     def test_snapshot_threshold_follows_the_patched_constant(self) -> None:
         # A default argument would have frozen the import-time value; this is
