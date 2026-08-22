@@ -2758,6 +2758,80 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(len(snapshot["_calls"]), 2)
         self.assertTrue(snapshot["qualityWindowTruncated"])
 
+    def _twap_snapshot(self, twap_pages: list[list[dict[str, Any]]], *, cap: int) -> dict[str, Any]:
+        wallet = TrackedWallet(address="0x" + "d" * 40, alias="twap", notes="", created_at="")
+        state = {
+            "marginSummary": {"accountValue": "1000000", "totalNtlPos": "0", "totalMarginUsed": "0"},
+            "withdrawable": "1000000",
+            "assetPositions": [],
+        }
+        calls: list[int] = []
+
+        def fake_twap(_address: str, start_time: int) -> dict[str, Any]:
+            calls.append(int(start_time))
+            return {"ok": True, "data": twap_pages[min(len(calls) - 1, len(twap_pages) - 1)], "error": ""}
+
+        ok = lambda d: {"ok": True, "data": d, "error": ""}
+        with patch.object(server, "WALLET_WINDOW_FILL_CAP", cap), patch.object(
+            self.service.client, "safe_subscribe_all_dexs_clearinghouse_state", return_value=state
+        ), patch.object(
+            self.service, "fetch_fills_result", return_value=ok([])
+        ), patch.object(
+            self.service, "fetch_recent_fills_result", return_value=ok([])
+        ), patch.object(
+            self.service, "fetch_open_orders_result", return_value=ok([])
+        ), patch.object(
+            self.service, "fetch_portfolio_result", return_value=ok({})
+        ), patch.object(
+            self.service, "fetch_twap_slice_fills_result", side_effect=fake_twap
+        ), patch.object(self.service, "fetch_wallet_role", return_value="user"):
+            snapshot = self.service.fetch_wallet_snapshot(wallet)
+        snapshot["_calls"] = calls
+        return snapshot
+
+    @staticmethod
+    def _slice_at(twap_id: int, ms: int, tid: int) -> dict[str, Any]:
+        return {
+            "twapId": twap_id,
+            "fill": {"coin": "BTC", "dir": "Close Long", "px": "70000", "sz": "1",
+                     "closedPnl": "100", "fee": "0", "time": ms, "tid": tid},
+        }
+
+    def test_twap_slices_are_paged_past_the_row_cap(self) -> None:
+        # userTwapSliceFillsByTime caps and ascends the same way the fill
+        # endpoint does, so a capped page is the oldest slices and the wallet's
+        # newest TWAP orders are simply absent. Two of 31 tracked wallets hit
+        # it; their first pages held 13 orders against 31 in the full window.
+        now_ms = current_time_ms()
+        day = 24 * 60 * 60 * 1000
+        first = [self._slice_at(1, now_ms - 20 * day + i * 1000, 100 + i) for i in range(3)]
+        second = [self._slice_at(2, now_ms - 10 * day + i * 1000, 200 + i) for i in range(2)]
+        snapshot = self._twap_snapshot([first, second, []], cap=3)
+        self.assertGreater(len(snapshot["_calls"]), 1)
+        # Both orders survived the collapse, so both reached the aggregates.
+        self.assertEqual(snapshot["closedTrades30d"], 2)
+        self.assertFalse(snapshot["qualityWindowTruncated"])
+
+    def test_a_capped_twap_page_alone_no_longer_flags_the_window(self) -> None:
+        # The old test was "the page came back full", which under paging just
+        # means there was more to fetch.
+        now_ms = current_time_ms()
+        full_page = [self._slice_at(1, now_ms - 60_000 - i * 1000, 300 + i) for i in range(3)]
+        snapshot = self._twap_snapshot([full_page, []], cap=3)
+        self.assertFalse(snapshot["qualityWindowTruncated"])
+
+    def test_twap_window_is_flagged_when_its_paging_gives_up(self) -> None:
+        now_ms = current_time_ms()
+        day = 24 * 60 * 60 * 1000
+        pages = [
+            [self._slice_at(n, now_ms - (25 - n) * day + i * 1000, 400 + n * 10 + i) for i in range(3)]
+            for n in range(6)
+        ]
+        with patch.object(server, "FILL_HISTORY_MAX_PAGES", 2):
+            snapshot = self._twap_snapshot(pages, cap=3)
+        self.assertEqual(len(snapshot["_calls"]), 2)
+        self.assertTrue(snapshot["qualityWindowTruncated"])
+
     def _snapshot_with_fill_pages(
         self,
         windowed: dict[str, Any],

@@ -1878,6 +1878,77 @@ class WalletTrackerService:
         ok = bool(result.get("ok")) and isinstance(slices, list)
         return {"ok": ok, "data": slices if isinstance(slices, list) else [], "error": result.get("error", "")}
 
+    def fetch_twap_slice_fills_paginated_result(
+        self,
+        address: str,
+        start_time: int,
+        *,
+        max_pages: int | None = None,
+        page_size: int | None = None,
+    ) -> dict[str, Any]:
+        """Every TWAP slice since start_time, walking past the row cap.
+
+        ``userTwapSliceFillsByTime`` caps the same way ``userFillsByTime`` does
+        and ascends from ``startTime``, so a capped page is the *oldest* slices
+        and the wallet's newest TWAP orders are simply absent. Slices matter
+        here only through collapse_twap_slice_fills, which folds them to one
+        synthetic fill per order, so the cost of the cap is measured in orders
+        rather than rows: of 31 tracked wallets only two hit it, and for those
+        two the 4000 rows of first pages held 13 orders where the full 16734
+        hold 31 - one of them seeing 6 of its 21.
+
+        Identity pairs the outer twapId with the inner fill, because slices of
+        one order share nothing else stable and the overlap created by
+        restarting at the newest timestamp has to be removable.
+        """
+        if max_pages is None:
+            max_pages = FILL_HISTORY_MAX_PAGES
+        if page_size is None:
+            page_size = WALLET_WINDOW_FILL_CAP
+
+        def slice_time(row: Any) -> int:
+            if not isinstance(row, dict):
+                return 0
+            inner = row.get("fill")
+            return int(to_float(inner.get("time"))) if isinstance(inner, dict) else 0
+
+        collected: list[Any] = []
+        seen: set[tuple[Any, ...]] = set()
+        cursor = int(start_time)
+        pages = 0
+        while pages < max_pages:
+            result = self.fetch_twap_slice_fills_result(address, cursor)
+            if not result.get("ok"):
+                return {
+                    "ok": False,
+                    "data": collected,
+                    "error": result.get("error", ""),
+                    "truncated": True,
+                    "pages": pages,
+                }
+            page = result.get("data")
+            if not isinstance(page, list) or not page:
+                return {"ok": True, "data": collected, "error": "", "truncated": False, "pages": pages + 1}
+            pages += 1
+            fresh = 0
+            newest = cursor
+            for row in page:
+                identity = (
+                    row.get("twapId") if isinstance(row, dict) else None,
+                    raw_fill_identity(row.get("fill") if isinstance(row, dict) else None),
+                )
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                collected.append(row)
+                fresh += 1
+                newest = max(newest, slice_time(row))
+            if len(page) < page_size or fresh == 0 or newest <= cursor:
+                truncated = len(page) >= page_size and (fresh == 0 or newest <= cursor)
+                return {"ok": True, "data": collected, "error": "", "truncated": truncated, "pages": pages}
+            cursor = newest
+        return {"ok": True, "data": collected, "error": "", "truncated": True, "pages": pages}
+
     def fetch_fills_paginated_result(
         self,
         address: str,
@@ -2051,7 +2122,7 @@ class WalletTrackerService:
                 # (fills_start_ms == cutoff_30d_ms here) always matches the
                 # 30-day window it feeds.
                 futures["twapFills"] = executor.submit(
-                    self.fetch_twap_slice_fills_result, wallet.address, fills_start_ms
+                    self.fetch_twap_slice_fills_paginated_result, wallet.address, fills_start_ms
                 )
 
         state = futures["state"].result()
@@ -2218,26 +2289,24 @@ class WalletTrackerService:
         # - newest fill time in the page minus where the page started - so
         # wallet_quality_window_trusted can tell the two cases apart. 0 when
         # the page came back empty.
-        # ``fills`` is the merged-and-collapsed list: 2000 TWAP slices can fold
-        # into a handful of synthetic fills, so its length no longer reveals
-        # whether either raw page hit its own WALLET_WINDOW_FILL_CAP. Test the
-        # two raw page lengths independently instead - either one capping out
-        # means the 30-day window may be missing data, and collapsing must not
-        # be allowed to hide that.
-        # With paging, a full page no longer means a short window - it means
-        # there was more to fetch and we went and fetched it. Only the pager
-        # saying it gave up (page budget spent, or a page that could not be
-        # advanced past) still means the 30-day numbers may describe less than
-        # 30 days. Reading length here instead would mark every active wallet
-        # untrusted forever, which is the opposite of the point.
+        # Both sources are paged now, so neither is judged by length any more:
+        # a full page means there was more and we went and fetched it. Each
+        # pager reports whether it gave up instead - page budget spent, or a
+        # page it could not advance past - and either one giving up means the
+        # 30-day window may still be missing data. Reading lengths here would
+        # mark every active wallet untrusted forever, which is the opposite of
+        # what this flag is for.
         fills_paged_truncated = bool(
             isinstance(fills_result, dict) and fills_result.get("truncated")
+        )
+        twap_paged_truncated = bool(
+            isinstance(twap_fills_result, dict) and twap_fills_result.get("truncated")
         )
         quality_window_truncated = bool(
             full_quality_refresh
             and (
                 (fills_ok and fills_paged_truncated)
-                or (twap_fills_ok and len(twap_slices) >= WALLET_WINDOW_FILL_CAP)
+                or (twap_fills_ok and twap_paged_truncated)
             )
         )
         quality_window_coverage_ms = (last_fill_time - fills_start_ms) if fills else 0
