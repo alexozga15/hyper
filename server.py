@@ -330,6 +330,35 @@ def quality_scaled_threshold(base: float, weight: float) -> float:
     if weight < LARGE_POSITION_MIN_ALERT_WEIGHT:
         return float("inf")
     return base / min(weight, MAX_CONVICTION_WEIGHT_FOR_ALERTS)
+
+
+# The digest's group floor follows the same reasoning one level up. A group is
+# already several wallets agreeing, so the question is not whether one wallet is
+# readable but how much of that agreement is worth trusting - summed conviction
+# weight, not summed notional. Two four-wallet groups are not the same signal
+# when one is four wallets of good standing and the other four mediocre ones.
+#
+# Written as a discount on whatever floor the caller passed rather than as an
+# absolute base, so callers with their own min_value keep proportional
+# behaviour and min_value=0 stays 0. The discount only ever loosens: the floor
+# is capped at the caller's min_value, so quality can readmit a group that size
+# alone would have dropped but never removes one that size already earned.
+POSITION_GROUP_QUALITY_REFERENCE_WEIGHT = 2.5
+POSITION_GROUP_QUALITY_MAX_DISCOUNT = 0.5
+
+
+def position_group_display_floor(min_value: float, quality_weight: float) -> float:
+    """Notional floor for one position group, discounted by its summed quality.
+
+    Falls back to the undiscounted floor when the weight is unreadable - every
+    wallet stale past the hard TTL or reviewed out, which wallet_conviction_weight
+    reports as 0.0 - rather than dropping the group, so a group we cannot rate
+    shows on exactly the terms it shows on today.
+    """
+    if quality_weight <= 0:
+        return min_value
+    ratio = POSITION_GROUP_QUALITY_REFERENCE_WEIGHT / quality_weight
+    return min_value * max(POSITION_GROUP_QUALITY_MAX_DISCOUNT, min(ratio, 1.0))
 CLUSTERED_OPEN_ALERT_WINDOW_MS = OPEN_POSITION_ALERT_WINDOW_MS
 COUNTED_POSITION_MAX_UNREALIZED_LOSS = -1_000_000
 RECENT_ADD_POSITION_MIN_PCT = 0.20
@@ -5513,7 +5542,11 @@ class WalletTrackerService:
                         bucket["recentAddWalletAddresses"].add(address)
         rows = []
         for item in groups.values():
-            if item["walletCount"] < min_wallets or item["totalValue"] < min_value:
+            if item["walletCount"] < min_wallets:
+                continue
+            if item["totalValue"] < position_group_display_floor(
+                min_value, to_float(item["qualityWeight"])
+            ):
                 continue
             total_size = to_float(item["totalSize"])
             entry_count = int(to_float(item["entryCount"]))
@@ -7759,7 +7792,8 @@ class WalletTrackerService:
             sections = [
                 (
                     f"Crypto ({MIN_POSITION_MESSAGE_WALLETS}+ wallets, "
-                    f"{format_money_compact(MIN_POSITION_MESSAGE_VALUE)}+ combined)",
+                    f"{format_money_compact(MIN_POSITION_MESSAGE_VALUE * POSITION_GROUP_QUALITY_MAX_DISCOUNT)}"
+                    f"-{format_money_compact(MIN_POSITION_MESSAGE_VALUE)} by conviction)",
                     position_groups,
                 ),
                 ("Commodities", commodity_groups),
