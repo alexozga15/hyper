@@ -2523,17 +2523,10 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(snapshot["fills30d"], total_fills)
         self.assertAlmostEqual(snapshot["realizedPnl30d"], 100.0 * total_fills)
         # closedTrades30d counts decisions, not executions: these fills are one
-        # minute apart on one coin and side, so they collapse into 5-minute
-        # buckets. Full-window coverage is proved by the two assertions above,
-        # which still sum over every fill.
-        expected_events = len(
-            {
-                int(fill["time"]) // server.MONTHLY_QUALITY_EVENT_WINDOW_MS
-                for fill in fills
-            }
-        )
-        self.assertEqual(snapshot["closedTrades30d"], expected_events)
-        self.assertLess(expected_events, total_fills)
+        # minute apart on one coin with nothing added back in between, so they
+        # are one position being unwound - one decision. Full-window coverage is
+        # proved by the two assertions above, which still sum over every fill.
+        self.assertEqual(snapshot["closedTrades30d"], 1)
 
     def _snapshot_from_fills(self, fills: list[dict[str, Any]]) -> dict[str, Any]:
         wallet = TrackedWallet(address="0x" + "b" * 40, alias="collapse", notes="", created_at="")
@@ -2590,25 +2583,54 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(snapshot["recentWins"], 0)
         self.assertEqual(snapshot["recentLosses"], 1)
 
-    def test_separate_decisions_stay_separate(self) -> None:
-        # Collapsing must not swallow genuinely distinct trades: different
-        # buckets, different coins and different directions each stand alone.
+    def test_adding_back_starts_a_new_decision(self) -> None:
+        # The rule that ends a closing run: the wallet buys back in. Without it
+        # a whole month of trading one coin would read as a single decision.
+        now_ms = current_time_ms()
+        hour = 60 * 60 * 1000
+        fills = [
+            {"coin": "BTC", "dir": "Close Long", "px": "70000", "sz": "1",
+             "closedPnl": "100", "fee": "0", "time": now_ms - 4 * hour},
+            # An opening fill carries no closedPnl and ends the run above.
+            {"coin": "BTC", "dir": "Open Long", "px": "70000", "sz": "1",
+             "closedPnl": "0", "fee": "0", "time": now_ms - 3 * hour},
+            {"coin": "BTC", "dir": "Close Long", "px": "70000", "sz": "1",
+             "closedPnl": "-40", "fee": "0", "time": now_ms - 2 * hour},
+        ]
+        snapshot = self._snapshot_from_fills(fills)
+        self.assertEqual(snapshot["closedTrades30d"], 2)
+        self.assertEqual(snapshot["recentWins"], 1)
+        self.assertEqual(snapshot["recentLosses"], 1)
+
+    def test_separate_coins_never_merge(self) -> None:
+        # Runs are per coin, so two coins unwound at the same moment are two
+        # decisions however close together they fall.
         now_ms = current_time_ms()
         hour = 60 * 60 * 1000
         fills = [
             {"coin": "BTC", "dir": "Close Long", "px": "70000", "sz": "1",
              "closedPnl": "100", "fee": "0", "time": now_ms - hour},
-            {"coin": "BTC", "dir": "Close Long", "px": "70000", "sz": "1",
-             "closedPnl": "100", "fee": "0", "time": now_ms - 2 * hour},
-            {"coin": "BTC", "dir": "Close Short", "px": "70000", "sz": "1",
-             "closedPnl": "100", "fee": "0", "time": now_ms - hour},
             {"coin": "ETH", "dir": "Close Long", "px": "2000", "sz": "1",
              "closedPnl": "-50", "fee": "0", "time": now_ms - hour},
         ]
         snapshot = self._snapshot_from_fills(fills)
-        self.assertEqual(snapshot["closedTrades30d"], 4)
-        self.assertEqual(snapshot["recentWins"], 3)
+        self.assertEqual(snapshot["closedTrades30d"], 2)
+        self.assertEqual(snapshot["recentWins"], 1)
         self.assertEqual(snapshot["recentLosses"], 1)
+
+    def test_a_long_quiet_gap_also_ends_a_decision(self) -> None:
+        # Secondary guard for a position dribbled out with no adds in between.
+        now_ms = current_time_ms()
+        hour = 60 * 60 * 1000
+        gap_h = server.QUALITY_CLOSING_RUN_GAP_MS // hour
+        fills = [
+            {"coin": "BTC", "dir": "Close Long", "px": "70000", "sz": "1",
+             "closedPnl": "100", "fee": "0", "time": now_ms - (gap_h + 6) * hour},
+            {"coin": "BTC", "dir": "Close Long", "px": "70000", "sz": "1",
+             "closedPnl": "-40", "fee": "0", "time": now_ms - hour},
+        ]
+        snapshot = self._snapshot_from_fills(fills)
+        self.assertEqual(snapshot["closedTrades30d"], 2)
 
     def test_per_asset_quality_collapses_the_same_way(self) -> None:
         # assetQuality feeds the per-asset conviction multiplier, so it has to

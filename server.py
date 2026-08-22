@@ -482,7 +482,13 @@ EXCLUDED_COUNTED_POSITIONS = {
 }
 RANKING_MIN_7D_CLOSED_TRADES = 5
 RANKING_FULL_CONFIDENCE_7D_CLOSED_TRADES = 20
-RANKING_MIN_30D_CLOSED_TRADES = 20
+# Lowered from 20 when the 30d count stopped meaning "closing fills" and
+# started meaning "decisions". That unit is coarser by a median factor of 2.2
+# across the tracked set, so 20 converts to roughly 9; 10 is the round number
+# in the natural gap of the observed distribution, which jumps from 7 to 11.
+# Checked as a conversion rather than a loosening: the old threshold on the old
+# unit left 7 of 31 wallets unrankable, this one leaves 6.
+RANKING_MIN_30D_CLOSED_TRADES = 10
 RANKING_FULL_CONFIDENCE_30D_CLOSED_TRADES = 30
 CONVICTION_WEIGHT_30D_SHARE = 0.70
 CONVICTION_WEIGHT_7D_SHARE = 0.30
@@ -501,6 +507,13 @@ MONTHLY_QUALITY_MIN_PROFIT_FACTOR = 1.2
 MONTHLY_QUALITY_MAX_WIN_CONCENTRATION_PCT = 60.0
 MONTHLY_QUALITY_HOLDOUT_MS = 6 * 24 * 60 * 60 * 1000
 MONTHLY_QUALITY_EVENT_WINDOW_MS = 5 * 60 * 1000
+# A decision ends when the wallet adds back to the position. The gap is only a
+# secondary guard, for a position dribbled out over a long stretch with no
+# adds in between. Deliberately not tuned: measured against Hyperlaunch-style
+# position-level win rates for five wallets, every value from 1h to 72h landed
+# within 3 points of the same answer, so a more precise value would be fitting
+# noise rather than calibrating.
+QUALITY_CLOSING_RUN_GAP_MS = 12 * 60 * 60 * 1000
 BACKTEST_ELITE_WALLETS = {
     "0x8bae3527e5a33fa0cf184f37bc112d071463ab6d",
     "0xa20fb0c9e04063eec5be286e9269028d966646fa",
@@ -2116,9 +2129,9 @@ class WalletTrackerService:
         gross_loss_30d = 0.0
         fills_30d_count = 0
         last_fill_time = 0
-        asset_events: dict[str, dict[tuple[str, str, int], float]] = {}
         asset_pnl: dict[str, float] = {}
-        quality_events: dict[tuple[str, str, int], float] = {}
+        open_runs: dict[str, dict[str, Any]] = {}
+        closed_runs: list[dict[str, Any]] = []
         for fill in fills:
             closed_pnl = to_float(fill.get("closedPnl"))
             fee = abs(to_float(fill.get("fee")))
@@ -2126,24 +2139,35 @@ class WalletTrackerService:
             last_fill_time = max(last_fill_time, fill_time)
             if fill_time >= cutoff_30d_ms:
                 fills_30d_count += 1
-                if closed_pnl != 0:
-                    event_key = (
-                        normalize_position_coin(fill.get("coin")),
-                        str(fill.get("dir") or "").lower(),
-                        fill_time // MONTHLY_QUALITY_EVENT_WINDOW_MS,
-                    )
-                    quality_events[event_key] = quality_events.get(event_key, 0.0) + closed_pnl - fee
+                run_coin = normalize_position_coin(fill.get("coin"))
+                if closed_pnl == 0:
+                    # Adding to the position ends the decision that was being
+                    # unwound; whatever closes next is a new one.
+                    reopened = open_runs.pop(run_coin, None)
+                    if reopened is not None:
+                        closed_runs.append(reopened)
+                else:
+                    run = open_runs.get(run_coin)
+                    if run is not None and fill_time - int(run["endMs"]) > QUALITY_CLOSING_RUN_GAP_MS:
+                        closed_runs.append(open_runs.pop(run_coin))
+                        run = None
+                    if run is None:
+                        run = open_runs[run_coin] = {
+                            "coin": run_coin,
+                            "pnl": 0.0,
+                            "startMs": fill_time,
+                            "endMs": fill_time,
+                            "fills": 0,
+                        }
+                    run["pnl"] += closed_pnl - fee
+                    run["endMs"] = fill_time
+                    run["fills"] = int(run["fills"]) + 1
                     realized_pnl_30d += closed_pnl
                     if closed_pnl > 0:
                         gross_profit_30d += closed_pnl
                     elif closed_pnl < 0:
                         gross_loss_30d += abs(closed_pnl)
-                    asset_coin = normalize_position_coin(fill.get("coin"))
-                    asset_events.setdefault(asset_coin, {})
-                    asset_events[asset_coin][event_key] = (
-                        asset_events[asset_coin].get(event_key, 0.0) + closed_pnl - fee
-                    )
-                    asset_pnl[asset_coin] = asset_pnl.get(asset_coin, 0.0) + closed_pnl
+                    asset_pnl[run_coin] = asset_pnl.get(run_coin, 0.0) + closed_pnl
             is_7d_closed_fill = fill_time >= cutoff_7d_ms and closed_pnl != 0
             if is_7d_closed_fill:
                 recent_realized_pnl += closed_pnl
@@ -2234,48 +2258,59 @@ class WalletTrackerService:
             )
 
         # Hit rate has to count decisions, not executions. One position is
-        # routinely unwound in hundreds of fills - measured across the tracked
-        # set, 156,812 closing fills collapse to 869 actual round trips, and a
-        # single wallet averaged 845 fills per position with one exit spread
-        # over 2,024 - so counting raw fills made the denominator a measure of
-        # order fragmentation rather than of trading. collapse_twap_slice_fills
-        # already solves this for TWAP orders; an ordinary laddered exit needs
-        # the same treatment, and the 5-minute quality_events buckets built
-        # above are exactly that, so the counts are read off them.
+        # routinely unwound in hundreds of fills, so counting raw fills made the
+        # denominator a measure of order fragmentation rather than of trading.
+        # Fixed-width time buckets were the first attempt at collapsing them and
+        # were not enough: a swing position worked over days spans hundreds of
+        # buckets, and each partial close still counted separately. Checked
+        # against position-level win rates for five wallets, 5-minute buckets
+        # were out by as much as 39 points.
+        #
+        # A decision is therefore a closing run - the contiguous stretch of
+        # closes on one coin, ended when the wallet adds back to the position.
+        # Unlike requiring a return to flat it stays readable for a wallet that
+        # scales out without ever closing fully (one tracked wallet completed 5
+        # round trips in 30 days but 11 closing runs). Same five wallets, worst
+        # error 8 points against 39 for buckets and 36 for round trips; it is
+        # the bounded worst case that matters here, since it was a 39-point
+        # error that quarantined a wallet running +$396k over the same month.
         #
         # Sums are unaffected by fragmentation and stay per fill: splitting one
         # exit into 100 pieces does not change realized pnl, only the count.
-        def _event_wins_losses(window_start_ms: float | None) -> tuple[int, int]:
+        closed_runs.extend(open_runs.values())
+        open_runs.clear()
+
+        def _run_wins_losses(window_start_ms: float | None) -> tuple[int, int]:
             wins = losses = 0
-            for (_, _, time_bucket), event_pnl in quality_events.items():
-                if (
-                    window_start_ms is not None
-                    and time_bucket * MONTHLY_QUALITY_EVENT_WINDOW_MS < window_start_ms
-                ):
+            for run in closed_runs:
+                # Dated by its last close: that is when the decision resolved.
+                if window_start_ms is not None and int(run["endMs"]) < window_start_ms:
                     continue
-                if event_pnl > 0:
+                if run["pnl"] > 0:
                     wins += 1
-                elif event_pnl < 0:
+                elif run["pnl"] < 0:
                     losses += 1
             return wins, losses
 
-        # quality_events is already scoped to the 30d window, so it is counted
-        # whole rather than re-filtered: a bucket straddling the cutoff starts
-        # before it, and re-filtering would drop that event here while
-        # qualityClosedEvents30d below still counted it.
-        win_count_30d, loss_count_30d = _event_wins_losses(None)
-        win_count, loss_count = _event_wins_losses(cutoff_7d_ms)
-        # Per-asset quality is the same metric one level down, so it collapses
-        # the same way. pnl stays a raw sum for the reason given above.
-        asset_trade_stats = {
-            coin: {
-                "closedTrades": float(sum(1 for v in events.values() if v != 0)),
-                "wins": float(sum(1 for v in events.values() if v > 0)),
-                "losses": float(sum(1 for v in events.values() if v < 0)),
-                "pnl": asset_pnl.get(coin, 0.0),
-            }
-            for coin, events in asset_events.items()
-        }
+        # closed_runs is already scoped to the 30d window, so it is counted
+        # whole rather than re-filtered, keeping closedTrades30d equal to
+        # qualityClosedEvents30d below.
+        win_count_30d, loss_count_30d = _run_wins_losses(None)
+        win_count, loss_count = _run_wins_losses(cutoff_7d_ms)
+        # Per-asset quality is the same metric one level down. Runs are already
+        # per coin, so they group directly; pnl stays a raw sum as above.
+        asset_trade_stats: dict[str, dict[str, float]] = {}
+        for run in closed_runs:
+            bucket = asset_trade_stats.setdefault(
+                str(run["coin"]), {"closedTrades": 0.0, "wins": 0.0, "losses": 0.0, "pnl": 0.0}
+            )
+            bucket["closedTrades"] += 1
+            if run["pnl"] > 0:
+                bucket["wins"] += 1
+            elif run["pnl"] < 0:
+                bucket["losses"] += 1
+        for coin, bucket in asset_trade_stats.items():
+            bucket["pnl"] = asset_pnl.get(coin, 0.0)
 
         performance = self.build_performance(portfolio)
         all_time_realized = performance.get("allTime", {}).get("pnl", 0.0)
@@ -2283,7 +2318,7 @@ class WalletTrackerService:
         hit_rate = (win_count / max(recent_closed_trade_count, 1)) * 100
         closed_trade_count_30d = win_count_30d + loss_count_30d
         hit_rate_30d = (win_count_30d / max(closed_trade_count_30d, 1)) * 100
-        quality_event_pnls = list(quality_events.values())
+        quality_event_pnls = [run["pnl"] for run in closed_runs]
         quality_wins = [pnl for pnl in quality_event_pnls if pnl > 0]
         quality_losses = [abs(pnl) for pnl in quality_event_pnls if pnl < 0]
         quality_gross_profit = sum(quality_wins)
@@ -2297,9 +2332,7 @@ class WalletTrackerService:
             max(quality_wins) / quality_gross_profit * 100 if quality_gross_profit > 0 else 100.0
         )
         holdout_event_pnls = [
-            pnl
-            for (_, _, time_bucket), pnl in quality_events.items()
-            if time_bucket * MONTHLY_QUALITY_EVENT_WINDOW_MS >= cutoff_holdout_ms
+            run["pnl"] for run in closed_runs if int(run["endMs"]) >= cutoff_holdout_ms
         ]
 
         account_value = to_float(margin_summary.get("accountValue"))
