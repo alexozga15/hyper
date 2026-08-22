@@ -11,12 +11,15 @@ import server
 from coinmarketman import CoinMarketManApiError
 from server import (
     ALERTS_FILE,
+    CONVICTION_WIN_RATE_BASELINE,
+    CONVICTION_WIN_RATE_PRIOR_TRADES,
     DORMANT_WALLET_MAX_IDLE_MS,
     FRESH_ACTIVITY_DIAGNOSTIC_WINDOWS_MS,
     WALLET_SIGNAL_ACTIVITY_WINDOW_MS,
     ELITE_WALLET_OVERRIDES,
     HyperliquidClient,
     POSITION_INCREASE_ALERT_MIN_DELTA,
+    RANKING_MIN_90D_CLOSED_TRADES,
     RANKING_WINDOW_MS,
     RECENT_FILL_ALERT_LIMIT,
     SHADOW_SIGNAL_OUTCOME_MAX_RECORDS,
@@ -73,6 +76,71 @@ class SegmentTests(unittest.TestCase):
         untrusted = build_wallet_quality_rank(70, 20, 20_000, 100_000, window_trusted=False)
         self.assertFalse(untrusted["windowTrusted"])
         self.assertEqual(untrusted["score"], default["score"])
+
+    def test_conviction_win_rate_weight_maps_baseline_and_extremes(self) -> None:
+        # A wallet sitting exactly at the measured baseline win rate should be
+        # weighted like an average wallet: ~1.0. Far above or below the
+        # baseline moves the weight toward the 1.5/0.5 caps without touching
+        # them here - large samples so shrinkage is nearly a no-op.
+        baseline = build_wallet_quality_rank(
+            70, 20, 20_000, 100_000,
+            hit_rate_90d=CONVICTION_WIN_RATE_BASELINE * 100,
+            closed_trade_count_90d=1000,
+        )
+        self.assertAlmostEqual(baseline["convictionWinRateWeight"], 1.0, places=2)
+
+        hot = build_wallet_quality_rank(
+            70, 20, 20_000, 100_000, hit_rate_90d=96, closed_trade_count_90d=1000
+        )
+        self.assertAlmostEqual(hot["convictionWinRateWeight"], 1.477, places=2)
+
+        cold = build_wallet_quality_rank(
+            70, 20, 20_000, 100_000, hit_rate_90d=35, closed_trade_count_90d=1000
+        )
+        self.assertAlmostEqual(cold["convictionWinRateWeight"], 0.551, places=2)
+
+    def test_conviction_win_rate_weight_shrinks_small_samples_toward_baseline(self) -> None:
+        # Same raw 90d win rate, two sample sizes: the thinner sample must land
+        # closer to the neutral 1.0 weight than the thicker one, because there
+        # is less evidence to trust it over the baseline.
+        thin = build_wallet_quality_rank(
+            70, 20, 20_000, 100_000, hit_rate_90d=90, closed_trade_count_90d=10
+        )
+        thick = build_wallet_quality_rank(
+            70, 20, 20_000, 100_000, hit_rate_90d=90, closed_trade_count_90d=400
+        )
+        thin_weight = thin["convictionWinRateWeight"]
+        thick_weight = thick["convictionWinRateWeight"]
+        self.assertLess(abs(thin_weight - 1.0), abs(thick_weight - 1.0))
+
+    def test_conviction_win_rate_weight_clamps_at_both_ends(self) -> None:
+        maxed = build_wallet_quality_rank(
+            70, 20, 20_000, 100_000, hit_rate_90d=100, closed_trade_count_90d=1000
+        )
+        floored = build_wallet_quality_rank(
+            70, 20, 20_000, 100_000, hit_rate_90d=0, closed_trade_count_90d=1000
+        )
+        self.assertEqual(maxed["convictionWinRateWeight"], 1.5)
+        self.assertEqual(floored["convictionWinRateWeight"], 0.5)
+
+    def test_conviction_win_rate_weight_omitted_below_min_90d_sample(self) -> None:
+        # Below RANKING_MIN_90D_CLOSED_TRADES the 90d sample is too thin to
+        # trust at all, so the key must be absent rather than present with a
+        # noisy value - wallet_conviction_weight relies on the absence to fall
+        # back to the score-derived weight.
+        thin = build_wallet_quality_rank(
+            70, 20, 20_000, 100_000,
+            hit_rate_90d=90,
+            closed_trade_count_90d=RANKING_MIN_90D_CLOSED_TRADES - 1,
+        )
+        self.assertNotIn("convictionWinRateWeight", thin)
+
+        enough = build_wallet_quality_rank(
+            70, 20, 20_000, 100_000,
+            hit_rate_90d=90,
+            closed_trade_count_90d=RANKING_MIN_90D_CLOSED_TRADES,
+        )
+        self.assertIn("convictionWinRateWeight", enough)
 
     def test_wallet_quality_rank_blends_30d_base_with_capped_7d_weight(self) -> None:
         cold_week = build_wallet_quality_rank(
@@ -2316,6 +2384,24 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(self.service.wallet_conviction_weight(review, set()), 0.5)
         self.assertEqual(self.service.wallet_conviction_weight(ordinary, {ordinary["address"]}), 1.5)
 
+    def test_conviction_weight_without_win_rate_key_falls_back_to_score(self) -> None:
+        # The deploy-transition case: a rank cached by the previous version -
+        # or one whose 90d sample was too thin to earn the key at all - has no
+        # convictionWinRateWeight. wallet_conviction_weight must keep computing
+        # the old score-derived weight for it, not collapse to neutral.
+        rank = {"score": 45.5, "label": "Weak"}
+        wallet = {"address": "0x1111111111111111111111111111111111111111", "recentWinRateRank": rank}
+        self.assertNotIn("convictionWinRateWeight", rank)
+        self.assertEqual(self.service.wallet_conviction_weight(wallet, set()), 0.7)
+
+    def test_conviction_weight_prefers_win_rate_key_when_present(self) -> None:
+        # Once a rank carries convictionWinRateWeight, that value drives the
+        # base weight directly instead of convictionWeightScore/score - even
+        # though the score alone would map to a very different number.
+        rank = {"score": 45.5, "label": "Weak", "convictionWinRateWeight": 1.3}
+        wallet = {"address": "0x1111111111111111111111111111111111111111", "recentWinRateRank": rank}
+        self.assertEqual(self.service.wallet_conviction_weight(wallet, set()), 1.3)
+
     def test_tracked_wallet_list_excludes_backtest_removals(self) -> None:
         removed = {
             "0xb3e475368ed0fa0ad23c04de0423d48a0758806f",
@@ -2564,6 +2650,23 @@ class AlertSummaryTests(unittest.TestCase):
         # The sums are untouched - splitting an exit does not change its pnl.
         self.assertEqual(snapshot["fills30d"], 40)
         self.assertAlmostEqual(snapshot["realizedPnl30d"], 4000.0)
+
+    def test_90d_win_rate_collapses_a_laddered_exit_into_one_decision(self) -> None:
+        # Same closing-run rule as the 30d fields above, just applied to the
+        # wider 90d window: 40 slices of one exit, seconds apart, 45 days back
+        # - well outside the 30d window, where only the 90d fields see them at
+        # all - are one decision, not 40.
+        now_ms = current_time_ms()
+        day = 24 * 60 * 60 * 1000
+        fills = [
+            {"coin": "BTC", "dir": "Close Long", "px": "70000", "sz": "1",
+             "closedPnl": "100", "fee": "1", "time": now_ms - 45 * day - index * 1_000}
+            for index in range(40)
+        ]
+        snapshot = self._snapshot_from_fills(fills)
+        self.assertEqual(snapshot["closedTrades30d"], 0)
+        self.assertEqual(snapshot["closedTrades90d"], 1)
+        self.assertEqual(snapshot["winRate90d"], 100.0)
 
     def test_collapsed_event_is_won_or_lost_on_its_net(self) -> None:
         # A bucket that nets negative is one loss, even though most of its
