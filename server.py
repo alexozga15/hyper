@@ -1874,8 +1874,8 @@ class WalletTrackerService:
         address: str,
         start_time: int,
         *,
-        max_pages: int = FILL_HISTORY_MAX_PAGES,
-        page_size: int = WALLET_WINDOW_FILL_CAP,
+        max_pages: int | None = None,
+        page_size: int | None = None,
     ) -> dict[str, Any]:
         """Every fill since start_time, walking past the 2000-row page cap.
 
@@ -1894,20 +1894,22 @@ class WalletTrackerService:
         here forever - a truncated result says so rather than pretending to be
         complete.
         """
+        # Resolved per call, not bound as argument defaults at import: both are
+        # environment-configurable and patched by tests, and a def-time default
+        # would freeze the release-time value - the same way the position
+        # thresholds went wrong before.
+        if max_pages is None:
+            max_pages = FILL_HISTORY_MAX_PAGES
+        if page_size is None:
+            page_size = WALLET_WINDOW_FILL_CAP
         collected: list[dict[str, Any]] = []
         seen: set[tuple[Any, ...]] = set()
         cursor = int(start_time)
         pages = 0
         while pages < max_pages:
-            result = self.client.safe_post_result(
-                {
-                    "type": "userFillsByTime",
-                    "user": address,
-                    "startTime": cursor,
-                    "aggregateByTime": True,
-                },
-                [],
-            )
+            # Delegates rather than issuing its own request, so there is one
+            # place that knows how a windowed page is asked for.
+            result = self.fetch_fills_result(address, cursor)
             if not result.get("ok"):
                 return {
                     "ok": False,
@@ -2007,7 +2009,22 @@ class WalletTrackerService:
                 ),
             }
             if not skip_fills:
-                futures["fills"] = executor.submit(self.fetch_fills_result, wallet.address, fills_start_ms)
+                if full_quality_refresh:
+                    # The 30-day aggregates are only worth their name if the
+                    # window they cover is actually 30 days. One userFillsByTime
+                    # page caps at WALLET_WINDOW_FILL_CAP rows ascending from
+                    # startTime, which for an active wallet is hours, not weeks
+                    # (see qualityWindowTruncated below for a measured case at
+                    # 0.3% of the window). Paging is confined to the refresh
+                    # branch: the live branch asks for a short lookback that
+                    # never fills one page.
+                    futures["fills"] = executor.submit(
+                        self.fetch_fills_paginated_result, wallet.address, fills_start_ms
+                    )
+                else:
+                    futures["fills"] = executor.submit(
+                        self.fetch_fills_result, wallet.address, fills_start_ms
+                    )
                 if not skip_live_fills:
                     futures["recentFills"] = executor.submit(self.fetch_recent_fills_result, wallet.address)
             if full_quality_refresh:
@@ -2198,10 +2215,19 @@ class WalletTrackerService:
         # two raw page lengths independently instead - either one capping out
         # means the 30-day window may be missing data, and collapsing must not
         # be allowed to hide that.
+        # With paging, a full page no longer means a short window - it means
+        # there was more to fetch and we went and fetched it. Only the pager
+        # saying it gave up (page budget spent, or a page that could not be
+        # advanced past) still means the 30-day numbers may describe less than
+        # 30 days. Reading length here instead would mark every active wallet
+        # untrusted forever, which is the opposite of the point.
+        fills_paged_truncated = bool(
+            isinstance(fills_result, dict) and fills_result.get("truncated")
+        )
         quality_window_truncated = bool(
             full_quality_refresh
             and (
-                (fills_ok and len(base_fills) >= WALLET_WINDOW_FILL_CAP)
+                (fills_ok and fills_paged_truncated)
                 or (twap_fills_ok and len(twap_slices) >= WALLET_WINDOW_FILL_CAP)
             )
         )

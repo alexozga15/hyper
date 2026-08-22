@@ -2684,6 +2684,80 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(snapshot["closedTrades30d"], snapshot["qualityClosedEvents30d"])
         self.assertEqual(snapshot["closedTrades30d"], 2)
 
+    def _paged_snapshot(self, pages: list[list[dict[str, Any]]], *, cap: int) -> dict[str, Any]:
+        wallet = TrackedWallet(address="0x" + "c" * 40, alias="paged", notes="", created_at="")
+        state = {
+            "marginSummary": {"accountValue": "1000000", "totalNtlPos": "0", "totalMarginUsed": "0"},
+            "withdrawable": "1000000",
+            "assetPositions": [],
+        }
+        calls: list[int] = []
+
+        def fake_page(_address: str, start_time: int) -> dict[str, Any]:
+            calls.append(int(start_time))
+            page = pages[min(len(calls) - 1, len(pages) - 1)]
+            return {"ok": True, "data": page, "error": ""}
+
+        ok = lambda d: {"ok": True, "data": d, "error": ""}
+        with patch.object(server, "WALLET_WINDOW_FILL_CAP", cap), patch.object(
+            self.service.client, "safe_subscribe_all_dexs_clearinghouse_state", return_value=state
+        ), patch.object(
+            self.service, "fetch_fills_result", side_effect=fake_page
+        ), patch.object(
+            self.service, "fetch_recent_fills_result", return_value=ok([])
+        ), patch.object(
+            self.service, "fetch_open_orders_result", return_value=ok([])
+        ), patch.object(
+            self.service, "fetch_portfolio_result", return_value=ok({})
+        ), patch.object(
+            self.service, "fetch_twap_slice_fills_result", return_value=ok([])
+        ), patch.object(self.service, "fetch_wallet_role", return_value="user"):
+            snapshot = self.service.fetch_wallet_snapshot(wallet)
+        snapshot["_calls"] = calls
+        return snapshot
+
+    @staticmethod
+    def _fill_at(ms: int, pnl: str = "100") -> dict[str, Any]:
+        return {"coin": "BTC", "dir": "Close Long", "px": "70000", "sz": "1",
+                "closedPnl": pnl, "fee": "0", "time": ms}
+
+    def test_quality_refresh_pages_past_the_row_cap(self) -> None:
+        # One page of userFillsByTime covers hours of an active wallet, not the
+        # 30 days the aggregates claim. The refresh must walk the pages.
+        now_ms = current_time_ms()
+        day = 24 * 60 * 60 * 1000
+        first = [self._fill_at(now_ms - 20 * day + i * 1000) for i in range(3)]
+        second = [self._fill_at(now_ms - 10 * day + i * 1000) for i in range(2)]
+        snapshot = self._paged_snapshot([first, second, []], cap=3)
+        self.assertGreater(len(snapshot["_calls"]), 1)
+        # Every page reached the aggregates, not just the oldest slice.
+        self.assertEqual(snapshot["fills30d"], 5)
+        # A full page is no longer evidence of a short window.
+        self.assertFalse(snapshot["qualityWindowTruncated"])
+
+    def test_a_short_page_stops_the_paging(self) -> None:
+        now_ms = current_time_ms()
+        only = [self._fill_at(now_ms - 60_000 - i * 1000) for i in range(2)]
+        snapshot = self._paged_snapshot([only], cap=3)
+        self.assertEqual(len(snapshot["_calls"]), 1)
+        self.assertEqual(snapshot["fills30d"], 2)
+        self.assertFalse(snapshot["qualityWindowTruncated"])
+
+    def test_window_is_still_flagged_when_paging_gives_up(self) -> None:
+        # The flag keeps its meaning - "these 30-day numbers may describe less
+        # than 30 days" - it just now fires on a spent page budget rather than
+        # on a page merely being full.
+        now_ms = current_time_ms()
+        day = 24 * 60 * 60 * 1000
+        pages = [
+            [self._fill_at(now_ms - (25 - n) * day + i * 1000) for i in range(3)]
+            for n in range(6)
+        ]
+        with patch.object(server, "FILL_HISTORY_MAX_PAGES", 2):
+            snapshot = self._paged_snapshot(pages, cap=3)
+        self.assertEqual(len(snapshot["_calls"]), 2)
+        self.assertTrue(snapshot["qualityWindowTruncated"])
+
     def _snapshot_with_fill_pages(
         self,
         windowed: dict[str, Any],
