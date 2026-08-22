@@ -4396,7 +4396,7 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_positions_message(dashboard)
         self.assertIn("Open pos now", message)
-        self.assertIn("Crypto (3+ wallets, $1.0M+ combined)", message)
+        self.assertIn("Crypto (3+ wallets, $500K-$1.0M by conviction)", message)
         self.assertIn("BTC LONG: 3 wallets | $1.4M open | entry(w) $78,000", message)
         self.assertNotIn("ETH short", message)
         self.assertIn("Summary: 1 groups, 3 pos", message)
@@ -6697,10 +6697,10 @@ class LargePositionAlertFloorTests(unittest.TestCase):
 
     def test_position_group_display_floor_default(self) -> None:
         # The digest's "Open pos now" floor, separate from the single-wallet
-        # alert floor above. Raised $1M -> $2M: measured against the live
-        # dashboard on 2026-08-22 it takes Crypto from 21 groups to 11 and
-        # Stocks from 12 to 10, dropping clusters like NEAR short (5 wallets,
-        # $1.70M) that were padding the digest without changing a decision.
+        # alert floor above, and the ceiling the conviction discount works down
+        # from. Raised $1M -> $2M to cut clusters that padded the digest without
+        # changing a decision; the discount below then readmits the ones whose
+        # agreement is worth the space.
         import server as server_module
 
         self.assertEqual(server_module.POSITION_GROUP_DISPLAY_MIN_VALUE, 2_000_000)
@@ -6727,6 +6727,59 @@ class LargePositionAlertFloorTests(unittest.TestCase):
             self.assertEqual(len(service.build_position_groups(dashboard)), 1)
         with patch.object(server_module, "MIN_POSITION_MESSAGE_VALUE", 2_000_000):
             self.assertEqual(service.build_position_groups(dashboard), [])
+
+    def test_position_group_display_floor_discounts_by_conviction(self) -> None:
+        # The point of the discount: same combined notional, different amount of
+        # agreement behind it. Wallets with no quality record weigh 1.0 each, so
+        # the summed weight here is just the wallet count.
+        import server as server_module
+
+        service = WalletTrackerService(WalletStore(Path(ALERTS_FILE)), HyperliquidClient())
+
+        def dashboard(wallet_count: int) -> dict[str, Any]:
+            per_wallet = 1_200_000.0 / wallet_count
+            return {
+                "generatedAt": "2026-04-09T06:00:00Z",
+                "wallets": [
+                    {
+                        "alias": f"w{i}",
+                        "address": f"0x{i}" + "0" * 39,
+                        "positions": [{"coin": "BTC", "side": "Long", "positionValue": per_wallet}],
+                    }
+                    for i in range(1, wallet_count + 1)
+                ],
+            }
+
+        with patch.object(server_module, "MIN_POSITION_MESSAGE_VALUE", 2_000_000):
+            # Three wallets at $1.2M: floor 2.5/3 x $2M = $1.67M, so it stays out.
+            self.assertEqual(service.build_position_groups(dashboard(3)), [])
+            # Five wallets at the same $1.2M: the discount bottoms out at half
+            # the base floor, $1.0M, and the cluster is shown.
+            groups = service.build_position_groups(dashboard(5))
+            self.assertEqual(len(groups), 1)
+            self.assertEqual(groups[0]["walletCount"], 5)
+
+    def test_position_group_display_floor_only_ever_loosens(self) -> None:
+        # A group whose quality reads low must not be removed - the discount is
+        # capped at the caller's floor, so this change can only add groups.
+        import server as server_module
+
+        floor = server_module.position_group_display_floor
+        base = 2_000_000.0
+        self.assertEqual(floor(base, 1.0), base)
+        self.assertEqual(floor(base, server_module.POSITION_GROUP_QUALITY_REFERENCE_WEIGHT), base)
+        self.assertAlmostEqual(floor(base, 3.0), base * 2.5 / 3.0)
+        self.assertEqual(floor(base, 100.0), base * server_module.POSITION_GROUP_QUALITY_MAX_DISCOUNT)
+
+    def test_position_group_display_floor_falls_back_when_quality_is_unreadable(self) -> None:
+        # wallet_conviction_weight returns exactly 0.0 for a wallet reviewed out
+        # or stale past the hard TTL. A group of only those must show on today's
+        # terms rather than vanish from the digest.
+        import server as server_module
+
+        self.assertEqual(server_module.position_group_display_floor(2_000_000.0, 0.0), 2_000_000.0)
+        # And a caller that passes no floor at all still gets no floor.
+        self.assertEqual(server_module.position_group_display_floor(0.0, 4.0), 0.0)
 
     def test_snapshot_threshold_follows_the_patched_constant(self) -> None:
         # A default argument would have frozen the import-time value; this is
