@@ -2521,8 +2521,146 @@ class AlertSummaryTests(unittest.TestCase):
         )
         # Aggregates must still see every fill, not just the retained newest slice.
         self.assertEqual(snapshot["fills30d"], total_fills)
-        self.assertEqual(snapshot["closedTrades30d"], total_fills)
         self.assertAlmostEqual(snapshot["realizedPnl30d"], 100.0 * total_fills)
+        # closedTrades30d counts decisions, not executions: these fills are one
+        # minute apart on one coin and side, so they collapse into 5-minute
+        # buckets. Full-window coverage is proved by the two assertions above,
+        # which still sum over every fill.
+        expected_events = len(
+            {
+                int(fill["time"]) // server.MONTHLY_QUALITY_EVENT_WINDOW_MS
+                for fill in fills
+            }
+        )
+        self.assertEqual(snapshot["closedTrades30d"], expected_events)
+        self.assertLess(expected_events, total_fills)
+
+    def _snapshot_from_fills(self, fills: list[dict[str, Any]]) -> dict[str, Any]:
+        wallet = TrackedWallet(address="0x" + "b" * 40, alias="collapse", notes="", created_at="")
+        state = {
+            "marginSummary": {"accountValue": "1000000", "totalNtlPos": "0", "totalMarginUsed": "0"},
+            "withdrawable": "1000000",
+            "assetPositions": [],
+        }
+        with patch.object(
+            self.service.client, "safe_subscribe_all_dexs_clearinghouse_state", return_value=state
+        ), patch.object(
+            self.service, "fetch_fills_result", return_value={"ok": True, "data": fills, "error": ""}
+        ), patch.object(
+            self.service, "fetch_recent_fills_result", return_value={"ok": True, "data": [], "error": ""}
+        ), patch.object(
+            self.service, "fetch_open_orders_result", return_value={"ok": True, "data": [], "error": ""}
+        ), patch.object(
+            self.service, "fetch_portfolio_result", return_value={"ok": True, "data": {}, "error": ""}
+        ), patch.object(self.service, "fetch_wallet_role", return_value="user"):
+            return self.service.fetch_wallet_snapshot(wallet)
+
+    def test_laddered_exit_counts_as_one_closed_trade(self) -> None:
+        # 40 slices of one exit, seconds apart, are one decision. Counting them
+        # individually is what made a profitable wallet read as a 6.6% hit rate.
+        now_ms = current_time_ms()
+        fills = [
+            {"coin": "BTC", "dir": "Close Long", "px": "70000", "sz": "1",
+             "closedPnl": "100", "fee": "1", "time": now_ms - 60_000 - index * 1_000}
+            for index in range(40)
+        ]
+        snapshot = self._snapshot_from_fills(fills)
+        self.assertEqual(snapshot["closedTrades30d"], 1)
+        self.assertEqual(snapshot["recentClosedTrades"], 1)
+        self.assertEqual(snapshot["recentWins"], 1)
+        # The sums are untouched - splitting an exit does not change its pnl.
+        self.assertEqual(snapshot["fills30d"], 40)
+        self.assertAlmostEqual(snapshot["realizedPnl30d"], 4000.0)
+
+    def test_collapsed_event_is_won_or_lost_on_its_net(self) -> None:
+        # A bucket that nets negative is one loss, even though most of its
+        # slices printed green - the decision lost money.
+        now_ms = current_time_ms()
+        fills = [
+            {"coin": "ETH", "dir": "Close Short", "px": "2000", "sz": "1",
+             "closedPnl": "10", "fee": "0", "time": now_ms - 60_000 - index * 1_000}
+            for index in range(5)
+        ]
+        fills.append(
+            {"coin": "ETH", "dir": "Close Short", "px": "2000", "sz": "1",
+             "closedPnl": "-500", "fee": "0", "time": now_ms - 60_000 - 5_000}
+        )
+        snapshot = self._snapshot_from_fills(fills)
+        self.assertEqual(snapshot["closedTrades30d"], 1)
+        self.assertEqual(snapshot["recentWins"], 0)
+        self.assertEqual(snapshot["recentLosses"], 1)
+
+    def test_separate_decisions_stay_separate(self) -> None:
+        # Collapsing must not swallow genuinely distinct trades: different
+        # buckets, different coins and different directions each stand alone.
+        now_ms = current_time_ms()
+        hour = 60 * 60 * 1000
+        fills = [
+            {"coin": "BTC", "dir": "Close Long", "px": "70000", "sz": "1",
+             "closedPnl": "100", "fee": "0", "time": now_ms - hour},
+            {"coin": "BTC", "dir": "Close Long", "px": "70000", "sz": "1",
+             "closedPnl": "100", "fee": "0", "time": now_ms - 2 * hour},
+            {"coin": "BTC", "dir": "Close Short", "px": "70000", "sz": "1",
+             "closedPnl": "100", "fee": "0", "time": now_ms - hour},
+            {"coin": "ETH", "dir": "Close Long", "px": "2000", "sz": "1",
+             "closedPnl": "-50", "fee": "0", "time": now_ms - hour},
+        ]
+        snapshot = self._snapshot_from_fills(fills)
+        self.assertEqual(snapshot["closedTrades30d"], 4)
+        self.assertEqual(snapshot["recentWins"], 3)
+        self.assertEqual(snapshot["recentLosses"], 1)
+
+    def test_per_asset_quality_collapses_the_same_way(self) -> None:
+        # assetQuality feeds the per-asset conviction multiplier, so it has to
+        # count decisions too or ASSET_QUALITY_MIN_CLOSED_TRADES is met by
+        # execution slices alone.
+        now_ms = current_time_ms()
+        fills = [
+            {"coin": "SOL", "dir": "Close Long", "px": "100", "sz": "1",
+             "closedPnl": "10", "fee": "0", "time": now_ms - 60_000 - index * 1_000}
+            for index in range(30)
+        ]
+        snapshot = self._snapshot_from_fills(fills)
+        asset = snapshot["assetQuality"]["SOL"]
+        self.assertEqual(asset["closedTrades"], 1)
+        self.assertEqual(asset["winRate"], 100.0)
+        self.assertAlmostEqual(asset["pnl"], 300.0)
+
+    def test_seven_day_counts_collapse_independently_of_thirty_day(self) -> None:
+        # The 7d counters read the same buckets through a narrower window; a
+        # laddered exit outside 7d must not leak into the recent counts.
+        now_ms = current_time_ms()
+        day = 24 * 60 * 60 * 1000
+        fills = [
+            {"coin": "BTC", "dir": "Close Long", "px": "70000", "sz": "1",
+             "closedPnl": "100", "fee": "0", "time": now_ms - 2 * day - index * 1_000}
+            for index in range(20)
+        ] + [
+            {"coin": "BTC", "dir": "Close Long", "px": "70000", "sz": "1",
+             "closedPnl": "100", "fee": "0", "time": now_ms - 20 * day - index * 1_000}
+            for index in range(20)
+        ]
+        snapshot = self._snapshot_from_fills(fills)
+        self.assertEqual(snapshot["closedTrades30d"], 2)
+        self.assertEqual(snapshot["recentClosedTrades"], 1)
+
+    def test_closed_trades_match_the_quality_event_count(self) -> None:
+        # Both numbers count the same 5-minute buckets, so they must agree even
+        # when a bucket straddles the 30d cutoff. Filtering the win/loss counts
+        # by bucket start while qualityClosedEvents30d counted the whole dict
+        # would silently split them apart.
+        now_ms = current_time_ms()
+        day = 24 * 60 * 60 * 1000
+        edge = now_ms - 30 * day + 1_000  # inside the window, bucket starts before it
+        fills = [
+            {"coin": "BTC", "dir": "Close Long", "px": "70000", "sz": "1",
+             "closedPnl": "100", "fee": "0", "time": edge},
+            {"coin": "ETH", "dir": "Close Long", "px": "2000", "sz": "1",
+             "closedPnl": "-25", "fee": "0", "time": now_ms - day},
+        ]
+        snapshot = self._snapshot_from_fills(fills)
+        self.assertEqual(snapshot["closedTrades30d"], snapshot["qualityClosedEvents30d"])
+        self.assertEqual(snapshot["closedTrades30d"], 2)
 
     def _snapshot_with_fill_pages(
         self,

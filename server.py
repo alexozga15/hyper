@@ -2114,13 +2114,10 @@ class WalletTrackerService:
         realized_pnl_30d = 0.0
         gross_profit_30d = 0.0
         gross_loss_30d = 0.0
-        win_count = 0
-        loss_count = 0
-        win_count_30d = 0
-        loss_count_30d = 0
         fills_30d_count = 0
         last_fill_time = 0
-        asset_trade_stats: dict[str, dict[str, float]] = {}
+        asset_events: dict[str, dict[tuple[str, str, int], float]] = {}
+        asset_pnl: dict[str, float] = {}
         quality_events: dict[tuple[str, str, int], float] = {}
         for fill in fills:
             closed_pnl = to_float(fill.get("closedPnl"))
@@ -2139,28 +2136,17 @@ class WalletTrackerService:
                     realized_pnl_30d += closed_pnl
                     if closed_pnl > 0:
                         gross_profit_30d += closed_pnl
-                        win_count_30d += 1
                     elif closed_pnl < 0:
                         gross_loss_30d += abs(closed_pnl)
-                        loss_count_30d += 1
                     asset_coin = normalize_position_coin(fill.get("coin"))
-                    asset_bucket = asset_trade_stats.setdefault(
-                        asset_coin,
-                        {"closedTrades": 0.0, "wins": 0.0, "losses": 0.0, "pnl": 0.0},
+                    asset_events.setdefault(asset_coin, {})
+                    asset_events[asset_coin][event_key] = (
+                        asset_events[asset_coin].get(event_key, 0.0) + closed_pnl - fee
                     )
-                    asset_bucket["closedTrades"] += 1
-                    asset_bucket["pnl"] += closed_pnl
-                    if closed_pnl > 0:
-                        asset_bucket["wins"] += 1
-                    else:
-                        asset_bucket["losses"] += 1
+                    asset_pnl[asset_coin] = asset_pnl.get(asset_coin, 0.0) + closed_pnl
             is_7d_closed_fill = fill_time >= cutoff_7d_ms and closed_pnl != 0
             if is_7d_closed_fill:
                 recent_realized_pnl += closed_pnl
-                if closed_pnl > 0:
-                    win_count += 1
-                elif closed_pnl < 0:
-                    loss_count += 1
 
             windowed_identities.add(raw_fill_identity(fill))
             recent_fill_entries.append(
@@ -2246,6 +2232,50 @@ class WalletTrackerService:
                     "timestamp": order.get("timestamp"),
                 }
             )
+
+        # Hit rate has to count decisions, not executions. One position is
+        # routinely unwound in hundreds of fills - measured across the tracked
+        # set, 156,812 closing fills collapse to 869 actual round trips, and a
+        # single wallet averaged 845 fills per position with one exit spread
+        # over 2,024 - so counting raw fills made the denominator a measure of
+        # order fragmentation rather than of trading. collapse_twap_slice_fills
+        # already solves this for TWAP orders; an ordinary laddered exit needs
+        # the same treatment, and the 5-minute quality_events buckets built
+        # above are exactly that, so the counts are read off them.
+        #
+        # Sums are unaffected by fragmentation and stay per fill: splitting one
+        # exit into 100 pieces does not change realized pnl, only the count.
+        def _event_wins_losses(window_start_ms: float | None) -> tuple[int, int]:
+            wins = losses = 0
+            for (_, _, time_bucket), event_pnl in quality_events.items():
+                if (
+                    window_start_ms is not None
+                    and time_bucket * MONTHLY_QUALITY_EVENT_WINDOW_MS < window_start_ms
+                ):
+                    continue
+                if event_pnl > 0:
+                    wins += 1
+                elif event_pnl < 0:
+                    losses += 1
+            return wins, losses
+
+        # quality_events is already scoped to the 30d window, so it is counted
+        # whole rather than re-filtered: a bucket straddling the cutoff starts
+        # before it, and re-filtering would drop that event here while
+        # qualityClosedEvents30d below still counted it.
+        win_count_30d, loss_count_30d = _event_wins_losses(None)
+        win_count, loss_count = _event_wins_losses(cutoff_7d_ms)
+        # Per-asset quality is the same metric one level down, so it collapses
+        # the same way. pnl stays a raw sum for the reason given above.
+        asset_trade_stats = {
+            coin: {
+                "closedTrades": float(sum(1 for v in events.values() if v != 0)),
+                "wins": float(sum(1 for v in events.values() if v > 0)),
+                "losses": float(sum(1 for v in events.values() if v < 0)),
+                "pnl": asset_pnl.get(coin, 0.0),
+            }
+            for coin, events in asset_events.items()
+        }
 
         performance = self.build_performance(portfolio)
         all_time_realized = performance.get("allTime", {}).get("pnl", 0.0)
