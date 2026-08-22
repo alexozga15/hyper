@@ -560,6 +560,11 @@ def env_flag(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+# Single-wallet position events render in messages but do not send one on
+# their own; see the note at the should_notify call site.
+SINGLE_WALLET_EVENTS_NOTIFY = env_flag("SINGLE_WALLET_EVENTS_NOTIFY", False)
+
+
 def env_int(name: str, default: int) -> int:
     raw = os.environ.get(name)
     if raw is None:
@@ -8152,20 +8157,39 @@ class WalletTrackerService:
         )
         alert_event_keys = self.collect_alert_event_keys(changes)
 
-        should_notify = any(
-            [
-                changes["addedSignals"],
-                changes["changedSignals"],
-                changes["removedSignals"],
-                changes["addedCandidateSignals"],
-                changes["addedCmmSignals"],
-                changes["changedCmmSignals"],
-                changes["clusteredOpenPositions"],
-                changes["newLargePositions"],
-                changes["increasedLargePositions"],
-                changes["closedLargePositions"],
-            ]
-        )
+        # Single-wallet position events no longer ring the bell on their own.
+        # They are the bulk of the alert stream and nothing measured supports
+        # acting on them: over 1135 shadow records with realised outcomes the
+        # mean return is negative at every horizon (1h -0.16%, 24h -1.26%) and
+        # the score that ranked them runs backwards. Coordination is the one
+        # concept with a real claim to attention, and a 30-day backtest over
+        # 39 wallets and 24742 opening fills found it fires about three times
+        # a month - so it cannot be what floods the channel either.
+        # They still render inside a message sent for a stronger reason in the
+        # SAME cycle. Across cycles they are dropped, not deferred: when
+        # nothing notifies, the largePositions baseline below still advances,
+        # so the next sent message diffs against the newer snapshot and the
+        # suppressed event is gone. What survives is the state itself - the
+        # positions table in the routine digest shows what is open now. Set
+        # SINGLE_WALLET_EVENTS_NOTIFY=1 to restore the old behaviour.
+        notify_triggers = [
+            changes["addedSignals"],
+            changes["changedSignals"],
+            changes["removedSignals"],
+            changes["addedCandidateSignals"],
+            changes["addedCmmSignals"],
+            changes["changedCmmSignals"],
+            changes["clusteredOpenPositions"],
+        ]
+        if SINGLE_WALLET_EVENTS_NOTIFY:
+            notify_triggers.extend(
+                [
+                    changes["newLargePositions"],
+                    changes["increasedLargePositions"],
+                    changes["closedLargePositions"],
+                ]
+            )
+        should_notify = any(notify_triggers)
 
         sent = False
         error_message = ""
