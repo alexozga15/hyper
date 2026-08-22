@@ -457,6 +457,8 @@ WALLET_CACHED_QUALITY_FIELDS = (
     "closedTrades30d",
     "grossProfit30d",
     "grossLoss30d",
+    "winRate90d",
+    "closedTrades90d",
     "qualityClosedEvents30d",
     "qualityNetPnl30d",
     "qualityProfitFactor30d",
@@ -499,6 +501,26 @@ RANKING_FULL_CONFIDENCE_7D_CLOSED_TRADES = 20
 # unit left 7 of 31 wallets unrankable, this one leaves 6.
 RANKING_MIN_30D_CLOSED_TRADES = 10
 RANKING_FULL_CONFIDENCE_30D_CLOSED_TRADES = 30
+# The fills window the wallet quality refresh pulls for the conviction weight
+# path. Widened from 30 to 90 days: measured against actual position outcomes,
+# a raw 90d win rate predicts whether a position closes profitable (AUC 0.701)
+# better than the production convictionWeightScore composite (AUC 0.643); a
+# shrunk mapping of the 90d rate (see CONVICTION_WIN_RATE_BASELINE /
+# CONVICTION_WIN_RATE_PRIOR_TRADES below) gives 0.690 while protecting small
+# samples. The wider window also lifts wallets with a usable score from 25 of
+# 31 to 29 of 31.
+WALLET_QUALITY_WINDOW_DAYS = int(float(os.environ.get("WALLET_QUALITY_WINDOW_DAYS", 90)))
+# Minimum 90d closed-run count before convictionWinRateWeight is trusted enough
+# to emit. Mirrors RANKING_MIN_30D_CLOSED_TRADES's role for the 30d score.
+RANKING_MIN_90D_CLOSED_TRADES = int(os.environ.get("RANKING_MIN_90D_CLOSED_TRADES", 10))
+# The win rate a wallet is shrunk toward when its 90d sample is small - the
+# measured baseline win rate across the tracked set at the time this was
+# calibrated. Not "50%" because closing runs are not coin flips.
+CONVICTION_WIN_RATE_BASELINE = float(os.environ.get("CONVICTION_WIN_RATE_BASELINE", 0.646))
+# Weight of the baseline in the shrinkage estimator, expressed as a number of
+# prior (pseudo-)trades. Chosen so a 10-trade wallet lands materially closer to
+# the baseline than a 400-trade wallet reporting the same raw rate.
+CONVICTION_WIN_RATE_PRIOR_TRADES = float(os.environ.get("CONVICTION_WIN_RATE_PRIOR_TRADES", 20))
 CONVICTION_WEIGHT_30D_SHARE = 0.70
 CONVICTION_WEIGHT_7D_SHARE = 0.30
 CONVICTION_WEIGHT_7D_MAX_EFFECT_PCT = 20.0
@@ -872,6 +894,54 @@ def collapse_twap_slice_fills(slices: Any) -> list[dict[str, Any]]:
     return collapsed
 
 
+def reconstruct_closing_runs(
+    fills: list[dict[str, Any]], cutoff_ms: float, gap_ms: float
+) -> list[dict[str, Any]]:
+    """Rebuild per-coin closing runs from time-sorted fills at/after cutoff_ms.
+
+    Mirrors, rule for rule, the closing-run construction inlined in
+    fetch_wallet_snapshot for closedTrades30d/qualityClosedEvents30d: a run is
+    the contiguous stretch of closes on one coin, ended either by a
+    zero-closedPnl fill (the wallet added back to the position) or by more
+    than gap_ms elapsing since the run's last close, whichever comes first.
+    Used to derive the 90d win rate from the same reconstruction rule the 30d
+    fields already use, just over a different window of the same fetched
+    fills. Any run still open at the end of the scan is flushed as closed,
+    same as the inline version.
+    """
+    open_runs: dict[str, dict[str, Any]] = {}
+    closed_runs: list[dict[str, Any]] = []
+    for fill in fills:
+        fill_time = int(to_float(fill.get("time")))
+        if fill_time < cutoff_ms:
+            continue
+        closed_pnl = to_float(fill.get("closedPnl"))
+        fee = abs(to_float(fill.get("fee")))
+        run_coin = normalize_position_coin(fill.get("coin"))
+        if closed_pnl == 0:
+            reopened = open_runs.pop(run_coin, None)
+            if reopened is not None:
+                closed_runs.append(reopened)
+            continue
+        run = open_runs.get(run_coin)
+        if run is not None and fill_time - int(run["endMs"]) > gap_ms:
+            closed_runs.append(open_runs.pop(run_coin))
+            run = None
+        if run is None:
+            run = open_runs[run_coin] = {
+                "coin": run_coin,
+                "pnl": 0.0,
+                "startMs": fill_time,
+                "endMs": fill_time,
+                "fills": 0,
+            }
+        run["pnl"] += closed_pnl - fee
+        run["endMs"] = fill_time
+        run["fills"] = int(run["fills"]) + 1
+    closed_runs.extend(open_runs.values())
+    return closed_runs
+
+
 def cached_window_fill_count(entry: Any) -> int | None:
     """Rows the wallet's last windowed fill page returned, or None if unknown.
 
@@ -1088,6 +1158,8 @@ def build_wallet_quality_rank(
     pnl_30d: float | None = None,
     gross_profit_30d: float = 0.0,
     gross_loss_30d: float = 0.0,
+    hit_rate_90d: float | None = None,
+    closed_trade_count_90d: int | None = None,
     max_drawdown_pct: float = 0.0,
     margin_usage_pct: float = 0.0,
     unrealized_pnl: float = 0.0,
@@ -1143,6 +1215,23 @@ def build_wallet_quality_rank(
     effective_7d_weight = CONVICTION_WEIGHT_7D_SHARE * min(sample_size_7d / RANKING_MIN_7D_CLOSED_TRADES, 1.0)
     conviction_weight_score = capped_recent_quality_blend(quality_30d_score, quality_7d_score, effective_7d_weight)
 
+    # Shrunk 90d win rate, mapped to a conviction weight around 1.0 at the
+    # measured baseline win rate. Only emitted with a large enough 90d sample
+    # (RANKING_MIN_90D_CLOSED_TRADES) - below that, wallet_conviction_weight
+    # must fall back to the score-derived weight above rather than reading a
+    # noisy or absent estimate, which is why the key is omitted entirely
+    # rather than set to None.
+    conviction_win_rate_weight: float | None = None
+    if hit_rate_90d is not None and closed_trade_count_90d is not None:
+        sample_size_90d = max(0, int(to_float(closed_trade_count_90d)))
+        if sample_size_90d >= RANKING_MIN_90D_CLOSED_TRADES:
+            normalized_hit_rate_90d = max(0.0, min(to_float(hit_rate_90d), 100.0))
+            wins_90d = (normalized_hit_rate_90d / 100.0) * sample_size_90d
+            shrunk_win_rate = (
+                wins_90d + CONVICTION_WIN_RATE_PRIOR_TRADES * CONVICTION_WIN_RATE_BASELINE
+            ) / (sample_size_90d + CONVICTION_WIN_RATE_PRIOR_TRADES)
+            conviction_win_rate_weight = clamp(shrunk_win_rate / CONVICTION_WIN_RATE_BASELINE, 0.5, 1.5)
+
     elite_eligible = (
         sample_size_30d >= RANKING_MIN_30D_CLOSED_TRADES
         and profit_factor >= ELITE_MIN_PROFIT_FACTOR
@@ -1162,7 +1251,7 @@ def build_wallet_quality_rank(
     else:
         label = "Cold"
 
-    return {
+    rank: dict[str, Any] = {
         "label": label,
         "score": round(score, 1),
         "winRate": round(normalized_hit_rate, 1),
@@ -1198,6 +1287,9 @@ def build_wallet_quality_rank(
         # re-derive that judgment themselves. Does not change the score.
         "windowTrusted": bool(window_trusted),
     }
+    if conviction_win_rate_weight is not None:
+        rank["convictionWinRateWeight"] = round(conviction_win_rate_weight, 3)
+    return rank
 
 
 def wallet_quality_window_trusted(wallet: Any) -> bool:
@@ -2068,9 +2160,17 @@ class WalletTrackerService:
         now_ms = current_time_ms()
         cutoff_7d_ms = now_ms - RANKING_WINDOW_MS
         cutoff_30d_ms = now_ms - HOLDING_ONLY_WINDOW_MS
+        cutoff_90d_ms = now_ms - (WALLET_QUALITY_WINDOW_DAYS * 24 * 60 * 60 * 1000)
         cutoff_holdout_ms = now_ms - MONTHLY_QUALITY_HOLDOUT_MS
-        fills_start_ms = cutoff_30d_ms if full_quality_refresh else now_ms - WALLET_LIVE_FILL_LOOKBACK_MS
-        # A full quality refresh needs the 30-day window, so it always fetches.
+        # The quality path fetches WALLET_QUALITY_WINDOW_DAYS (90d) of fills so
+        # winRate90d/closedTrades90d have a real sample - see the constant's
+        # comment above for the measured justification. Every existing 30d
+        # aggregate below (closedTrades30d, grossProfit30d/grossLoss30d,
+        # qualityClosedEvents30d, fills30d, ...) still applies its own
+        # cutoff_30d_ms filter over whatever gets fetched, so widening this
+        # start time does not change what those fields mean.
+        fills_start_ms = cutoff_90d_ms if full_quality_refresh else now_ms - WALLET_LIVE_FILL_LOOKBACK_MS
+        # A full quality refresh needs the 90-day window, so it always fetches.
         skip_fills = bool(skip_fill_fetch) and not full_quality_refresh
         skip_live_fills = bool(skip_live_fill_fetch) and not full_quality_refresh and not skip_fills
         with ThreadPoolExecutor(max_workers=HYPERLIQUID_SNAPSHOT_WORKERS) as executor:
@@ -2114,13 +2214,13 @@ class WalletTrackerService:
                 # Two fill requests per wallet per cycle are already the
                 # largest traffic block (see WALLET_IDLE_FILL_THRESHOLD_MS
                 # above), so this must not become a third one every cycle. The
-                # 30-day quality aggregates that consume TWAP fills are only
-                # committed on a full refresh (quality_refresh_succeeded
+                # quality aggregates (30d and 90d) that consume TWAP fills are
+                # only committed on a full refresh (quality_refresh_succeeded
                 # requires it) and quality_window_truncated below already ANDs
                 # full_quality_refresh, so tying this fetch to the same flag
                 # costs +3 calls a cycle instead of +30 and its request window
-                # (fills_start_ms == cutoff_30d_ms here) always matches the
-                # 30-day window it feeds.
+                # (fills_start_ms == cutoff_90d_ms here) always matches the
+                # 90-day window it feeds.
                 futures["twapFills"] = executor.submit(
                     self.fetch_twap_slice_fills_paginated_result, wallet.address, fills_start_ms
                 )
@@ -2401,6 +2501,16 @@ class WalletTrackerService:
         # qualityClosedEvents30d below.
         win_count_30d, loss_count_30d = _run_wins_losses(None)
         win_count, loss_count = _run_wins_losses(cutoff_7d_ms)
+        # winRate90d/closedTrades90d use the same closing-run rule as the 30d
+        # fields above (see reconstruct_closing_runs), just reconstructed over
+        # the wider cutoff_90d_ms window that `fills` now covers on a full
+        # refresh. A laddered exit collapses into one decision here exactly as
+        # it does for the 30d fields, since it is the same rule.
+        closed_runs_90d = reconstruct_closing_runs(fills, cutoff_90d_ms, QUALITY_CLOSING_RUN_GAP_MS)
+        win_count_90d = sum(1 for run in closed_runs_90d if run["pnl"] > 0)
+        loss_count_90d = sum(1 for run in closed_runs_90d if run["pnl"] < 0)
+        closed_trade_count_90d = win_count_90d + loss_count_90d
+        win_rate_90d = (win_count_90d / max(closed_trade_count_90d, 1)) * 100
         # Per-asset quality is the same metric one level down. Runs are already
         # per coin, so they group directly; pnl stays a raw sum as above.
         asset_trade_stats: dict[str, dict[str, float]] = {}
@@ -2459,6 +2569,8 @@ class WalletTrackerService:
             pnl_30d=realized_pnl_30d,
             gross_profit_30d=gross_profit_30d,
             gross_loss_30d=gross_loss_30d,
+            hit_rate_90d=win_rate_90d,
+            closed_trade_count_90d=closed_trade_count_90d,
             max_drawdown_pct=performance.get("month", {}).get("maxDrawdownPct", 0.0),
             margin_usage_pct=margin_usage_pct,
             unrealized_pnl=unrealized_pnl,
@@ -2507,6 +2619,12 @@ class WalletTrackerService:
             "closedTrades30d": win_count_30d + loss_count_30d,
             "grossProfit30d": gross_profit_30d,
             "grossLoss30d": gross_loss_30d,
+            # Same closing-run reconstruction as closedTrades30d, over the
+            # wider WALLET_QUALITY_WINDOW_DAYS (90d) window - see
+            # reconstruct_closing_runs. Feeds convictionWinRateWeight in
+            # build_wallet_quality_rank; does not replace any 30d field above.
+            "winRate90d": round(win_rate_90d, 1),
+            "closedTrades90d": closed_trade_count_90d,
             "qualityClosedEvents30d": len(quality_event_pnls),
             "qualityNetPnl30d": round(sum(quality_event_pnls), 2),
             "qualityProfitFactor30d": (
@@ -3403,7 +3521,17 @@ class WalletTrackerService:
         else:
             score = to_float(rank.get("convictionWeightScore", rank.get("score")))
             label = str(rank.get("label") or "")
-            if score <= 0 or label == "Unranked":
+            # convictionWinRateWeight, when the rank carries it, is the 90d
+            # shrunk-win-rate weight this whole feature exists to prefer over
+            # the composite score below. Its absence is not an error case: a
+            # rank cached by the previous version - or one with too few 90d
+            # closed trades - simply never had the key added (see
+            # build_wallet_quality_rank), and such a wallet must keep the old
+            # score-derived weight rather than collapsing to something else.
+            explicit = rank.get("convictionWinRateWeight")
+            if explicit is not None:
+                base_weight = round(to_float(explicit), 3)
+            elif score <= 0 or label == "Unranked":
                 base_weight = 1.0
             else:
                 base_weight = round(max(0.5, min(score / ELITE_MIN_QUALITY_SCORE, 1.5)), 3)
