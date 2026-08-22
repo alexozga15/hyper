@@ -433,9 +433,18 @@ WALLET_IDLE_FILL_INTERVAL_MS = int(
 # issue both requests, as before.
 WALLET_WINDOW_FILL_CAP = int(float(os.environ.get("WALLET_WINDOW_FILL_CAP", 2000)))
 # Pages of WALLET_WINDOW_FILL_CAP rows that fetch_fills_paginated_result will
-# walk before it gives up and says so. Ten pages is 20000 fills, more than any
-# tracked wallet produced in 30 days when this was measured.
-FILL_HISTORY_MAX_PAGES = int(os.environ.get("FILL_HISTORY_MAX_PAGES", "10"))
+# walk before it gives up and says so. Raised from 10 once the quality path
+# started paging and the old figure - "20000 fills, more than any tracked
+# wallet produced in 30 days" - turned out to be wrong: measured over a full
+# 30-day window, five wallets exceeded it and the heaviest produced 49396
+# fills, needing 25 pages. 30 covers that with headroom while still bounding a
+# pathological wallet.
+#
+# Nearly free for everyone else: the pager stops on the first short page, so
+# only wallets that genuinely have this much history pay for the budget. Across
+# the tracked set a full sweep goes from 137 pages to 172, and the refresh
+# rotation spreads that over three wallets per cycle.
+FILL_HISTORY_MAX_PAGES = int(os.environ.get("FILL_HISTORY_MAX_PAGES", "30"))
 WALLET_LIVE_FILL_SKIP_MAX = int(float(os.environ.get("WALLET_LIVE_FILL_SKIP_MAX", 1600)))
 WALLET_CACHED_QUALITY_FIELDS = (
     "role",
