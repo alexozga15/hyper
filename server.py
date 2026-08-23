@@ -1119,11 +1119,28 @@ def is_within_actionable_distance(reference_price: float, mark_price: float) -> 
     return is_actionable_distance_pct(distance_pct)
 
 
+# "0x1ce8...f55a" and friends. Twelve of the tracked wallets carry an alias in
+# this shape, which reads like an identifier but cannot be pasted anywhere.
+ABBREVIATED_ADDRESS_PATTERN = re.compile(r"^0x[0-9a-fA-F]{2,12}\.{2,3}[0-9a-fA-F]{2,12}$")
+
+
 def wallet_label(alias: str, address: str) -> str:
+    """A wallet as it appears in output, always carrying its full address.
+
+    Aliases are mostly abbreviated hex and occasionally a name. Neither can be
+    pasted into Hyperdash or a block explorer, which is what these labels are
+    read for, so the full address is never dropped: an abbreviation is replaced
+    by it and a real name is kept alongside it rather than instead of it.
+    """
+    full = str(address or "").strip()
     clean_alias = str(alias or "").strip()
-    if clean_alias and clean_alias.lower() != address.lower():
+    if not full:
         return clean_alias
-    return short_address(address)
+    if not clean_alias or clean_alias.lower() == full.lower():
+        return full
+    if ABBREVIATED_ADDRESS_PATTERN.match(clean_alias):
+        return full
+    return f"{clean_alias} {full}"
 
 
 def format_position_size(value: float) -> str:

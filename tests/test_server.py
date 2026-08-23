@@ -4770,8 +4770,8 @@ class AlertSummaryTests(unittest.TestCase):
         message = self.service.build_wallet_rankings_message(dashboard)
 
         self.assertIn("Wallet ranks by multi-period quality", message)
-        self.assertIn("1. Consistent Winner: Strong", message)
-        self.assertIn("2. High WR Losing: Cold", message)
+        self.assertIn("1. Consistent Winner 0x2222222222222222222222222222222222222222: Strong", message)
+        self.assertIn("2. High WR Losing 0x3333333333333333333333333333333333333333: Cold", message)
         self.assertNotIn("Lucky Small Sample", message)
 
     def test_build_elite_wallet_positions_message_lists_only_elite_wallet_positions(self) -> None:
@@ -4822,7 +4822,7 @@ class AlertSummaryTests(unittest.TestCase):
         message = self.service.build_elite_wallet_positions_message(dashboard)
 
         self.assertIn("Elite wallet pos", message)
-        self.assertIn("Elite Trader (87.6/100", message)
+        self.assertIn("Elite Trader 0x1111111111111111111111111111111111111111 (87.6/100", message)
         self.assertIn("30D closes, PF 6.0, DD 5.0%", message)
         self.assertIn("- BTC long $1,000K, size 10, entry $100,000, uPnL $12,345", message)
         self.assertIn("- ETH short $250K", message)
@@ -5762,7 +5762,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("New large pos ($1.0M+)", sent_message)
         # Opened at $100,000 and the mark is the same figure, so this line is
         # inside the actionable band and must render bold.
-        self.assertIn("<b>- Trader One BTC LONG $1.2M @ $100,000</b>", sent_message)
+        self.assertIn("<b>- Trader One 0x1111111111111111111111111111111111111111 BTC LONG $1.2M @ $100,000</b>", sent_message)
         self.assertEqual(send_telegram_message.call_args.kwargs.get("parse_mode"), "HTML")
 
     def test_check_alerts_notifies_on_closed_large_positions(self) -> None:
@@ -5800,7 +5800,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(len(result["changes"]["closedLargePositions"]), 1)
         sent_message = send_telegram_message.call_args.args[2]
         self.assertIn("Closed large pos ($1.0M+)", sent_message)
-        self.assertIn("Trader One ETH SHORT $1.2M ~$3,000", sent_message)
+        self.assertIn("Trader One 0x1111111111111111111111111111111111111111 ETH SHORT $1.2M ~$3,000", sent_message)
         # A closed position can never be acted on, so it must never render
         # bold - even though its close price sits at the entry price.
         self.assertNotIn("<b>", sent_message)
@@ -6109,7 +6109,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("Coordinated openings (5 min)", sent_message)
         self.assertIn("- BTC LONG: 3 wallets, $3.6M", sent_message)
         self.assertIn("@ $102,857", sent_message)
-        self.assertIn("Trader One $1.2M", sent_message)
+        self.assertIn("Trader One 0x1111111111111111111111111111111111111111 $1.2M", sent_message)
         saved_dedupe = save_json_file.call_args.args[1]["state"]["alertDedupe"]
         self.assertTrue(next(iter(saved_dedupe)).startswith("position:cluster-open:BTC:long:"))
 
@@ -6169,6 +6169,25 @@ class AlertSummaryTests(unittest.TestCase):
                 "token", "chat", "bold body", parse_mode="HTML"
             )
         self.assertIn("parse_mode=HTML", captured[0])
+
+    def test_an_abbreviated_alias_is_replaced_by_the_full_address(self) -> None:
+        # Twelve tracked wallets carry an alias in this shape. It reads like an
+        # identifier but cannot be pasted into Hyperdash or a block explorer,
+        # which is the only thing these labels are read for.
+        self.assertEqual(server.wallet_label("0x1ce8...f55a", "0x1ce8ed87b7b4cb60f0cc3664bf1fe216163ff55a"), "0x1ce8ed87b7b4cb60f0cc3664bf1fe216163ff55a")
+
+    def test_a_named_wallet_keeps_its_address_alongside_the_name(self) -> None:
+        self.assertEqual(
+            server.wallet_label("Wanyewest", "0x1ce8ed87b7b4cb60f0cc3664bf1fe216163ff55a"), "Wanyewest 0x1ce8ed87b7b4cb60f0cc3664bf1fe216163ff55a"
+        )
+
+    def test_a_missing_alias_still_yields_the_full_address(self) -> None:
+        self.assertEqual(server.wallet_label("", "0x1ce8ed87b7b4cb60f0cc3664bf1fe216163ff55a"), "0x1ce8ed87b7b4cb60f0cc3664bf1fe216163ff55a")
+        self.assertEqual(server.wallet_label("   ", "0x1ce8ed87b7b4cb60f0cc3664bf1fe216163ff55a"), "0x1ce8ed87b7b4cb60f0cc3664bf1fe216163ff55a")
+
+    def test_an_alias_equal_to_the_address_is_not_printed_twice(self) -> None:
+        self.assertEqual(server.wallet_label("0x1ce8ed87b7b4cb60f0cc3664bf1fe216163ff55a", "0x1ce8ed87b7b4cb60f0cc3664bf1fe216163ff55a"), "0x1ce8ed87b7b4cb60f0cc3664bf1fe216163ff55a")
+        self.assertEqual(server.wallet_label("0X1CE8ED87B7B4CB60F0CC3664BF1FE216163FF55A", "0x1ce8ed87b7b4cb60f0cc3664bf1fe216163ff55a"), "0x1ce8ed87b7b4cb60f0cc3664bf1fe216163ff55a")
 
     def test_a_large_position_alert_states_the_wallet_quality(self) -> None:
         summary = {"overallBias": "mixed", "walletCount": 10}
@@ -6326,8 +6345,8 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_telegram_message(changes, summary, min_wallets=4)
 
-        self.assertNotIn("Trader One BTC LONG", message)
-        self.assertIn("Trader Four ETH SHORT $1.5M @ $3,000", message)
+        self.assertNotIn("Trader One 0x1111111111111111111111111111111111111111 BTC LONG", message)
+        self.assertIn("Trader Four 0x4444444444444444444444444444444444444444 ETH SHORT $1.5M @ $3,000", message)
 
     def test_clustered_large_open_alert_requires_three_wallets_inside_window(self) -> None:
         now_ms = 1_700_000_000_000
@@ -6480,7 +6499,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertNotIn("High-conviction signals", hourly_message)
         alert_message = send_telegram_message.call_args_list[1].args[2]
         self.assertIn("New large pos ($1.0M+)", alert_message)
-        self.assertIn("Trader One BTC LONG $1.2M", alert_message)
+        self.assertIn("Trader One 0x69906b0ed626ca01a4b7c001e5711e5714ccf207 BTC LONG $1.2M", alert_message)
         saved_state = save_json_file.call_args.args[1]["state"]
         self.assertEqual(saved_state["summary"]["consensus"][0]["walletCount"], 8)
         self.assertIn("0x69906b0ed626ca01a4b7c001e5711e5714ccf207:BTC:long", saved_state["largePositions"])
@@ -6583,7 +6602,7 @@ class AlertSummaryTests(unittest.TestCase):
         # No fill price is available here, so the add price falls back to the
         # current mark itself - which makes the distance 0% and the line
         # actionable.
-        self.assertIn("<b>- Trader One +$1.2M BTC LONG ~ $120,000 ($1.2M -> $2.4M)</b>", sent_message)
+        self.assertIn("<b>- Trader One 0x1111111111111111111111111111111111111111 +$1.2M BTC LONG ~ $120,000 ($1.2M -> $2.4M)</b>", sent_message)
         self.assertNotIn("@$78,000", sent_message)
 
     def test_large_position_snapshot_filters_after_aggregation(self) -> None:
