@@ -8,6 +8,12 @@ from pathlib import Path
 from typing import Any
 
 import server
+
+# The per-page retry backoff is an operational courtesy to the shared rate
+# limiter, not behaviour under test. Left at its production value it makes the
+# suite sleep through every simulated page failure; what the tests care about
+# is how many attempts are made, which they assert directly.
+server.FILL_HISTORY_PAGE_RETRY_DELAY_SECONDS = 0.0
 from coinmarketman import CoinMarketManApiError
 from server import (
     ALERTS_FILE,
@@ -2837,6 +2843,48 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(snapshot["fills30d"], 5)
         # A full page is no longer evidence of a short window.
         self.assertFalse(snapshot["qualityWindowTruncated"])
+
+    def test_a_failed_page_is_retried_before_the_walk_is_abandoned(self) -> None:
+        # The walk is all-or-nothing, so without this a single throttled page
+        # discards every page already collected - which is what starved the
+        # busiest wallets of their quality refresh entirely.
+        calls = {"n": 0}
+
+        def flaky(address: str, cursor: int) -> dict[str, Any]:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {"ok": False, "data": [], "error": "HTTP 429: Too Many Requests"}
+            return {"ok": True, "data": [], "error": ""}
+
+        with patch.object(self.service, "fetch_fills_result", flaky):
+            result = self.service.fetch_fills_paginated_result("0xabc", 0)
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls["n"], 2)
+
+    def test_a_page_that_never_recovers_still_gives_up(self) -> None:
+        calls = {"n": 0}
+
+        def always_failing(address: str, cursor: int) -> dict[str, Any]:
+            calls["n"] += 1
+            return {"ok": False, "data": [], "error": "HTTP 429: Too Many Requests"}
+
+        with patch.object(self.service, "fetch_fills_result", always_failing):
+            result = self.service.fetch_fills_paginated_result("0xabc", 0)
+        self.assertFalse(result["ok"])
+        self.assertEqual(calls["n"], server.FILL_HISTORY_PAGE_RETRY_ATTEMPTS)
+
+    def test_a_healthy_page_is_fetched_only_once(self) -> None:
+        # The retry must not multiply request volume on the happy path - that
+        # would make the throttling it exists to survive strictly worse.
+        calls = {"n": 0}
+
+        def healthy(address: str, cursor: int) -> dict[str, Any]:
+            calls["n"] += 1
+            return {"ok": True, "data": [], "error": ""}
+
+        with patch.object(self.service, "fetch_fills_result", healthy):
+            self.service.fetch_fills_paginated_result("0xabc", 0)
+        self.assertEqual(calls["n"], 1)
 
     def test_a_short_page_stops_the_paging(self) -> None:
         now_ms = current_time_ms()
