@@ -5482,7 +5482,10 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(result["changes"]["newLargePositions"][0]["coin"], "BTC")
         sent_message = send_telegram_message.call_args.args[2]
         self.assertIn("New large pos ($1.0M+)", sent_message)
-        self.assertIn("Trader One BTC LONG $1.2M @ $100,000", sent_message)
+        # Opened at $100,000 and the mark is the same figure, so this line is
+        # inside the actionable band and must render bold.
+        self.assertIn("<b>- Trader One BTC LONG $1.2M @ $100,000</b>", sent_message)
+        self.assertEqual(send_telegram_message.call_args.kwargs.get("parse_mode"), "HTML")
 
     def test_check_alerts_notifies_on_closed_large_positions(self) -> None:
         previous_summary = {
@@ -5520,6 +5523,9 @@ class AlertSummaryTests(unittest.TestCase):
         sent_message = send_telegram_message.call_args.args[2]
         self.assertIn("Closed large pos ($1.0M+)", sent_message)
         self.assertIn("Trader One ETH SHORT $1.2M ~$3,000", sent_message)
+        # A closed position can never be acted on, so it must never render
+        # bold - even though its close price sits at the entry price.
+        self.assertNotIn("<b>", sent_message)
 
     def test_check_alerts_ignores_closed_positions_for_untracked_wallets(self) -> None:
         previous_summary = {
@@ -5829,6 +5835,63 @@ class AlertSummaryTests(unittest.TestCase):
         saved_dedupe = save_json_file.call_args.args[1]["state"]["alertDedupe"]
         self.assertTrue(next(iter(saved_dedupe)).startswith("position:cluster-open:BTC:long:"))
 
+    def test_a_mark_beside_the_entry_is_actionable(self) -> None:
+        self.assertTrue(server.is_within_actionable_distance(100.0, 101.0))
+        self.assertTrue(server.is_within_actionable_distance(100.0, 99.0))
+
+    def test_a_mark_that_ran_away_from_the_entry_is_not_actionable(self) -> None:
+        self.assertFalse(server.is_within_actionable_distance(100.0, 105.0))
+        self.assertFalse(server.is_within_actionable_distance(100.0, 95.0))
+
+    def test_the_actionable_band_includes_its_own_edge(self) -> None:
+        # Exactly at the threshold still counts as reachable; past it does not.
+        self.assertTrue(server.is_within_actionable_distance(100.0, 103.0))
+        self.assertFalse(server.is_within_actionable_distance(100.0, 103.5))
+
+    def test_an_unknown_price_is_never_actionable(self) -> None:
+        # A missing reference or mark leaves the distance unknown, which is not
+        # the same thing as a distance of zero.
+        self.assertFalse(server.is_within_actionable_distance(0.0, 100.0))
+        self.assertFalse(server.is_within_actionable_distance(100.0, 0.0))
+
+    def test_markup_characters_are_escaped_so_the_message_still_sends(self) -> None:
+        # Under HTML parse mode Telegram rejects the entire message with a 400
+        # if it meets a stray '&' or '<', so escaping is what keeps the alert
+        # deliverable rather than merely tidy.
+        self.assertEqual(server.telegram_html_escape("A&B <C>"), "A&amp;B &lt;C&gt;")
+
+    def test_escaping_runs_the_ampersand_first(self) -> None:
+        self.assertEqual(server.telegram_html_escape("<"), "&lt;")
+        self.assertEqual(server.telegram_html_escape("&lt;"), "&amp;lt;")
+
+    def test_send_telegram_message_omits_parse_mode_unless_asked(self) -> None:
+        # Every other message the bot sends - digests, rankings, health output,
+        # command replies - must keep going out as plain text, so parse_mode
+        # has to stay absent from the payload unless a caller opts in.
+        captured: list[str] = []
+
+        class _Response:
+            def __enter__(self) -> "_Response":
+                return self
+
+            def __exit__(self, *exc: Any) -> bool:
+                return False
+
+        def fake_urlopen(request: Any, timeout: Any = None) -> "_Response":
+            captured.append(request.data.decode("utf-8"))
+            return _Response()
+
+        with patch("server.urllib.request.urlopen", fake_urlopen):
+            self.service.send_telegram_message("token", "chat", "plain body")
+        self.assertNotIn("parse_mode", captured[0])
+
+        captured.clear()
+        with patch("server.urllib.request.urlopen", fake_urlopen):
+            self.service.send_telegram_message(
+                "token", "chat", "bold body", parse_mode="HTML"
+            )
+        self.assertIn("parse_mode=HTML", captured[0])
+
     def test_build_telegram_message_omits_new_large_position_already_in_cluster(self) -> None:
         summary = {"overallBias": "mixed", "walletCount": 10}
         changes = {
@@ -6132,7 +6195,10 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(len(result["changes"]["increasedLargePositions"]), 1)
         sent_message = send_telegram_message.call_args.args[2]
         self.assertIn("Large pos additions ($1.0M+)", sent_message)
-        self.assertIn("Trader One +$1.2M BTC LONG ~ $120,000 ($1.2M -> $2.4M)", sent_message)
+        # No fill price is available here, so the add price falls back to the
+        # current mark itself - which makes the distance 0% and the line
+        # actionable.
+        self.assertIn("<b>- Trader One +$1.2M BTC LONG ~ $120,000 ($1.2M -> $2.4M)</b>", sent_message)
         self.assertNotIn("@$78,000", sent_message)
 
     def test_large_position_snapshot_filters_after_aggregation(self) -> None:

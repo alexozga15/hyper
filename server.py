@@ -292,6 +292,11 @@ POSITION_INCREASE_ALERT_MIN_PCT = 0.5
 ALERT_DEDUPE_COOLDOWN_MS = 60 * 60 * 1000
 CLUSTERED_OPEN_ALERT_MIN_WALLETS = 3
 OPEN_POSITION_ALERT_WINDOW_MS = 5 * 60 * 1000
+# The band within which a tracked wallet's entry is still reachable, so the
+# reader can act on the line rather than just read it.
+ALERT_ACTIONABLE_MAX_DISTANCE_PCT = float(
+    os.environ.get("ALERT_ACTIONABLE_MAX_DISTANCE_PCT", "3.0")
+)
 # Quality decides what is worth an alert; size only scales it.
 #
 # Measured over 99 days across 31 tracked wallets, split chronologically in
@@ -1042,6 +1047,46 @@ def short_address(value: str) -> str:
     if not address:
         return value
     return f"{address[:6]}...{address[-4:]}"
+
+
+def telegram_html_escape(value: str) -> str:
+    """Escape text for Telegram's HTML parse mode.
+
+    Order matters: '&' must be escaped first, or the '&' introduced by
+    escaping '<' and '>' would itself get escaped a second time.
+    """
+    text = str(value)
+    text = text.replace("&", "&amp;")
+    text = text.replace("<", "&lt;")
+    text = text.replace(">", "&gt;")
+    return text
+
+
+def is_actionable_distance_pct(distance_pct: float) -> bool:
+    """Is this signed distance-from-entry inside the actionable band?
+
+    The tolerance is not cosmetic. A price exactly 3% away computes as
+    ((103 / 100) - 1) * 100 == 3.0000000000000027 in binary floating point, so
+    a bare `<=` against the threshold would drop the very boundary case the
+    band is defined by. Both the signals section and the large-position lines
+    compare through here so the edge is decided identically in both.
+    """
+    return abs(distance_pct) <= ALERT_ACTIONABLE_MAX_DISTANCE_PCT + 1e-9
+
+
+def is_within_actionable_distance(reference_price: float, mark_price: float) -> bool:
+    """True when a mark price still sits inside the actionable band of a reference entry.
+
+    Used for large-position lines that carry an entry/add price but no
+    precomputed entryDistancePct field (unlike the signals section, which
+    already stores that distance). Both prices must be strictly positive -
+    a missing/zero reference or mark price means the distance is unknown,
+    not zero, so it is never treated as actionable.
+    """
+    if reference_price <= 0 or mark_price <= 0:
+        return False
+    distance_pct = ((mark_price / reference_price) - 1.0) * 100.0
+    return is_actionable_distance_pct(distance_pct)
 
 
 def wallet_label(alias: str, address: str) -> str:
@@ -5376,7 +5421,7 @@ class WalletTrackerService:
         lines = [
             "Wallet activity update",
             (
-                f"Market view: {str(summary.get('overallBias', 'mixed')).title()} | "
+                f"Market view: {telegram_html_escape(str(summary.get('overallBias', 'mixed')).title())} | "
                 f"Tracking: {int(to_float(summary.get('walletCount')))} wallets | "
                 f"Agreement required: {min_wallets}"
             ),
@@ -5396,20 +5441,32 @@ class WalletTrackerService:
             # value for anyone who wants to see it.
             lines.append("Signal changes")
             for index, item in enumerate(actionable_signals[:8], start=1):
-                action = str(item.get("action") or signal_action_from_side(item.get("side"))).upper()
-                status = str(item.get("status") or "NEW").upper()
-                if to_float(item.get("freshAddVwap")) > 0:
+                action = telegram_html_escape(str(item.get("action") or signal_action_from_side(item.get("side"))).upper())
+                status = telegram_html_escape(str(item.get("status") or "NEW").upper())
+                coin = telegram_html_escape(str(item.get("coin", "Unknown")))
+                side = telegram_html_escape(str(item.get("side") or "").upper())
+                has_price = to_float(item.get("freshAddVwap")) > 0
+                if has_price:
+                    # Same guard as the price-availability check above: a
+                    # missing freshAddVwap/markPrice pair leaves
+                    # entryDistancePct defaulted to 0.0 upstream, which would
+                    # otherwise look identical to a genuine 0% distance and
+                    # falsely qualify as actionable.
+                    distance = to_float(item.get("entryDistancePct"))
                     price_note = (
                         f'add ${format_price(to_float(item.get("freshAddVwap")))} -> '
                         f'~${format_price(to_float(item.get("markPrice")))} '
-                        f'({to_float(item.get("entryDistancePct")):+.2f}%)'
+                        f'({distance:+.2f}%)'
                     )
                 else:
+                    distance = None
                     price_note = "price unavailable"
-                lines.append(
-                    f'{index}. {action} {item.get("coin", "Unknown")} '
-                    f'({str(item.get("side") or "").upper()}) - {status}'
-                )
+                is_actionable = distance is not None and is_actionable_distance_pct(distance)
+
+                def emit(text: str, _bold: bool = is_actionable) -> None:
+                    lines.append(f"<b>{text}</b>" if _bold else text)
+
+                emit(f'{index}. {action} {coin} ({side}) - {status}')
                 support_note = (
                     f'   {int(to_float(item.get("independentWalletCount", item.get("walletCount"))))} wallets, '
                     f'net +{int(to_float(item.get("netIndependentWalletCount", item.get("netWalletCount"))))}, '
@@ -5420,18 +5477,16 @@ class WalletTrackerService:
                         f' | fresh {int(to_float(item.get("netFreshIndependentWalletCount")))} vs '
                         f'{int(to_float(item.get("oppositeVerifiedFreshIndependentWalletCount")))} opposite'
                     )
-                lines.append(support_note)
+                emit(support_note)
                 if to_float(item.get("totalValue")) > 0:
-                    lines.append(f'   {format_money_compact(item.get("totalValue"))} open | {price_note}')
+                    emit(f'   {format_money_compact(item.get("totalValue"))} open | {price_note}')
                 else:
-                    lines.append(f'   {price_note}')
+                    emit(f'   {price_note}')
                 if item.get("cmmConfirmation") == "confirmed":
-                    lines.append(
-                        f'   CMM confirms {to_float(item.get("cmmProbabilityScore")):.0f}/100'
-                    )
+                    emit(f'   CMM confirms {to_float(item.get("cmmProbabilityScore")):.0f}/100')
                 if item.get("moniSocialTrend"):
-                    lines.append(
-                        f'   Social: {item.get("moniSocialTrend")} '
+                    emit(
+                        f'   Social: {telegram_html_escape(str(item.get("moniSocialTrend")))} '
                         f'({to_float(item.get("moniSocialPaceRatio")):.2f}x pace)'
                     )
 
@@ -5440,6 +5495,9 @@ class WalletTrackerService:
             lines.append("")
             lines.append("Fresh coordinated move")
             for index, item in enumerate(candidate_signals[:5], start=1):
+                action = telegram_html_escape(str(item.get("action") or "watch").upper())
+                coin = telegram_html_escape(str(item.get("coin", "Unknown")))
+                side = telegram_html_escape(str(item.get("side") or "").upper())
                 evidence = f'CMM confirmation: {to_float(item.get("cmmProbabilityScore")):.0f}/100'
                 if item.get("candidateReason") == "two_top_wallets":
                     evidence = (
@@ -5447,8 +5505,8 @@ class WalletTrackerService:
                     )
                 lines.extend(
                     [
-                        f'{index}. {str(item.get("action") or "watch").upper()} '
-                        f'{item.get("coin", "Unknown")} ({str(item.get("side") or "").upper()})',
+                        f'{index}. {action} '
+                        f'{coin} ({side})',
                         (
                             f'   {int(to_float(item.get("independentWalletCount")))} wallets '
                             f'added {format_money_compact(item.get("freshNotional"))} within 15 minutes.'
@@ -5471,8 +5529,10 @@ class WalletTrackerService:
                 "expired": "no fresh additions within the signal lifetime",
             }
             for item in changes["removedSignals"][:8]:
+                coin = telegram_html_escape(str(item.get("coin", "Unknown")))
+                side = telegram_html_escape(str(item.get("side") or "").upper())
                 lines.append(
-                    f'- {item.get("coin", "Unknown")} {str(item.get("side") or "").upper()}: '
+                    f'- {coin} {side}: '
                     f'{reason_labels.get(str(item.get("invalidationReason")), "signal ended")}'
                 )
 
@@ -5484,10 +5544,16 @@ class WalletTrackerService:
                 move_note = ""
                 if "fromProbabilityScore" in item:
                     move_note = f' ({to_float(item.get("fromProbabilityScore")):.0f}->{to_float(item.get("toProbabilityScore")):.0f})'
-                cohorts = "/".join(str(component.get("segment")) for component in item.get("components", [])[:3])
+                cohorts = "/".join(
+                    telegram_html_escape(str(component.get("segment")))
+                    for component in item.get("components", [])[:3]
+                )
                 bias_pct = abs(to_float(item.get("valueBias"))) * 100
+                action = telegram_html_escape(str(item.get("action", "watch")).upper())
+                coin = telegram_html_escape(str(item["coin"]))
+                side = telegram_html_escape(str(item["side"]))
                 lines.append(
-                    f'- {str(item.get("action", "watch")).upper()} {item["coin"]} {item["side"]}: '
+                    f'- {action} {coin} {side}: '
                     f'p{to_float(item.get("probabilityScore")):.0f}{move_note}, '
                     f'{item.get("cohortCount", 0)} cohorts, bias {bias_pct:.0f}%, '
                     f'{format_money_compact(item.get("totalValue"))}, {cohorts}'
@@ -5501,8 +5567,10 @@ class WalletTrackerService:
                 entry_note = ""
                 if to_float(item.get("entryPx")) > 0:
                     entry_note = f' @ ${format_price(to_float(item.get("entryPx")))}'
+                coin = telegram_html_escape(str(item["coin"]))
+                side = telegram_html_escape(str(item.get("side") or "").upper())
                 lines.append(
-                    f'- {item["coin"]} {str(item.get("side") or "").upper()}: '
+                    f'- {coin} {side}: '
                     f'{int(item.get("walletCount") or 0)} wallets, '
                     f'{format_money_compact(item["totalValue"])}{entry_note}'
                 )
@@ -5511,7 +5579,7 @@ class WalletTrackerService:
                     lines.append(
                         "  "
                         + " | ".join(
-                            f'{wallet_label(wallet.get("alias", ""), wallet.get("address", ""))} '
+                            f'{telegram_html_escape(wallet_label(wallet.get("alias", ""), wallet.get("address", "")))} '
                             f'{format_money_compact(wallet.get("totalValue"))}'
                             for wallet in rendered_wallets
                         )
@@ -5535,15 +5603,28 @@ class WalletTrackerService:
             lines.append("")
             lines.append(f"New large pos ({format_money_compact(NEW_POSITION_ALERT_MIN_VALUE)}+)")
             for item in filtered_new_large_positions[:10]:
+                entry_px = to_float(item.get("entryPx"))
                 entry_note = ""
-                if to_float(item.get("entryPx")) > 0:
+                if entry_px > 0:
                     marker = "@" if item.get("entryPriceSource") == "fill" else "~"
-                    entry_note = f' {marker} ${format_price(to_float(item.get("entryPx")))}'
-                lines.append(
-                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))} '
-                    f'{item["coin"]} {str(item.get("side") or "").upper()} '
+                    entry_note = f' {marker} ${format_price(entry_px)}'
+                # markPrice isn't carried on these items the way the signals
+                # section carries one, but totalValue/totalSize (already on
+                # every item here) implies the same current-mark figure the
+                # position-marks builder computes elsewhere, so it costs
+                # nothing extra to derive it inline.
+                total_size = to_float(item.get("totalSize"))
+                mark_price = to_float(item.get("totalValue")) / total_size if total_size > 0 else 0.0
+                is_actionable = is_within_actionable_distance(entry_px, mark_price)
+                label = telegram_html_escape(wallet_label(item.get("alias", ""), item.get("address", "")))
+                coin = telegram_html_escape(str(item["coin"]))
+                side = telegram_html_escape(str(item.get("side") or "").upper())
+                line = (
+                    f'- {label} '
+                    f'{coin} {side} '
                     f'{format_money_compact(item["totalValue"])}{entry_note}'
                 )
+                lines.append(f"<b>{line}</b>" if is_actionable else line)
 
         if changes.get("closedLargePositions"):
             lines.append("")
@@ -5553,9 +5634,15 @@ class WalletTrackerService:
                 if to_float(item.get("closePrice")) > 0:
                     marker = "@" if item.get("closePriceSource") == "fill" else "~"
                     close_note = f' {marker}${format_price(to_float(item.get("closePrice")))}'
+                # Closed positions are never bolded - a closed position cannot
+                # be acted on, regardless of how close its close price sat to
+                # the entry.
+                label = telegram_html_escape(wallet_label(item.get("alias", ""), item.get("address", "")))
+                coin = telegram_html_escape(str(item["coin"]))
+                side = telegram_html_escape(str(item.get("side") or "").upper())
                 lines.append(
-                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))} '
-                    f'{item["coin"]} {str(item.get("side") or "").upper()} '
+                    f'- {label} '
+                    f'{coin} {side} '
                     f'{format_money_compact(item["totalValue"])}{close_note}'
                 )
 
@@ -5563,18 +5650,26 @@ class WalletTrackerService:
             lines.append("")
             lines.append(f"Large pos additions ({format_money_compact(POSITION_INCREASE_ALERT_MIN_DELTA)}+)")
             for item in changes["increasedLargePositions"][:10]:
+                add_price = to_float(item.get("addPrice"))
                 add_price_note = ""
-                if to_float(item.get("addPrice")) > 0:
+                if add_price > 0:
                     marker = "@" if item.get("addPriceSource") == "fill" else "~"
-                    add_price_note = f' {marker} ${format_price(to_float(item.get("addPrice")))}'
+                    add_price_note = f' {marker} ${format_price(add_price)}'
                 add_value = to_float(item.get("addValue", item.get("increaseValue")))
-                lines.append(
-                    f'- {wallet_label(item.get("alias", ""), item.get("address", ""))} '
-                    f'+{format_money_compact(add_value)} {item["coin"]} '
-                    f'{str(item.get("side") or "").upper()}{add_price_note} '
+                total_size = to_float(item.get("totalSize"))
+                mark_price = to_float(item.get("totalValue")) / total_size if total_size > 0 else 0.0
+                is_actionable = is_within_actionable_distance(add_price, mark_price)
+                label = telegram_html_escape(wallet_label(item.get("alias", ""), item.get("address", "")))
+                coin = telegram_html_escape(str(item["coin"]))
+                side = telegram_html_escape(str(item.get("side") or "").upper())
+                line = (
+                    f'- {label} '
+                    f'+{format_money_compact(add_value)} {coin} '
+                    f'{side}{add_price_note} '
                     f'({format_money_compact(item.get("previousValue"))} -> '
                     f'{format_money_compact(item.get("totalValue"))})'
                 )
+                lines.append(f"<b>{line}</b>" if is_actionable else line)
 
         return "\n".join(lines)
 
@@ -8355,9 +8450,19 @@ class WalletTrackerService:
 
         return chunks
 
-    def send_telegram_message(self, bot_token: str, chat_id: str, message: str) -> None:
+    def send_telegram_message(
+        self,
+        bot_token: str,
+        chat_id: str,
+        message: str,
+        *,
+        parse_mode: str | None = None,
+    ) -> None:
         for chunk in self.split_message(message):
-            payload = urllib.parse.urlencode({"chat_id": chat_id, "text": chunk}).encode("utf-8")
+            payload_fields = {"chat_id": chat_id, "text": chunk}
+            if parse_mode is not None:
+                payload_fields["parse_mode"] = parse_mode
+            payload = urllib.parse.urlencode(payload_fields).encode("utf-8")
             request = urllib.request.Request(
                 f"https://api.telegram.org/bot{bot_token}/sendMessage",
                 data=payload,
@@ -8507,6 +8612,7 @@ class WalletTrackerService:
                         str(config["botToken"]),
                         str(config["chatId"]),
                         self.build_telegram_message(changes, alert_summary, min_wallets),
+                        parse_mode="HTML",
                     )
                     sent = True
                 except (urllib.error.URLError, TimeoutError, ValueError) as exc:
