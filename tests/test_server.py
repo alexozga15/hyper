@@ -6170,6 +6170,113 @@ class AlertSummaryTests(unittest.TestCase):
             )
         self.assertIn("parse_mode=HTML", captured[0])
 
+    def test_a_large_position_alert_states_the_wallet_quality(self) -> None:
+        summary = {"overallBias": "mixed", "walletCount": 10}
+        changes = {
+            "addedSignals": [],
+            "changedSignals": [],
+            "newLargePositions": [
+                {
+                    "address": "0x" + "1" * 40,
+                    "alias": "Trader One",
+                    "coin": "BTC",
+                    "side": "long",
+                    "totalValue": 1_200_000.0,
+                    "entryPx": 100_000.0,
+                    "entryPriceSource": "fill",
+                    "qualityWinRatePct": 85.8,
+                },
+            ],
+            "closedLargePositions": [],
+            "increasedLargePositions": [],
+        }
+
+        message = self.service.build_telegram_message(changes, summary, 3)
+
+        self.assertIn("quality 86%", message)
+
+    def test_a_closed_position_never_states_quality(self) -> None:
+        # The estimate forecasts whether a position will close in profit. For
+        # one that has closed, that is settled - so carrying the field through
+        # from the stored item must not put it on the line.
+        summary = {"overallBias": "mixed", "walletCount": 10}
+        changes = {
+            "addedSignals": [],
+            "changedSignals": [],
+            "newLargePositions": [],
+            "closedLargePositions": [
+                {
+                    "address": "0x" + "1" * 40,
+                    "alias": "Trader One",
+                    "coin": "BTC",
+                    "side": "long",
+                    "totalValue": 1_200_000.0,
+                    "totalSize": 12.0,
+                    "closePrice": 100_000.0,
+                    "closePriceSource": "fill",
+                    "qualityWinRatePct": 85.8,
+                },
+            ],
+            "increasedLargePositions": [],
+        }
+
+        message = self.service.build_telegram_message(changes, summary, 3)
+
+        self.assertIn("BTC", message)
+        self.assertNotIn("quality", message)
+
+    def test_an_unscorable_wallet_gets_no_quality_note(self) -> None:
+        summary = {"overallBias": "mixed", "walletCount": 10}
+        changes = {
+            "addedSignals": [],
+            "changedSignals": [],
+            "newLargePositions": [
+                {
+                    "address": "0x" + "1" * 40,
+                    "alias": "Trader One",
+                    "coin": "BTC",
+                    "side": "long",
+                    "totalValue": 1_200_000.0,
+                    "entryPx": 100_000.0,
+                    "entryPriceSource": "fill",
+                    "qualityWinRatePct": None,
+                },
+            ],
+            "closedLargePositions": [],
+            "increasedLargePositions": [],
+        }
+
+        message = self.service.build_telegram_message(changes, summary, 3)
+
+        self.assertIn("BTC LONG", message)
+        self.assertNotIn("quality", message)
+
+    def test_the_snapshot_stamps_the_estimate_onto_each_large_position(self) -> None:
+        # The alert builder only ever sees the position item, so the estimate
+        # has to be attached where the wallet snapshot is still in scope.
+        dashboard = {
+            "wallets": [
+                {
+                    "address": "0x" + "1" * 40,
+                    "alias": "Trader One",
+                    "winRate90d": 90.0,
+                    "closedTrades90d": 100,
+                    "positions": [
+                        {"coin": "BTC", "side": "Long", "positionValue": 5_000_000, "size": 50, "entryPx": 100_000}
+                    ],
+                },
+            ]
+        }
+
+        snapshot = self.service.build_large_position_snapshot(dashboard)
+
+        item = next(iter(snapshot.values()))
+        self.assertAlmostEqual(
+            item["qualityWinRatePct"],
+            round(100.0 * server.shrunk_win_rate(90.0, 100), 1),
+            places=1,
+        )
+
     def test_build_telegram_message_omits_new_large_position_already_in_cluster(self) -> None:
         summary = {"overallBias": "mixed", "walletCount": 10}
         changes = {
