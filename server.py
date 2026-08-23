@@ -1088,6 +1088,22 @@ def is_actionable_distance_pct(distance_pct: float) -> bool:
     return abs(distance_pct) <= ALERT_ACTIONABLE_MAX_DISTANCE_PCT + 1e-9
 
 
+def position_quality_note(item: Any) -> str:
+    """The wallet's win-rate estimate as an alert suffix, or nothing.
+
+    Absent on closed positions by design: the estimate answers how likely the
+    position is to close in profit, and for one that already closed the answer
+    is a fact rather than a forecast. Absent too when the wallet's 90d sample
+    is below RANKING_MIN_90D_CLOSED_TRADES.
+    """
+    if not isinstance(item, dict):
+        return ""
+    pct = item.get("qualityWinRatePct")
+    if pct is None:
+        return ""
+    return f" | quality {to_float(pct):.0f}%"
+
+
 def is_within_actionable_distance(reference_price: float, mark_price: float) -> bool:
     """True when a mark price still sits inside the actionable band of a reference entry.
 
@@ -4715,6 +4731,16 @@ class WalletTrackerService:
                         # directly instead of inferring it from the threshold,
                         # where the 0.0 sentinel means the opposite of small.
                         "convictionWeight": round(weight, 3),
+                        # The wallet's own P(this position closes in profit),
+                        # stamped here for the same reason as the weight above:
+                        # the alert builder sees only the position item, never
+                        # the wallet snapshot the estimate is read from. None
+                        # when the wallet's 90d sample is too small to score.
+                        "qualityWinRatePct": (
+                            round(100.0 * member_rate, 1)
+                            if (member_rate := wallet_shrunk_win_rate(wallet)) is not None
+                            else None
+                        ),
                         "totalValue": 0.0,
                         "totalSize": 0.0,
                         "entryValue": 0.0,
@@ -5680,6 +5706,7 @@ class WalletTrackerService:
                     f'- {label} '
                     f'{coin} {side} '
                     f'{format_money_compact(item["totalValue"])}{entry_note}'
+                    f'{position_quality_note(item)}'
                 )
                 lines.append(f"<b>{line}</b>" if is_actionable else line)
 
@@ -5725,6 +5752,7 @@ class WalletTrackerService:
                     f'{side}{add_price_note} '
                     f'({format_money_compact(item.get("previousValue"))} -> '
                     f'{format_money_compact(item.get("totalValue"))})'
+                    f'{position_quality_note(item)}'
                 )
                 lines.append(f"<b>{line}</b>" if is_actionable else line)
 
