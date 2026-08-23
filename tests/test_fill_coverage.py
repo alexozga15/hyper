@@ -1,4 +1,8 @@
 import unittest
+
+import server
+
+server.FILL_HISTORY_PAGE_RETRY_DELAY_SECONDS = 0.0
 from unittest.mock import patch
 
 import pytest
@@ -387,10 +391,12 @@ class PaginatedFillHistoryTests(unittest.TestCase):
         with patch.object(
             self.service.client,
             "safe_post_result",
-            side_effect=[
-                {"ok": True, "data": first, "error": ""},
-                {"ok": False, "data": [], "error": "http 429"},
-            ],
+            # The page is retried before the walk is abandoned, so the
+            # failure has to persist across every attempt for the walk to give
+            # up - which is the case this test is about.
+            side_effect=[{"ok": True, "data": first, "error": ""}]
+            + [{"ok": False, "data": [], "error": "http 429"}]
+            * server.FILL_HISTORY_PAGE_RETRY_ATTEMPTS,
         ):
             result = self.service.fetch_fills_paginated_result("0xabc", 1_000, page_size=4)
 

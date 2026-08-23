@@ -5718,6 +5718,7 @@ class WalletTrackerService:
         include_signals: bool = True,
         include_footer: bool = True,
         include_data_health: bool = True,
+        html: bool = False,
     ) -> str:
         lines = [
             title,
@@ -5834,6 +5835,11 @@ class WalletTrackerService:
         if include_footer:
             lines.append("")
             lines.append(f'Updated: {format_update_time(summary.get("generatedAt", now_iso()))}')
+        if html:
+            # No emphasis here - the board states positions, it does not offer
+            # any to act on. Escaping alone, so this can be concatenated with
+            # the positions message under one HTML parse mode.
+            lines = [telegram_html_escape(line) for line in lines]
         return "\n".join(lines)
 
     def live_sentiment_summary(self, min_wallets: int) -> dict[str, Any]:
@@ -8171,8 +8177,19 @@ class WalletTrackerService:
         lines.append(f'Updated: {format_update_time(summary.get("generatedAt", now_iso()))}')
         return "\n".join(lines)
 
-    def build_positions_message(self, dashboard: dict[str, Any], *, title: str = "Open pos now") -> str:
+    def build_positions_message(
+        self,
+        dashboard: dict[str, Any],
+        *,
+        title: str = "Open pos now",
+        html: bool = False,
+    ) -> str:
         lines = [title]
+        # Indices of the group rows whose price is still within reach. Recorded
+        # while building and applied once at the end, so every line is escaped
+        # exactly once and the only markup in the output is the markup added
+        # here.
+        actionable_lines: set[int] = set()
         position_groups = self.build_position_groups(
             dashboard,
             hip3_only=False,
@@ -8238,6 +8255,21 @@ class WalletTrackerService:
                                 f' | 7d add ${format_price(to_float(item.get("recentAddPx")))} '
                                 f'({int(to_float(item.get("recentAddWalletCount")))}w)'
                             )
+                        # The reference is the 7d add price when the group
+                        # has one - that is the level these wallets actually
+                        # paid most recently, the same convention the signals
+                        # section uses - and the group's entry otherwise. Mark
+                        # is implied by value over size, the way the position
+                        # buckets already derive markPrice.
+                        total_size = to_float(item.get("totalSize"))
+                        mark_price = (
+                            to_float(item.get("totalValue")) / total_size if total_size > 0 else 0.0
+                        )
+                        reference_price = to_float(item.get("recentAddPx")) or to_float(
+                            item.get("entryPx")
+                        )
+                        if is_within_actionable_distance(reference_price, mark_price):
+                            actionable_lines.add(len(lines))
                         lines.append(
                             f'- {item["coin"]} {str(item.get("side") or "").upper()}: '
                             f'{item["walletCount"]} wallets{net_note(item)} | '
@@ -8253,6 +8285,13 @@ class WalletTrackerService:
             f"{total_positions} pos"
         )
         lines.append(f'Updated: {format_update_time(dashboard.get("generatedAt", now_iso()))}')
+        if html:
+            lines = [
+                f"<b>{telegram_html_escape(line)}</b>"
+                if index in actionable_lines
+                else telegram_html_escape(line)
+                for index, line in enumerate(lines)
+            ]
         return "\n".join(lines)
 
     def build_wallet_rankings_message(self, dashboard: dict[str, Any], *, limit: int = 10) -> str:
@@ -8456,8 +8495,9 @@ class WalletTrackerService:
                     include_signals=False,
                     include_footer=False,
                     include_data_health=False,
+                    html=True,
                 ),
-                self.build_positions_message(dashboard),
+                self.build_positions_message(dashboard, html=True),
             ]
         )
 
@@ -8789,6 +8829,7 @@ class WalletTrackerService:
             bot_token,
             chat_id,
             self.build_hourly_update_message(dashboard, summary, min_wallets),
+            parse_mode="HTML",
         )
         previous_positions = state.get("largePositions", {}) if isinstance(state, dict) else {}
         previous_dedupe = state.get("alertDedupe", {}) if isinstance(state, dict) else {}
@@ -8845,6 +8886,7 @@ class WalletTrackerService:
                     bot_token,
                     chat_id,
                     self.build_telegram_message(position_changes, alert_summary, min_wallets),
+                    parse_mode="HTML",
                 )
                 position_alert_sent = True
             except (urllib.error.URLError, TimeoutError, ValueError) as exc:
