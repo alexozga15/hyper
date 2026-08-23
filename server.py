@@ -1206,6 +1206,35 @@ def capped_recent_quality_blend(base_30d_score: float, recent_7d_score: float, r
     return clamp(max(base - max_effect, min(base + max_effect, blended)))
 
 
+def shrunk_win_rate(hit_rate_pct: Any, closed_trades: Any) -> float | None:
+    """The 90d win rate pulled toward the population baseline, or None.
+
+    One function so the weight a wallet earns and the probability a position
+    group displays cannot drift apart: both are this number, one rescaled into
+    a weight and the other shown as a percentage. Returns None below
+    RANKING_MIN_90D_CLOSED_TRADES, where the raw rate is noise rather than an
+    estimate - the caller must decide what to do with an unscorable wallet
+    rather than be handed a figure that looks like a measurement.
+    """
+    if hit_rate_pct is None or closed_trades is None:
+        return None
+    sample = max(0, int(to_float(closed_trades)))
+    if sample < RANKING_MIN_90D_CLOSED_TRADES:
+        return None
+    rate = max(0.0, min(to_float(hit_rate_pct), 100.0)) / 100.0
+    wins = rate * sample
+    return (wins + CONVICTION_WIN_RATE_PRIOR_TRADES * CONVICTION_WIN_RATE_BASELINE) / (
+        sample + CONVICTION_WIN_RATE_PRIOR_TRADES
+    )
+
+
+def wallet_shrunk_win_rate(wallet: Any) -> float | None:
+    """The same estimate read off a wallet snapshot."""
+    if not isinstance(wallet, dict):
+        return None
+    return shrunk_win_rate(wallet.get("winRate90d"), wallet.get("closedTrades90d"))
+
+
 def build_wallet_quality_rank(
     hit_rate: float,
     closed_trade_count: int,
@@ -1281,15 +1310,9 @@ def build_wallet_quality_rank(
     # noisy or absent estimate, which is why the key is omitted entirely
     # rather than set to None.
     conviction_win_rate_weight: float | None = None
-    if hit_rate_90d is not None and closed_trade_count_90d is not None:
-        sample_size_90d = max(0, int(to_float(closed_trade_count_90d)))
-        if sample_size_90d >= RANKING_MIN_90D_CLOSED_TRADES:
-            normalized_hit_rate_90d = max(0.0, min(to_float(hit_rate_90d), 100.0))
-            wins_90d = (normalized_hit_rate_90d / 100.0) * sample_size_90d
-            shrunk_win_rate = (
-                wins_90d + CONVICTION_WIN_RATE_PRIOR_TRADES * CONVICTION_WIN_RATE_BASELINE
-            ) / (sample_size_90d + CONVICTION_WIN_RATE_PRIOR_TRADES)
-            conviction_win_rate_weight = clamp(shrunk_win_rate / CONVICTION_WIN_RATE_BASELINE, 0.5, 1.5)
+    shrunk_90d = shrunk_win_rate(hit_rate_90d, closed_trade_count_90d)
+    if shrunk_90d is not None:
+        conviction_win_rate_weight = clamp(shrunk_90d / CONVICTION_WIN_RATE_BASELINE, 0.5, 1.5)
 
     elite_eligible = (
         sample_size_30d >= RANKING_MIN_30D_CLOSED_TRADES
@@ -5944,6 +5967,11 @@ class WalletTrackerService:
                         "entrySum": 0.0,
                         "entryCount": 0,
                         "walletAddresses": set(),
+                        # One estimate per scored member wallet. A list rather than a
+                        # running mean so the best member stays recoverable: a group
+                        # carrying one strong wallet reads very differently from an
+                        # evenly mediocre one.
+                        "qualityRates": [],
                         "recentAddValue": 0.0,
                         "recentAddSize": 0.0,
                         "recentAddWalletAddresses": set(),
@@ -5959,6 +5987,9 @@ class WalletTrackerService:
                     bucket["walletAddresses"].add(address)
                     bucket["walletCount"] += 1
                     bucket["qualityWeight"] += self.wallet_conviction_weight(wallet, coin=coin)
+                    member_rate = wallet_shrunk_win_rate(wallet)
+                    if member_rate is not None:
+                        bucket["qualityRates"].append(member_rate)
                     entry_px = to_float(position.get("entryPx"))
                     if entry_px > 0:
                         bucket["entrySum"] += entry_px
@@ -5993,6 +6024,11 @@ class WalletTrackerService:
                     "side": item["side"],
                     "walletCount": item["walletCount"],
                     "qualityWeight": round(to_float(item["qualityWeight"]), 3),
+                    "qualityWinRatePct": round(100.0 * sum(item["qualityRates"]) / len(item["qualityRates"]), 1)
+                    if item["qualityRates"]
+                    else None,
+                    "qualityBestWinRatePct": round(100.0 * max(item["qualityRates"]), 1) if item["qualityRates"] else None,
+                    "qualityScoredWallets": len(item["qualityRates"]),
                     "positionCount": item["positionCount"],
                     "totalValue": round(item["totalValue"], 2),
                     "totalSize": round(total_size, 8),
@@ -8270,11 +8306,23 @@ class WalletTrackerService:
                         )
                         if is_within_actionable_distance(reference_price, mark_price):
                             actionable_lines.add(len(lines))
+                        # Shown only when at least half the members carry an
+                        # estimate. Below that the mean describes a minority of
+                        # the group while looking like it describes the group,
+                        # which is worse than saying nothing.
+                        quality_note = ""
+                        scored = int(to_float(item.get("qualityScoredWallets")))
+                        mean_pct = item.get("qualityWinRatePct")
+                        best_pct = item.get("qualityBestWinRatePct")
+                        if mean_pct is not None and scored * 2 >= int(item["walletCount"]):
+                            quality_note = f' | quality {to_float(mean_pct):.0f}%'
+                            if best_pct is not None:
+                                quality_note += f' (best {to_float(best_pct):.0f}%)'
                         lines.append(
                             f'- {item["coin"]} {str(item.get("side") or "").upper()}: '
                             f'{item["walletCount"]} wallets{net_note(item)} | '
                             f'{format_money_compact(to_float(item.get("totalValue")))} open'
-                            f'{entry_note}{recent_add_note}'
+                            f'{entry_note}{recent_add_note}{quality_note}'
                         )
                 else:
                     lines.append("- None")

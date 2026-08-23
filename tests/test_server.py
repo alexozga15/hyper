@@ -5094,6 +5094,118 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertNotIn("<b>", message)
         self.assertNotIn("&amp;", message)
 
+    def test_group_quality_is_the_mean_of_its_scored_members(self) -> None:
+        # Shrunk toward the 64.6% baseline with a 20-trade prior: 90% over 100
+        # trades lands at 85.8%, 50% at 52.4%, 60% at 60.8%. Mean 66.3%, best
+        # 85.8% - and the best is the number the mean hides.
+        dashboard = {
+            "wallets": [
+                {
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 70_000}],
+                    "recentFills": [],
+                    "winRate90d": 90,
+                    "closedTrades90d": 100,
+                },
+                {
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 70_000}],
+                    "recentFills": [],
+                    "winRate90d": 50,
+                    "closedTrades90d": 100,
+                },
+                {
+                    "address": "0x3333333333333333333333333333333333333333",
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 70_000}],
+                    "recentFills": [],
+                    "winRate90d": 60,
+                    "closedTrades90d": 100,
+                },
+            ]
+        }
+
+        message = self.service.build_positions_message(dashboard)
+
+        self.assertIn("quality 66% (best 86%)", message)
+
+    def test_a_wallet_below_the_90d_minimum_does_not_score_the_group(self) -> None:
+        # Two scored members out of three still describes a majority, so the
+        # note stays - but the unscorable wallet must not drag a number in.
+        dashboard = {
+            "wallets": [
+                {
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 70_000}],
+                    "recentFills": [],
+                    "winRate90d": 90,
+                    "closedTrades90d": 100,
+                },
+                {
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 70_000}],
+                    "recentFills": [],
+                    "winRate90d": 50,
+                    "closedTrades90d": 100,
+                },
+                {
+                    "address": "0x3333333333333333333333333333333333333333",
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 70_000}],
+                    "recentFills": [],
+                    "winRate90d": 100,
+                    "closedTrades90d": 3,
+                },
+            ]
+        }
+
+        message = self.service.build_positions_message(dashboard)
+
+        self.assertIn("quality 69% (best 86%)", message)
+
+    def test_quality_is_withheld_when_most_of_the_group_is_unscorable(self) -> None:
+        # One estimate out of three would describe a minority while looking
+        # like it describes the group.
+        dashboard = {
+            "wallets": [
+                {
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 70_000}],
+                    "recentFills": [],
+                    "winRate90d": 90,
+                    "closedTrades90d": 100,
+                },
+                {
+                    "address": "0x2222222222222222222222222222222222222222",
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 70_000}],
+                    "recentFills": [],
+                },
+                {
+                    "address": "0x3333333333333333333333333333333333333333",
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 70_000}],
+                    "recentFills": [],
+                },
+            ]
+        }
+
+        message = self.service.build_positions_message(dashboard)
+
+        self.assertIn("- BTC LONG:", message)
+        self.assertNotIn("quality", message)
+
+    def test_the_displayed_rate_and_the_conviction_weight_share_one_estimator(self) -> None:
+        # If these ever diverge the board would advertise a probability the
+        # signal is not actually weighting on.
+        rate = server.shrunk_win_rate(90.0, 100)
+        rank = server.build_wallet_quality_rank(
+            70.0, 20, 1000.0, 1_000_000.0,
+            hit_rate_30d=70.0, closed_trade_count_30d=20, pnl_30d=1000.0,
+            hit_rate_90d=90.0, closed_trade_count_90d=100,
+        )
+        self.assertAlmostEqual(
+            rank["convictionWinRateWeight"],
+            round(rate / server.CONVICTION_WIN_RATE_BASELINE, 3),
+            places=3,
+        )
+
     def test_build_positions_message_includes_recent_add_vwap(self) -> None:
         now_ms = 1_700_000_000_000
         dashboard = {
