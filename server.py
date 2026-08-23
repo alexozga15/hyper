@@ -450,6 +450,20 @@ WALLET_WINDOW_FILL_CAP = int(float(os.environ.get("WALLET_WINDOW_FILL_CAP", 2000
 # the tracked set a full sweep goes from 137 pages to 172, and the refresh
 # rotation spreads that over three wallets per cycle.
 FILL_HISTORY_MAX_PAGES = int(os.environ.get("FILL_HISTORY_MAX_PAGES", "30"))
+# A paged walk is all-or-nothing: one failed page discards every page already
+# collected, so the failure probability compounds with page count and the
+# busiest wallets - the ones needing the most pages - are the ones that can
+# never finish. Measured on production after the quality window widened to 90
+# days: the three heaviest tracked wallets failed every refresh for eight
+# hours while lighter ones succeeded, with runtime health reporting exactly
+# three fillsFetchFailedWallets against 21 throttle events and 12.97s of
+# backoff. Each of the three refreshed on the first try when run alone.
+# Retrying the page restores parity; the delay also lets the shared rate
+# limiter's penalty decay before the next attempt.
+FILL_HISTORY_PAGE_RETRY_ATTEMPTS = int(os.environ.get("FILL_HISTORY_PAGE_RETRY_ATTEMPTS", "3"))
+FILL_HISTORY_PAGE_RETRY_DELAY_SECONDS = float(
+    os.environ.get("FILL_HISTORY_PAGE_RETRY_DELAY_SECONDS", "0.5")
+)
 WALLET_LIVE_FILL_SKIP_MAX = int(float(os.environ.get("WALLET_LIVE_FILL_SKIP_MAX", 1600)))
 WALLET_CACHED_QUALITY_FIELDS = (
     "role",
@@ -2054,7 +2068,9 @@ class WalletTrackerService:
         cursor = int(start_time)
         pages = 0
         while pages < max_pages:
-            result = self.fetch_twap_slice_fills_result(address, cursor)
+            result = self.fetch_page_with_retry(
+                lambda cursor=cursor: self.fetch_twap_slice_fills_result(address, cursor)
+            )
             if not result.get("ok"):
                 return {
                     "ok": False,
@@ -2085,6 +2101,22 @@ class WalletTrackerService:
                 return {"ok": True, "data": collected, "error": "", "truncated": truncated, "pages": pages}
             cursor = newest
         return {"ok": True, "data": collected, "error": "", "truncated": True, "pages": pages}
+
+    def fetch_page_with_retry(self, fetch: Any) -> dict[str, Any]:
+        """Retry one page of a paged walk before it kills the whole walk.
+
+        See FILL_HISTORY_PAGE_RETRY_ATTEMPTS for why a per-page retry is what
+        this needs rather than a bigger page budget: the walk was failing on
+        transient throttling, not on running out of pages.
+        """
+        result = fetch()
+        for attempt in range(1, max(1, FILL_HISTORY_PAGE_RETRY_ATTEMPTS)):
+            if result.get("ok"):
+                return result
+            if FILL_HISTORY_PAGE_RETRY_DELAY_SECONDS > 0:
+                time.sleep(FILL_HISTORY_PAGE_RETRY_DELAY_SECONDS * attempt)
+            result = fetch()
+        return result
 
     def fetch_fills_paginated_result(
         self,
@@ -2126,7 +2158,9 @@ class WalletTrackerService:
         while pages < max_pages:
             # Delegates rather than issuing its own request, so there is one
             # place that knows how a windowed page is asked for.
-            result = self.fetch_fills_result(address, cursor)
+            result = self.fetch_page_with_retry(
+                lambda cursor=cursor: self.fetch_fills_result(address, cursor)
+            )
             if not result.get("ok"):
                 return {
                     "ok": False,
