@@ -94,8 +94,10 @@ class OperationalControlTests(unittest.TestCase):
                 }
             ]
         )
-        self.assertEqual(reviews["0xweak"]["weight"], 0.5)
-        self.assertIn("negative_30d_pnl", reviews["0xweak"]["reasons"])
+        # Flagged on realised performance only, which the conviction score
+        # already reads and reads better - so it is reported, not penalised.
+        self.assertEqual(reviews["0xweak"]["weight"], 1.0)
+        self.assertIn("negative_30d_pnl", reviews["0xweak"]["notes"])
 
     def test_wallet_review_skips_pnl_reasons_for_a_capped_fill_window(self) -> None:
         """A qualityWindowTruncated wallet's 30d PnL/profit-factor may describe
@@ -145,8 +147,8 @@ class OperationalControlTests(unittest.TestCase):
             ],
             stats,
         )
-        self.assertIn("negative_30d_pnl", reviews["0xcappedwellcovered"]["reasons"])
-        self.assertIn("profit_factor_below_1", reviews["0xcappedwellcovered"]["reasons"])
+        self.assertIn("negative_30d_pnl", reviews["0xcappedwellcovered"]["notes"])
+        self.assertIn("profit_factor_below_1", reviews["0xcappedwellcovered"]["notes"])
         self.assertEqual(stats["skippedCappedWindow"], 0)
 
     def test_wallet_review_distrusts_a_capped_window_with_no_coverage_evidence(self) -> None:
@@ -193,7 +195,7 @@ class OperationalControlTests(unittest.TestCase):
                 }
             ]
         )
-        self.assertIn("negative_30d_pnl", reviews["0xnoflag"]["reasons"])
+        self.assertIn("negative_30d_pnl", reviews["0xnoflag"]["notes"])
 
     def test_wallet_review_suppresses_realised_loss_covered_by_open_profit(self) -> None:
         """negative_30d_pnl/profit_factor_below_1 read qualityNetPnl30d/
@@ -241,8 +243,8 @@ class OperationalControlTests(unittest.TestCase):
             ],
             stats,
         )
-        self.assertIn("negative_30d_pnl", reviews["0xstillloser"]["reasons"])
-        self.assertIn("profit_factor_below_1", reviews["0xstillloser"]["reasons"])
+        self.assertIn("negative_30d_pnl", reviews["0xstillloser"]["notes"])
+        self.assertIn("profit_factor_below_1", reviews["0xstillloser"]["notes"])
         self.assertEqual(stats["suppressedByOpenProfit"], 0)
 
     def test_wallet_review_treats_missing_positions_key_as_no_open_pnl(self) -> None:
@@ -264,8 +266,8 @@ class OperationalControlTests(unittest.TestCase):
             ],
             stats,
         )
-        self.assertIn("negative_30d_pnl", reviews["0xnopositions"]["reasons"])
-        self.assertIn("profit_factor_below_1", reviews["0xnopositions"]["reasons"])
+        self.assertIn("negative_30d_pnl", reviews["0xnopositions"]["notes"])
+        self.assertIn("profit_factor_below_1", reviews["0xnopositions"]["notes"])
         self.assertEqual(stats["suppressedByOpenProfit"], 0)
 
     def test_wallet_review_profit_factor_alone_is_also_suppressed_by_open_profit(self) -> None:

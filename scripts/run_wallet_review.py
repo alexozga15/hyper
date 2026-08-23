@@ -149,15 +149,18 @@ def evaluate_wallets(
         if wallet.get("reviewWeightMultiplier") == 0:
             reasons.append("manual_exclusion")
         if reasons:
-            # Carried so the review states what the signal actually weights
-            # this wallet on, next to the reasons it is being penalised for.
-            # The two do not always agree, and the disagreement is the useful
-            # part: a wallet can be flagged on 30d PnL while its win rate sits
-            # at the middle of the tracked set.
+            # "reasons" stays the list the weight is justified by, because that
+            # is the pair server.py reads back. Everything observed but not
+            # acted on goes to "notes" instead, so a wallet can be reported
+            # without being penalised.
             quality_rate = wallet_shrunk_win_rate(wallet)
+            observed = set(reasons)
+            penalising = sorted(observed & PENALISING_REVIEW_REASONS)
+            noted = sorted(observed - PENALISING_REVIEW_REASONS)
             reviews[address] = {
-                "weight": 0.5,
-                "reasons": sorted(set(reasons)),
+                "weight": 0.5 if penalising else 1.0,
+                "reasons": penalising,
+                "notes": noted,
                 "qualityWinRatePct": (
                     round(100.0 * quality_rate, 1) if quality_rate is not None else None
                 ),
@@ -186,19 +189,61 @@ def evaluate_wallets(
     return reviews
 
 
+# Reasons that actually reduce a wallet's weight. All three describe something
+# structural about how the wallet trades, which the conviction score cannot see
+# at all: it reads closed round trips, so an inventory-churning market maker, a
+# wallet that has stopped trading, and one excluded by hand all look ordinary to
+# it.
+#
+# The performance reasons - negative_30d_pnl and profit_factor_below_1 -
+# deliberately are not here. The score already reads the same history, and reads
+# it better: measured against whether an individual position closes in profit,
+# 30-day PnL reaches AUC 0.561 and profit factor 0.635, against 0.692 for the
+# 90-day win rate the score is built on. Penalising on them applied the weaker
+# evidence twice and with a heavier lever - a flat halving, wider than the score's
+# own 0.5-1.5 range - which is how three wallets sitting at or above the
+# tracked-set median came to be running at half weight. They are still reported,
+# just no longer acted on.
+PENALISING_REVIEW_REASONS = frozenset(
+    {"market_maker_fill_rate", "inactive", "manual_exclusion"}
+)
+
+
+def penalised_reviews(reviews: dict) -> dict:
+    """The wallets whose weight this review actually reduces."""
+    return {a: r for a, r in reviews.items() if to_float(r.get("weight", 1.0)) < 1.0}
+
+
+def noted_reviews(reviews: dict) -> dict:
+    """Wallets with something worth reporting that does not change their weight."""
+    return {
+        a: r
+        for a, r in reviews.items()
+        if to_float(r.get("weight", 1.0)) >= 1.0 and r.get("notes")
+    }
+
+
 def format_review_line(address: str, review: dict) -> str:
     """One penalised wallet as it appears in the weekly review message.
 
     The address is never abbreviated - these lines are read to be pasted into
     Hyperdash and block explorers, and an abbreviation cannot be. The quality
-    figure is the same estimate the signal weights on, shown next to the
-    reasons the wallet is being penalised for, because the two do not always
-    agree and the disagreement is the useful part.
+    figure is the estimate the signal weights on, shown next to the reasons the
+    wallet is being penalised for.
     """
     quality_pct = review.get("qualityWinRatePct")
     quality_note = "" if quality_pct is None else f", quality {to_float(quality_pct):.0f}%"
+    weight = to_float(review.get("weight", 1.0))
     reasons = ", ".join(review.get("reasons", []))
-    return f"- {address}: 0.5{quality_note} ({reasons})"
+    return f"- {address}: {weight:g}{quality_note} ({reasons})"
+
+
+def format_noted_line(address: str, review: dict) -> str:
+    """One wallet that was flagged but left at full weight."""
+    quality_pct = review.get("qualityWinRatePct")
+    quality_note = "" if quality_pct is None else f"quality {to_float(quality_pct):.0f}% "
+    notes = ", ".join(review.get("notes", []))
+    return f"- {address}: {quality_note}({notes})"
 
 
 def main() -> int:
@@ -210,7 +255,8 @@ def main() -> int:
         "version": 1,
         "generatedAt": now_iso(),
         "walletCount": len(dashboard.get("wallets", [])),
-        "reviewCount": len(reviews),
+        "reviewCount": len(penalised_reviews(reviews)),
+        "notedCount": len(noted_reviews(reviews)),
         "skippedCappedWindowCount": review_stats.get("skippedCappedWindow", 0),
         "suppressedByOpenProfitCount": review_stats.get("suppressedByOpenProfit", 0),
         "marketMakerCount": review_stats.get("marketMakerWallets", 0),
@@ -234,8 +280,14 @@ def main() -> int:
             f"Suppressed (open profit offsets realised loss): {payload['suppressedByOpenProfitCount']}",
             f"Market maker fill rate: {payload['marketMakerCount']}",
         ]
-        for address, review in list(reviews.items())[:10]:
+        for address, review in list(penalised_reviews(reviews).items())[:10]:
             lines.append(format_review_line(address, review))
+        noted = noted_reviews(reviews)
+        if noted:
+            lines.append("")
+            lines.append(f"Noted, weight unchanged: {len(noted)}")
+            for address, review in list(noted.items())[:10]:
+                lines.append(format_noted_line(address, review))
         service.send_telegram_message(bot_token, chat_id, "\n".join(lines))
     print(json.dumps(payload, indent=2))
     return 0
