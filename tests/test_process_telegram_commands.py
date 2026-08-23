@@ -193,7 +193,7 @@ class DispatchUpdateTests(unittest.TestCase):
                 self.kwargs = kwargs
                 return "summary"
 
-            def build_positions_message(self, dashboard) -> str:
+            def build_positions_message(self, dashboard, **kwargs) -> str:
                 return "positions"
 
         service = FakeService()
@@ -242,7 +242,9 @@ class DispatchUpdateTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.send_count = 0
 
-            def send_telegram_message(self, bot_token: str, chat_id: str, reply: str) -> None:
+            def send_telegram_message(
+                self, bot_token: str, chat_id: str, reply: str, **kwargs
+            ) -> None:
                 self.send_count += 1
                 if self.send_count == 2:
                     raise ValueError("telegram down")
@@ -289,7 +291,9 @@ class DispatchUpdateTests(unittest.TestCase):
             def build_position_wallets_message(self, dashboard: dict, coin: str, side: str) -> str:
                 return f"{coin} {side} reply"
 
-            def send_telegram_message(self, bot_token: str, chat_id: str, reply: str) -> None:
+            def send_telegram_message(
+                self, bot_token: str, chat_id: str, reply: str, **kwargs
+            ) -> None:
                 self.sent_reply = reply
 
         fake_service = FakeService()

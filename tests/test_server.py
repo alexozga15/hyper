@@ -4976,6 +4976,124 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertNotIn("BTC long", message)
         self.assertIn("Summary: 0 groups, 0 pos", message)
 
+    def test_a_group_still_at_its_recent_add_price_renders_bold(self) -> None:
+        # Value over size puts the mark at $100,000, and the wallets added
+        # there too, so this group is still enterable where they entered.
+        now_ms = 1_700_000_000_000
+        dashboard = {
+            "wallets": [
+                {
+                    "address": "0x%s" % ("1" * 40),
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 70000}],
+                    "recentFills": [{"coin": "BTC", "direction": "Open Long", "price": 100000, "size": 1, "time": now_ms - 60_000}],
+                },
+                {
+                    "address": "0x%s" % ("2" * 40),
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 70000}],
+                    "recentFills": [{"coin": "BTC", "direction": "Open Long", "price": 100000, "size": 1, "time": now_ms - 60_000}],
+                },
+                {
+                    "address": "0x%s" % ("3" * 40),
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 70000}],
+                    "recentFills": [{"coin": "BTC", "direction": "Open Long", "price": 100000, "size": 1, "time": now_ms - 60_000}],
+                },
+            ]
+        }
+
+        with patch("server.current_time_ms", return_value=now_ms):
+            message = self.service.build_positions_message(dashboard, html=True)
+
+        self.assertIn("<b>- BTC LONG:", message)
+
+    def test_a_group_whose_price_ran_away_is_not_bold(self) -> None:
+        # Mark $100,000 against a $90,000 add price is 11% away - the move has
+        # already happened.
+        now_ms = 1_700_000_000_000
+        dashboard = {
+            "wallets": [
+                {
+                    "address": "0x%s" % ("1" * 40),
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 70000}],
+                    "recentFills": [{"coin": "BTC", "direction": "Open Long", "price": 90000, "size": 1, "time": now_ms - 60_000}],
+                },
+                {
+                    "address": "0x%s" % ("2" * 40),
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 70000}],
+                    "recentFills": [{"coin": "BTC", "direction": "Open Long", "price": 90000, "size": 1, "time": now_ms - 60_000}],
+                },
+                {
+                    "address": "0x%s" % ("3" * 40),
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 70000}],
+                    "recentFills": [{"coin": "BTC", "direction": "Open Long", "price": 90000, "size": 1, "time": now_ms - 60_000}],
+                },
+            ]
+        }
+
+        with patch("server.current_time_ms", return_value=now_ms):
+            message = self.service.build_positions_message(dashboard, html=True)
+
+        self.assertIn("- BTC LONG:", message)
+        self.assertNotIn("<b>- BTC LONG:", message)
+
+    def test_a_group_without_recent_adds_falls_back_to_its_entry(self) -> None:
+        # No 7d add price, so the group's own entry is the reference.
+        now_ms = 1_700_000_000_000
+        dashboard = {
+            "wallets": [
+                {
+                    "address": "0x%s" % ("1" * 40),
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 100000}],
+                    "recentFills": [],
+                },
+                {
+                    "address": "0x%s" % ("2" * 40),
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 100000}],
+                    "recentFills": [],
+                },
+                {
+                    "address": "0x%s" % ("3" * 40),
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 100000}],
+                    "recentFills": [],
+                },
+            ]
+        }
+
+        with patch("server.current_time_ms", return_value=now_ms):
+            message = self.service.build_positions_message(dashboard, html=True)
+
+        self.assertIn("<b>- BTC LONG:", message)
+
+    def test_the_positions_message_carries_no_markup_unless_asked(self) -> None:
+        # Every caller that is not sending HTML - the command replies other
+        # than /update among them - must keep getting plain text, or Telegram
+        # shows the tags verbatim.
+        now_ms = 1_700_000_000_000
+        dashboard = {
+            "wallets": [
+                {
+                    "address": "0x%s" % ("1" * 40),
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 70000}],
+                    "recentFills": [{"coin": "BTC", "direction": "Open Long", "price": 100000, "size": 1, "time": now_ms - 60_000}],
+                },
+                {
+                    "address": "0x%s" % ("2" * 40),
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 70000}],
+                    "recentFills": [{"coin": "BTC", "direction": "Open Long", "price": 100000, "size": 1, "time": now_ms - 60_000}],
+                },
+                {
+                    "address": "0x%s" % ("3" * 40),
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 70000}],
+                    "recentFills": [{"coin": "BTC", "direction": "Open Long", "price": 100000, "size": 1, "time": now_ms - 60_000}],
+                },
+            ]
+        }
+
+        with patch("server.current_time_ms", return_value=now_ms):
+            message = self.service.build_positions_message(dashboard)
+
+        self.assertNotIn("<b>", message)
+        self.assertNotIn("&amp;", message)
+
     def test_build_positions_message_includes_recent_add_vwap(self) -> None:
         now_ms = 1_700_000_000_000
         dashboard = {

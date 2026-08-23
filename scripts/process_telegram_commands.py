@@ -228,6 +228,13 @@ def load_updates(service: WalletTrackerService, bot_token: str, last_update_id: 
         raise
 
 
+# Commands whose reply carries markup, and so must be sent with HTML parse
+# mode. Every other reply stays plain text: under HTML mode a stray '&' or '<'
+# anywhere in a reply makes Telegram reject the whole message, and most replies
+# here are assembled from sources that never pass through escaping.
+HTML_REPLY_COMMANDS = {"/update"}
+
+
 def build_reply(
     service: WalletTrackerService,
     command: str,
@@ -253,8 +260,9 @@ def build_reply(
                     include_signals=False,
                     include_footer=False,
                     include_data_health=False,
+                    html=True,
                 ),
-                service.build_positions_message(dashboard_cache),
+                service.build_positions_message(dashboard_cache, html=True),
             ]
         )
     if command == "/sentiment":
@@ -473,7 +481,12 @@ def main() -> int:
             trades_query=trades_query,
         )
 
-        service.send_telegram_message(bot_token, chat_id, reply)
+        service.send_telegram_message(
+            bot_token,
+            chat_id,
+            reply,
+            parse_mode="HTML" if command in HTML_REPLY_COMMANDS else None,
+        )
         latest_seen = max(latest_seen, update_id)
         if latest_seen != last_update_id:
             save_json_file(TELEGRAM_STATE_FILE, {"lastUpdateId": latest_seen})

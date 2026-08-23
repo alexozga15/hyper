@@ -6,6 +6,7 @@ from unittest.mock import patch
 from scripts.run_health_monitor import detect_health_issues
 from server import (
     HOLDING_ONLY_WINDOW_MS,
+    WALLET_QUALITY_WINDOW_DAYS,
     QUALITY_WINDOW_MIN_COVERAGE_MS,
     WALLET_IDLE_FILL_THRESHOLD_MS,
     WALLET_LIVE_FILL_SKIP_MAX,
@@ -338,7 +339,7 @@ class QualityWindowCoverageTests(unittest.TestCase):
         ]
 
     def test_narrow_capped_page_has_low_coverage_and_is_untrusted(self) -> None:
-        fills_start_ms = NOW_MS - HOLDING_ONLY_WINDOW_MS
+        fills_start_ms = NOW_MS - WALLET_QUALITY_WINDOW_DAYS * 24 * 60 * 60 * 1000
         newest_fill_ms = fills_start_ms + 2 * 60 * 60 * 1000  # 2h into the window
         snapshot = self.snapshot(page=self.capped_page(newest_fill_ms=newest_fill_ms))
         self.assertTrue(snapshot["qualityWindowTruncated"])
@@ -348,7 +349,7 @@ class QualityWindowCoverageTests(unittest.TestCase):
         self.assertFalse(snapshot["recentWinRateRank"]["windowTrusted"])
 
     def test_well_covered_capped_page_is_trusted(self) -> None:
-        fills_start_ms = NOW_MS - HOLDING_ONLY_WINDOW_MS
+        fills_start_ms = NOW_MS - WALLET_QUALITY_WINDOW_DAYS * 24 * 60 * 60 * 1000
         newest_fill_ms = fills_start_ms + 25 * 24 * 60 * 60 * 1000  # 25d into the window
         snapshot = self.snapshot(page=self.capped_page(newest_fill_ms=newest_fill_ms))
         self.assertTrue(snapshot["qualityWindowTruncated"])
