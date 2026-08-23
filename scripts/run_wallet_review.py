@@ -20,6 +20,7 @@ from server import (
     save_json_file,
     to_float,
     wallet_quality_window_trusted,
+    wallet_shrunk_win_rate,
 )
 
 # A wallet whose fills are inventory turnover rather than directional
@@ -148,7 +149,19 @@ def evaluate_wallets(
         if wallet.get("reviewWeightMultiplier") == 0:
             reasons.append("manual_exclusion")
         if reasons:
-            reviews[address] = {"weight": 0.5, "reasons": sorted(set(reasons))}
+            # Carried so the review states what the signal actually weights
+            # this wallet on, next to the reasons it is being penalised for.
+            # The two do not always agree, and the disagreement is the useful
+            # part: a wallet can be flagged on 30d PnL while its win rate sits
+            # at the middle of the tracked set.
+            quality_rate = wallet_shrunk_win_rate(wallet)
+            reviews[address] = {
+                "weight": 0.5,
+                "reasons": sorted(set(reasons)),
+                "qualityWinRatePct": (
+                    round(100.0 * quality_rate, 1) if quality_rate is not None else None
+                ),
+            }
 
     ordered = sorted(
         wallets,
@@ -171,6 +184,21 @@ def evaluate_wallets(
         stats["suppressedByOpenProfit"] = suppressed_by_open_profit
         stats["marketMakerWallets"] = market_maker_wallets
     return reviews
+
+
+def format_review_line(address: str, review: dict) -> str:
+    """One penalised wallet as it appears in the weekly review message.
+
+    The address is never abbreviated - these lines are read to be pasted into
+    Hyperdash and block explorers, and an abbreviation cannot be. The quality
+    figure is the same estimate the signal weights on, shown next to the
+    reasons the wallet is being penalised for, because the two do not always
+    agree and the disagreement is the useful part.
+    """
+    quality_pct = review.get("qualityWinRatePct")
+    quality_note = "" if quality_pct is None else f", quality {to_float(quality_pct):.0f}%"
+    reasons = ", ".join(review.get("reasons", []))
+    return f"- {address}: 0.5{quality_note} ({reasons})"
 
 
 def main() -> int:
@@ -207,7 +235,7 @@ def main() -> int:
             f"Market maker fill rate: {payload['marketMakerCount']}",
         ]
         for address, review in list(reviews.items())[:10]:
-            lines.append(f"- {address[:6]}...{address[-4:]}: 0.5 ({', '.join(review['reasons'])})")
+            lines.append(format_review_line(address, review))
         service.send_telegram_message(bot_token, chat_id, "\n".join(lines))
     print(json.dumps(payload, indent=2))
     return 0
