@@ -76,6 +76,58 @@ def recent_fill_rate_per_min(wallet: dict[str, Any]) -> float:
     return count / (coverage_ms / 60000.0)
 
 
+def fill_rate_window_capped(wallet: dict[str, Any]) -> bool:
+    # When recentFillCount/fillCoverageMs are truncated (recentFillsTruncated),
+    # the window recent_fill_rate_per_min divides over stops at
+    # WALLET_WINDOW_FILL_CAP (2000) fills rather than the full 30 days, so the
+    # computed rate is a floor on the true rate, not a measurement of it.
+    # Measured across all tracked wallets from full 30-day API walks: the
+    # highest rate any wallet reaches on this metric is 1.26 fills/min against
+    # the 10/min threshold, and a wallet the user manually confirmed as
+    # algorithmic/market-making scored 0.09 fills/min - lower than nine
+    # wallets kept at full weight. No threshold on this metric separates that
+    # wallet, capped window or not, which is why this is surfaced as a note
+    # rather than used to calibrate the check.
+    quality = wallet.get("dataQuality")
+    if not isinstance(quality, dict):
+        return False
+    return bool(quality.get("recentFillsTruncated"))
+
+
+def fills_per_closed_position(wallet: dict[str, Any]) -> float | None:
+    # The statistic that does rank a confirmed algorithmic wallet highly.
+    # Deliberately not gated or thresholded - two confirmed labels cannot
+    # calibrate a classifier, so this is reported for a human to judge rather
+    # than acted on automatically.
+    raw_fill_count = wallet.get("qualityWindowFillCount")
+    raw_closed = wallet.get("qualityClosedEvents30d")
+    if not isinstance(raw_fill_count, (int, float)) or isinstance(raw_fill_count, bool):
+        return None
+    if not isinstance(raw_closed, (int, float)) or isinstance(raw_closed, bool):
+        return None
+    closed = to_float(raw_closed)
+    if closed == 0:
+        return None
+    return to_float(raw_fill_count) / closed
+
+
+def highest_fill_to_close_wallets(
+    wallets: list[dict[str, Any]], limit: int = 5
+) -> list[dict[str, Any]]:
+    scored = []
+    for wallet in wallets:
+        ratio = fills_per_closed_position(wallet)
+        if ratio is None:
+            continue
+        address = str(wallet.get("address") or "").lower()
+        scored.append((address, ratio))
+    scored.sort(key=lambda item: item[1], reverse=True)
+    return [
+        {"address": address, "fillsPerClosedPosition": round(ratio, 1)}
+        for address, ratio in scored[:limit]
+    ]
+
+
 def evaluate_wallets(
     wallets: list[dict[str, Any]], stats: dict[str, int] | None = None
 ) -> dict[str, dict[str, Any]]:
@@ -87,6 +139,7 @@ def evaluate_wallets(
     skipped_capped_window = 0
     suppressed_by_open_profit = 0
     market_maker_wallets = 0
+    capped_fill_window = 0
     for wallet in wallets:
         address = str(wallet.get("address") or "").lower()
         reasons: list[str] = []
@@ -144,6 +197,16 @@ def evaluate_wallets(
         if fill_rate >= MARKET_MAKER_FILLS_PER_MIN:
             reasons.append("market_maker_fill_rate")
             market_maker_wallets += 1
+        # Reported independent of whether market_maker_fill_rate tripped: a
+        # capped window is a fact about the measurement, not a verdict, and
+        # this metric has never separated the one confirmed algorithmic
+        # wallet from ordinary ones (see fill_rate_window_capped). Skipped as
+        # a note only when market_maker_fill_rate already fired, since that
+        # reason already tells the reader the window was capped.
+        if fill_rate_window_capped(wallet):
+            capped_fill_window += 1
+            if "market_maker_fill_rate" not in reasons:
+                reasons.append("fill_rate_window_capped")
         if wallet.get("holdingOnly30d") or to_float(wallet.get("daysSinceLastFill")) > 30:
             reasons.append("inactive")
         if wallet.get("reviewWeightMultiplier") == 0:
@@ -157,7 +220,7 @@ def evaluate_wallets(
             observed = set(reasons)
             penalising = sorted(observed & PENALISING_REVIEW_REASONS)
             noted = sorted(observed - PENALISING_REVIEW_REASONS)
-            reviews[address] = {
+            entry = {
                 "weight": 0.5 if penalising else 1.0,
                 "reasons": penalising,
                 "notes": noted,
@@ -165,6 +228,10 @@ def evaluate_wallets(
                     round(100.0 * quality_rate, 1) if quality_rate is not None else None
                 ),
             }
+            fills_ratio = fills_per_closed_position(wallet)
+            if fills_ratio is not None:
+                entry["fillsPerClosedPosition"] = round(fills_ratio, 1)
+            reviews[address] = entry
 
     ordered = sorted(
         wallets,
@@ -186,6 +253,7 @@ def evaluate_wallets(
         stats["skippedCappedWindow"] = skipped_capped_window
         stats["suppressedByOpenProfit"] = suppressed_by_open_profit
         stats["marketMakerWallets"] = market_maker_wallets
+        stats["cappedFillWindow"] = capped_fill_window
     return reviews
 
 
@@ -260,6 +328,10 @@ def main() -> int:
         "skippedCappedWindowCount": review_stats.get("skippedCappedWindow", 0),
         "suppressedByOpenProfitCount": review_stats.get("suppressedByOpenProfit", 0),
         "marketMakerCount": review_stats.get("marketMakerWallets", 0),
+        "cappedFillWindowCount": review_stats.get("cappedFillWindow", 0),
+        "highestFillToCloseWallets": highest_fill_to_close_wallets(
+            dashboard.get("wallets", [])
+        ),
         "wallets": reviews,
     }
     previous = {}
@@ -278,7 +350,8 @@ def main() -> int:
             f"Tracked: {payload['walletCount']} | Reduced weight: {payload['reviewCount']}",
             f"Skipped (capped fill window): {payload['skippedCappedWindowCount']}",
             f"Suppressed (open profit offsets realised loss): {payload['suppressedByOpenProfitCount']}",
-            f"Market maker fill rate: {payload['marketMakerCount']}",
+            f"Market maker fill rate: {payload['marketMakerCount']} | "
+            f"fill window capped: {payload['cappedFillWindowCount']}",
         ]
         for address, review in list(penalised_reviews(reviews).items())[:10]:
             lines.append(format_review_line(address, review))
@@ -288,6 +361,12 @@ def main() -> int:
             lines.append(f"Noted, weight unchanged: {len(noted)}")
             for address, review in list(noted.items())[:10]:
                 lines.append(format_noted_line(address, review))
+        highest_fill_to_close = payload["highestFillToCloseWallets"]
+        if highest_fill_to_close:
+            lines.append("")
+            lines.append("Highest fills per closed position:")
+            for entry in highest_fill_to_close:
+                lines.append(f"- {entry['address']} {entry['fillsPerClosedPosition']:.0f}")
         service.send_telegram_message(bot_token, chat_id, "\n".join(lines))
     print(json.dumps(payload, indent=2))
     return 0
