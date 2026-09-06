@@ -82,3 +82,99 @@ class PenaltyScopeTests(unittest.TestCase):
         }
         self.assertEqual(len(review.penalised_reviews(reviews)), 1)
         self.assertEqual(len(review.noted_reviews(reviews)), 1)
+
+
+class FillsPerClosedPositionTests(unittest.TestCase):
+    def test_returns_the_ratio_for_a_normal_wallet(self) -> None:
+        wallet = {"qualityWindowFillCount": 620, "qualityClosedEvents30d": 31}
+        self.assertAlmostEqual(review.fills_per_closed_position(wallet), 20.0)
+
+    def test_none_when_closed_events_is_zero(self) -> None:
+        wallet = {"qualityWindowFillCount": 620, "qualityClosedEvents30d": 0}
+        self.assertIsNone(review.fills_per_closed_position(wallet))
+
+    def test_none_when_closed_events_is_missing(self) -> None:
+        wallet = {"qualityWindowFillCount": 620}
+        self.assertIsNone(review.fills_per_closed_position(wallet))
+
+    def test_none_when_closed_events_is_non_numeric(self) -> None:
+        wallet = {"qualityWindowFillCount": 620, "qualityClosedEvents30d": "n/a"}
+        self.assertIsNone(review.fills_per_closed_position(wallet))
+
+    def test_none_when_fill_count_is_missing_or_non_numeric(self) -> None:
+        self.assertIsNone(
+            review.fills_per_closed_position({"qualityClosedEvents30d": 31})
+        )
+        self.assertIsNone(
+            review.fills_per_closed_position(
+                {"qualityWindowFillCount": "n/a", "qualityClosedEvents30d": 31}
+            )
+        )
+
+
+class FillRateWindowCappedTests(unittest.TestCase):
+    def test_true_when_truncated_flag_is_set(self) -> None:
+        wallet = {"dataQuality": {"recentFillsTruncated": True}}
+        self.assertTrue(review.fill_rate_window_capped(wallet))
+
+    def test_false_when_truncated_flag_is_absent_or_false(self) -> None:
+        self.assertFalse(review.fill_rate_window_capped({"dataQuality": {}}))
+        self.assertFalse(
+            review.fill_rate_window_capped({"dataQuality": {"recentFillsTruncated": False}})
+        )
+
+    def test_false_when_data_quality_is_missing_or_not_a_dict(self) -> None:
+        self.assertFalse(review.fill_rate_window_capped({}))
+        self.assertFalse(review.fill_rate_window_capped({"dataQuality": "n/a"}))
+
+
+class EvaluateWalletsFillVisibilityTests(unittest.TestCase):
+    A = "0x63d417a577b50c96f4f09148d4e4d70950db0522"
+    B = "0x" + "2" * 40
+
+    def test_capped_window_without_market_maker_reason_becomes_a_note(self) -> None:
+        wallet = {
+            "address": self.A,
+            "dataQuality": {"recentFillsTruncated": True},
+            "holdingOnly30d": True,  # forces a reasons entry so it appears in reviews
+        }
+        reviews = review.evaluate_wallets([wallet])
+        entry = reviews[self.A]
+        self.assertIn("fill_rate_window_capped", entry["notes"])
+        self.assertNotIn("fill_rate_window_capped", entry["reasons"])
+        self.assertNotIn("market_maker_fill_rate", entry["reasons"])
+
+    def test_market_maker_reason_suppresses_the_capped_note(self) -> None:
+        wallet = {
+            "address": self.B,
+            "dataQuality": {
+                "recentFillsTruncated": True,
+                "recentFillCount": 3000,
+                "fillCoverageMs": 60000,  # 3000/min, well above the 10/min threshold
+            },
+        }
+        reviews = review.evaluate_wallets([wallet])
+        entry = reviews[self.B]
+        self.assertIn("market_maker_fill_rate", entry["reasons"])
+        self.assertNotIn("fill_rate_window_capped", entry["notes"])
+        self.assertNotIn("fill_rate_window_capped", entry["reasons"])
+
+
+class HighestFillToCloseWalletsTests(unittest.TestCase):
+    def test_sorted_descending_capped_at_five_with_full_addresses(self) -> None:
+        wallets = [
+            {
+                "address": f"0x{'%040d' % i}",
+                "qualityWindowFillCount": (i + 1) * 100,
+                "qualityClosedEvents30d": 10,
+            }
+            for i in range(7)
+        ]
+        top = review.highest_fill_to_close_wallets(wallets)
+        self.assertEqual(len(top), 5)
+        values = [entry["fillsPerClosedPosition"] for entry in top]
+        self.assertEqual(values, sorted(values, reverse=True))
+        self.assertEqual(top[0]["address"], f"0x{'%040d' % 6}")
+        for entry in top:
+            self.assertEqual(len(entry["address"]), 42)
+            self.assertNotIn("...", entry["address"])
