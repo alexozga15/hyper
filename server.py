@@ -1288,6 +1288,36 @@ def wallet_shrunk_win_rate(wallet: Any) -> float | None:
     return shrunk_win_rate(wallet.get("winRate90d"), wallet.get("closedTrades90d"))
 
 
+def signal_quality_estimate_fields(source: Any) -> dict[str, Any]:
+    """The wallet-quality estimate for a signal, from whichever shape it arrives in.
+
+    A consensus item (or a candidate bucket) carries the per-wallet estimates
+    under "wallets", each entry keyed by "qualityWinRatePct". The derived
+    "signals" / "candidateSignals" dicts built from those items do not carry
+    "wallets" - they carry only the already-aggregated fields this function
+    also produces. One helper serves both: it aggregates from "wallets" when
+    present, and otherwise passes the already-aggregated fields through.
+    """
+    if not isinstance(source, dict):
+        return {"qualityWinRatePct": None, "qualityBestWinRatePct": None, "qualityScoredWallets": 0}
+    rates = [
+        to_float(entry["qualityWinRatePct"])
+        for entry in (source.get("wallets") or [])
+        if isinstance(entry, dict) and entry.get("qualityWinRatePct") is not None
+    ]
+    if rates:
+        return {
+            "qualityWinRatePct": round(sum(rates) / len(rates), 1),
+            "qualityBestWinRatePct": round(max(rates), 1),
+            "qualityScoredWallets": len(rates),
+        }
+    return {
+        "qualityWinRatePct": source.get("qualityWinRatePct"),
+        "qualityBestWinRatePct": source.get("qualityBestWinRatePct"),
+        "qualityScoredWallets": int(to_float(source.get("qualityScoredWallets"))),
+    }
+
+
 def build_wallet_quality_rank(
     hit_rate: float,
     closed_trade_count: int,
@@ -4219,6 +4249,7 @@ class WalletTrackerService:
                     "freshAddLatestTime": int(to_float(item.get("freshAddLatestTime"))),
                     "convictionScore": round(conviction_score, 1),
                     "threshold": round(to_float(threshold), 1),
+                    **signal_quality_estimate_fields(item),
                     "wallets": item.get("wallets", [])[:5],
                     "rationale": (
                         f'{int(to_float(item.get("independentWalletCount")))} wallets are {side} '
@@ -4664,6 +4695,7 @@ class WalletTrackerService:
                     if fresh_vwap > 0 and mark_price > 0
                     else 0.0,
                     "freshAddLatestTime": int(bucket["candidateFreshAddLatestTime"]),
+                    **signal_quality_estimate_fields(bucket),
                     "wallets": [
                         wallet
                         for wallet in bucket["wallets"]
@@ -7435,6 +7467,7 @@ class WalletTrackerService:
                     "cmmConfirmation": candidate.get("cmmConfirmation", "unavailable"),
                     "cmmProbabilityScore": round(to_float(candidate.get("cmmProbabilityScore")), 1),
                     "cmmSnapshotGeneratedAt": candidate.get("cmmSnapshotGeneratedAt", ""),
+                    **signal_quality_estimate_fields(candidate),
                     "outcomes": {},
                 },
             )
@@ -7621,6 +7654,7 @@ class WalletTrackerService:
                     "probabilityScore": round(to_float(signal.get("probabilityScore")), 1),
                     "rawProbabilityScore": round(to_float(signal.get("rawProbabilityScore", signal.get("probabilityScore"))), 1),
                     "freshWalletCount": int(to_float(signal.get("verifiedFreshIndependentWalletCount"))),
+                    **signal_quality_estimate_fields(signal),
                     "shadow": False,
                     "published": True,
                     "outcomes": {},
@@ -7812,6 +7846,10 @@ class WalletTrackerService:
                 "probabilityScore": round(probability, 1),
                 "rawProbabilityScore": round(probability, 1),
                 "freshWalletCount": int(to_float(item.get("verifiedFreshIndependentWalletCount"))),
+                # Stamped at observation time, not backfilled later: the wallet
+                # snapshot this estimate derives from is not recoverable once
+                # the cycle that produced it has passed.
+                **signal_quality_estimate_fields(item),
                 # Diagnostic only - see FRESH_ACTIVITY_DIAGNOSTIC_WINDOWS_MS.
                 # Absent on consensus items built before this field existed, so
                 # default to {} rather than requiring its presence.
