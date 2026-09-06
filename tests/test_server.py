@@ -5659,6 +5659,175 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertNotIn("XYZ100 long", message)
         self.assertIn("SP500 LONG: 3 wallets | $1.1M open", message)
 
+    def test_build_positions_message_marks_high_quality_actionable_rows_green(self) -> None:
+        # Actionable (mark price matches the recent add price) and the
+        # displayed quality (76.4%, from 100% 90d win rate over 10 closes
+        # shrunk toward the 64.6% baseline) is above baseline -> green marker
+        # outside the bold wrapper, exactly once.
+        now_ms = 1_700_000_000_000
+        dashboard = {
+            "wallets": [
+                {
+                    "address": "0x%s" % (str(n) * 40),
+                    "winRate90d": 100.0,
+                    "closedTrades90d": 10,
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 70000}],
+                    "recentFills": [{"coin": "BTC", "direction": "Open Long", "price": 100000, "size": 1, "time": now_ms - 60_000}],
+                }
+                for n in (1, 2, 3)
+            ]
+        }
+
+        with patch("server.current_time_ms", return_value=now_ms):
+            message = self.service.build_positions_message(dashboard, html=True)
+
+        line = next(line for line in message.splitlines() if "BTC LONG" in line)
+        self.assertTrue(line.startswith("\U0001F7E2 <b>"))
+        self.assertEqual(line.count("\U0001F7E2"), 1)
+        self.assertIn("quality 76%", line)
+
+    def test_build_positions_message_does_not_mark_green_at_or_below_baseline(self) -> None:
+        # Below baseline: 50% raw win rate shrinks well under 64.6%.
+        now_ms = 1_700_000_000_000
+
+        def dashboard_with_win_rate(win_rate_pct: float) -> dict[str, Any]:
+            return {
+                "wallets": [
+                    {
+                        "address": "0x%s" % (str(n) * 40),
+                        "winRate90d": win_rate_pct,
+                        "closedTrades90d": 10,
+                        "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 70000}],
+                        "recentFills": [{"coin": "BTC", "direction": "Open Long", "price": 100000, "size": 1, "time": now_ms - 60_000}],
+                    }
+                    for n in (1, 2, 3)
+                ]
+            }
+
+        with patch("server.current_time_ms", return_value=now_ms):
+            below_message = self.service.build_positions_message(dashboard_with_win_rate(50.0), html=True)
+            # Exact boundary: winRate90d equal to the baseline itself shrinks
+            # to precisely the baseline regardless of sample size, so this is
+            # a true "==" case, not an approximation - it must NOT go green
+            # because the comparison is strictly greater.
+            boundary_message = self.service.build_positions_message(
+                dashboard_with_win_rate(server.CONVICTION_WIN_RATE_BASELINE * 100), html=True
+            )
+
+        for message in (below_message, boundary_message):
+            line = next(line for line in message.splitlines() if "BTC LONG" in line)
+            self.assertNotIn("\U0001F7E2", line)
+            self.assertTrue(line.startswith("<b>"))
+
+    def test_build_positions_message_does_not_mark_non_actionable_rows_green(self) -> None:
+        # High quality, but the price ran away (11% from the add price), so
+        # it is not actionable - neither bold nor green applies.
+        now_ms = 1_700_000_000_000
+        dashboard = {
+            "wallets": [
+                {
+                    "address": "0x%s" % (str(n) * 40),
+                    "winRate90d": 100.0,
+                    "closedTrades90d": 10,
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 70000}],
+                    "recentFills": [{"coin": "BTC", "direction": "Open Long", "price": 90000, "size": 1, "time": now_ms - 60_000}],
+                }
+                for n in (1, 2, 3)
+            ]
+        }
+
+        with patch("server.current_time_ms", return_value=now_ms):
+            message = self.service.build_positions_message(dashboard, html=True)
+
+        line = next(line for line in message.splitlines() if "BTC LONG" in line)
+        self.assertNotIn("\U0001F7E2", line)
+        self.assertNotIn("<b>", line)
+
+    def test_build_positions_message_does_not_mark_green_when_quality_note_is_hidden(self) -> None:
+        # Actionable, and the one scored wallet is well above baseline, but
+        # only 1 of 4 members is scored (1*2 < 4), so the quality note itself
+        # is suppressed - green must never appear on a row whose justifying
+        # figure is not shown.
+        now_ms = 1_700_000_000_000
+        wallets = [
+            {
+                "address": "0x%s" % ("1" * 40),
+                "winRate90d": 100.0,
+                "closedTrades90d": 10,
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 70000}],
+                "recentFills": [{"coin": "BTC", "direction": "Open Long", "price": 100000, "size": 1, "time": now_ms - 60_000}],
+            }
+        ]
+        for n in (2, 3, 4):
+            wallets.append(
+                {
+                    "address": "0x%s" % (str(n) * 40),
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 70000}],
+                    "recentFills": [{"coin": "BTC", "direction": "Open Long", "price": 100000, "size": 1, "time": now_ms - 60_000}],
+                }
+            )
+        dashboard = {"wallets": wallets}
+
+        with patch("server.current_time_ms", return_value=now_ms):
+            message = self.service.build_positions_message(dashboard, html=True)
+
+        line = next(line for line in message.splitlines() if "BTC LONG" in line)
+        self.assertNotIn("\U0001F7E2", line)
+        self.assertNotIn("quality", line)
+        self.assertTrue(line.startswith("<b>"))
+
+    def test_build_positions_message_plain_text_has_no_marker_or_tags(self) -> None:
+        # html=False must never leak the marker or any markup, on a row that
+        # would otherwise qualify for both bold and green.
+        now_ms = 1_700_000_000_000
+        dashboard = {
+            "wallets": [
+                {
+                    "address": "0x%s" % (str(n) * 40),
+                    "winRate90d": 100.0,
+                    "closedTrades90d": 10,
+                    "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 70000}],
+                    "recentFills": [{"coin": "BTC", "direction": "Open Long", "price": 100000, "size": 1, "time": now_ms - 60_000}],
+                }
+                for n in (1, 2, 3)
+            ]
+        }
+
+        with patch("server.current_time_ms", return_value=now_ms):
+            message = self.service.build_positions_message(dashboard, html=False)
+
+        self.assertNotIn("\U0001F7E2", message)
+        self.assertNotIn("<", message)
+        self.assertNotIn(">", message)
+
+    def test_build_positions_message_escapes_green_row_exactly_once(self) -> None:
+        # A coin label carrying HTML-special characters on a green row must
+        # be escaped exactly once, with the marker and bold wrapper intact.
+        now_ms = 1_700_000_000_000
+        dashboard = {
+            "wallets": [
+                {
+                    "address": "0x%s" % (str(n) * 40),
+                    "winRate90d": 100.0,
+                    "closedTrades90d": 10,
+                    "positions": [{"coin": "A&B<C", "side": "Long", "positionValue": 1_000_000, "size": 10, "entryPx": 70000}],
+                    "recentFills": [{"coin": "A&B<C", "direction": "Open Long", "price": 100000, "size": 1, "time": now_ms - 60_000}],
+                }
+                for n in (1, 2, 3)
+            ]
+        }
+
+        with patch("server.current_time_ms", return_value=now_ms):
+            message = self.service.build_positions_message(dashboard, html=True)
+
+        line = next(line for line in message.splitlines() if "A&amp;B&lt;C LONG" in line)
+        self.assertTrue(line.startswith("\U0001F7E2 <b>"))
+        self.assertEqual(line.count("\U0001F7E2"), 1)
+        self.assertEqual(line.count("&amp;"), 1)
+        self.assertEqual(line.count("&lt;"), 1)
+        self.assertNotIn("&amp;amp;", line)
+        self.assertNotIn("A&B<C", line)
+
     def test_check_alerts_ignores_hip3_only_changes(self) -> None:
         previous_summary = {
             "overallBias": "mixed",
