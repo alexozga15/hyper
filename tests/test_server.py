@@ -21,6 +21,7 @@ from server import (
     CONVICTION_WIN_RATE_PRIOR_TRADES,
     DORMANT_WALLET_MAX_IDLE_MS,
     FRESH_ACTIVITY_DIAGNOSTIC_WINDOWS_MS,
+    FRESH_WALLET_FLOW_MIN_VALUE,
     WALLET_SIGNAL_ACTIVITY_WINDOW_MS,
     ELITE_WALLET_OVERRIDES,
     HyperliquidClient,
@@ -1443,15 +1444,19 @@ class AlertSummaryTests(unittest.TestCase):
             ),
         )
 
-    def test_fresh_signal_flow_requires_500k_per_wallet_inside_the_window(self) -> None:
+    def test_fresh_signal_flow_requires_the_floor_per_wallet_inside_the_window(self) -> None:
         now_ms = 1_700_000_000_000
         # Derived from the window rather than hardcoded: this wallet exists to
         # sit just outside it, and pinning it to a literal age quietly turns it
         # into an inside-the-window wallet whenever the window widens.
         stale_minutes = WALLET_SIGNAL_ACTIVITY_WINDOW_MS // 60_000 + 1
+        # Same reasoning for the values: the third wallet exists to sit one
+        # dollar under the floor, so it has to follow the floor rather than the
+        # literal it happened to be written against.
+        floor = float(FRESH_WALLET_FLOW_MIN_VALUE)
         snapshots = []
         for index, (value, age_minutes) in enumerate(
-            ((500_000.0, 1), (500_000.0, 5), (499_999.0, 2), (500_000.0, stale_minutes)),
+            ((floor, 1), (floor, 5), (floor - 1.0, 2), (floor, stale_minutes)),
             start=1,
         ):
             size = value / 50_000.0
@@ -1826,7 +1831,7 @@ class AlertSummaryTests(unittest.TestCase):
         )
 
     def test_diagnostic_windows_capture_adds_below_fresh_wallet_flow_min_value(self) -> None:
-        # $1,000 adds are far below FRESH_WALLET_FLOW_MIN_VALUE ($500k) and so
+        # $1,000 adds are far below FRESH_WALLET_FLOW_MIN_VALUE ($100k) and so
         # must never count toward verifiedFreshIndependentWalletCount, but the
         # entire point of the diagnostic windows is to surface exactly this
         # sub-threshold distribution.
