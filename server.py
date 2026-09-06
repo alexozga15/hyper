@@ -275,7 +275,36 @@ MARKET_VIEW_HISTORY_LIMIT = int(os.environ.get("MARKET_VIEW_HISTORY_LIMIT", "440
 # bytes per record, so its 6000-record cap alone projects to 11.5 MB of state
 # and about 15.9 MB of file once indentation is counted.
 WALLET_QUALITY_HISTORY_LIMIT = int(os.environ.get("WALLET_QUALITY_HISTORY_LIMIT", "10800"))
-FRESH_WALLET_FLOW_MIN_VALUE = int(os.environ.get("FRESH_WALLET_FLOW_MIN_VALUE", "500000"))
+# How much a wallet must add to a coin inside WALLET_SIGNAL_ACTIVITY_WINDOW_MS
+# for that add to count as verified fresh flow. It feeds two of the eight
+# signal gates - insufficient_verified_activity and weak_fresh_net, both of
+# which want three independent wallets - and it is the sole source of
+# freshAddValue/freshAddSize, so freshAddVwap is absent whenever nothing clears
+# it.
+#
+# Lowered $500K -> $100K on 2026-09-06 after measuring how starved that path
+# was. On the live snapshot, of 251 wallet/position pairs only 6 had any add
+# inside the 2h window and only 2 cleared $500K - both from the same wallet, so
+# the three-independent-wallet requirement was unreachable at that instant.
+# Across 2199 shadow records freshAddVwap was missing on 86% and
+# insufficient_verified_activity was recorded on 100%.
+#
+# Simulated over 30 days of fills across the 25 tracked wallets: at $500K there
+# were 38 two-hour windows where three or more distinct wallets each cleared the
+# floor, spread over just 2 coin/side buckets (BTC short, NVDA long). At $100K
+# that becomes 81 windows over 4 buckets (BTC short, ETH short, HYPE long,
+# NVDA long).
+#
+# The window is the harder constraint, not this floor: unfiltered, 2h finds 6
+# pairs with any add, 8h finds 13 and 24h finds 15, while dropping the floor 50x
+# from $500K to $10K adds only three pairs. Widening the window was considered
+# and not done, because the measured expectation of what this path publishes is
+# negative - mean -0.31% at 1h over the shadow records, -1.03% across the four
+# it did publish - so the aim here is a populated VWAP on the records the
+# analysis reads, not more alerts. The two gates this does not touch,
+# insufficient_top_wallets and low_probability, still fire on 57% and 90% of
+# records respectively.
+FRESH_WALLET_FLOW_MIN_VALUE = int(os.environ.get("FRESH_WALLET_FLOW_MIN_VALUE", "100000"))
 # Diagnostic-only windows for measuring how fresh-add clustering behaves at
 # widths other than WALLET_SIGNAL_ACTIVITY_WINDOW_MS. Deliberately hard-coded
 # rather than environment-driven so that samples collected over the study
