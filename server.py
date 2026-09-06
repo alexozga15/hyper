@@ -4495,6 +4495,18 @@ class WalletTrackerService:
                             "alias": snapshot.get("alias", ""),
                             "value": round(position_value, 2),
                             "qualityWeight": wallet_weight,
+                            # The wallet's own P(this position closes in profit).
+                            # signal_quality_estimate_fields aggregates the
+                            # consensus estimate from these entries, so without
+                            # the rate here every signal record stores None.
+                            # Absent from the snapshot's 90d sample when it is
+                            # too small to score, which is a real None rather
+                            # than a missing field.
+                            "qualityWinRatePct": (
+                                round(100.0 * member_rate, 1)
+                                if (member_rate := wallet_shrunk_win_rate(snapshot)) is not None
+                                else None
+                            ),
                         }
                     )
 
