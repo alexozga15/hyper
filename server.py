@@ -237,7 +237,23 @@ MONI_SOCIAL_PROJECT_HANDLES = {
     "XRP": "Ripple",
     "ZRO": "LayerZero_Core",
 }
-POSITION_GROUP_DISPLAY_MIN_VALUE = 2_000_000
+# The "Open pos now" floor, separate from the single-wallet alert floor below,
+# and the ceiling POSITION_GROUP_QUALITY_MAX_DISCOUNT works down from - so the
+# best groups are already admitted at half this number.
+#
+# Was raised $1M -> $2M to cut clusters that padded the digest without changing
+# a decision. Lowered back on 2026-09-06, after seven wallets were cut in one
+# day and the board fell to 10 displayed groups. Measured on the live snapshot:
+# at $1M the board carries 13 groups and 48 positions against 10 and 38, for
+# $3.1M more notional (+2.9%), and the rows the reader can still act on go from
+# 6 to 9. The readmitted groups average 67.8% quality against the board's 66.1%,
+# so they are not the padding the raise was aimed at - though that is three
+# groups in one snapshot, not a settled measurement.
+#
+# $500K measures identical to $1M: no group currently sits in that band, and the
+# conviction discount already takes the best groups to $500K effective. So $1M
+# is the bottom of the useful range for the base, not a midpoint.
+POSITION_GROUP_DISPLAY_MIN_VALUE = 1_000_000
 MIN_POSITION_MESSAGE_WALLETS = 3
 # 10-minute cycles, so this holds roughly a month of "Market view" values.
 MARKET_VIEW_HISTORY_LIMIT = int(os.environ.get("MARKET_VIEW_HISTORY_LIMIT", "4400"))
