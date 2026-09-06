@@ -556,6 +556,11 @@ RANKING_MIN_90D_CLOSED_TRADES = int(os.environ.get("RANKING_MIN_90D_CLOSED_TRADE
 # measured baseline win rate across the tracked set at the time this was
 # calibrated. Not "50%" because closing runs are not coin flips.
 CONVICTION_WIN_RATE_BASELINE = float(os.environ.get("CONVICTION_WIN_RATE_BASELINE", 0.646))
+# Telegram's HTML parse mode has no colour tag - only b/i/u/s/a/code/pre/
+# tg-spoiler/blockquote are accepted - so "green" is an emoji marker rather
+# than markup. Prepended outside the <b> wrapper so the escaping pass still
+# touches the text exactly once.
+ACTIONABLE_HIGH_QUALITY_MARKER = os.environ.get("ACTIONABLE_HIGH_QUALITY_MARKER", "\U0001F7E2")
 # Weight of the baseline in the shrinkage estimator, expressed as a number of
 # prior (pseudo-)trades. Chosen so a 10-trade wallet lands materially closer to
 # the baseline than a 400-trade wallet reporting the same raw rate.
@@ -8341,6 +8346,11 @@ class WalletTrackerService:
         # exactly once and the only markup in the output is the markup added
         # here.
         actionable_lines: set[int] = set()
+        # Subset of actionable_lines: rows that are also within reach AND
+        # carry a displayed quality estimate strictly above the tracked-set
+        # baseline. A row only goes green when the figure justifying it is
+        # visible on that same row, so the marker is never unexplained.
+        high_quality_actionable_lines: set[int] = set()
         position_groups = self.build_position_groups(
             dashboard,
             hip3_only=False,
@@ -8419,8 +8429,10 @@ class WalletTrackerService:
                         reference_price = to_float(item.get("recentAddPx")) or to_float(
                             item.get("entryPx")
                         )
-                        if is_within_actionable_distance(reference_price, mark_price):
-                            actionable_lines.add(len(lines))
+                        row_index = len(lines)
+                        is_actionable = is_within_actionable_distance(reference_price, mark_price)
+                        if is_actionable:
+                            actionable_lines.add(row_index)
                         # Shown only when at least half the members carry an
                         # estimate. Below that the mean describes a minority of
                         # the group while looking like it describes the group,
@@ -8429,10 +8441,17 @@ class WalletTrackerService:
                         scored = int(to_float(item.get("qualityScoredWallets")))
                         mean_pct = item.get("qualityWinRatePct")
                         best_pct = item.get("qualityBestWinRatePct")
-                        if mean_pct is not None and scored * 2 >= int(item["walletCount"]):
+                        quality_note_shown = mean_pct is not None and scored * 2 >= int(item["walletCount"])
+                        if quality_note_shown:
                             quality_note = f' | quality {to_float(mean_pct):.0f}%'
                             if best_pct is not None:
                                 quality_note += f' (best {to_float(best_pct):.0f}%)'
+                        if (
+                            is_actionable
+                            and quality_note_shown
+                            and to_float(mean_pct) > CONVICTION_WIN_RATE_BASELINE * 100
+                        ):
+                            high_quality_actionable_lines.add(row_index)
                         lines.append(
                             f'- {item["coin"]} {str(item.get("side") or "").upper()}: '
                             f'{item["walletCount"]} wallets{net_note(item)} | '
@@ -8449,12 +8468,16 @@ class WalletTrackerService:
         )
         lines.append(f'Updated: {format_update_time(dashboard.get("generatedAt", now_iso()))}')
         if html:
-            lines = [
-                f"<b>{telegram_html_escape(line)}</b>"
-                if index in actionable_lines
-                else telegram_html_escape(line)
-                for index, line in enumerate(lines)
-            ]
+            rendered_lines = []
+            for index, line in enumerate(lines):
+                escaped = telegram_html_escape(line)
+                if index in high_quality_actionable_lines:
+                    rendered_lines.append(f"{ACTIONABLE_HIGH_QUALITY_MARKER} <b>{escaped}</b>")
+                elif index in actionable_lines:
+                    rendered_lines.append(f"<b>{escaped}</b>")
+                else:
+                    rendered_lines.append(escaped)
+            lines = rendered_lines
         return "\n".join(lines)
 
     def build_wallet_rankings_message(self, dashboard: dict[str, Any], *, limit: int = 10) -> str:
