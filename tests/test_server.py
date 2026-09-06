@@ -313,6 +313,53 @@ class AlertSummaryTests(unittest.TestCase):
     def test_elite_override_wallet_is_configured(self) -> None:
         self.assertIn("0xc9e839a529d1a3a46e2b48d20c461d4afecb72e4", ELITE_WALLET_OVERRIDES)
 
+    def test_consensus_wallets_carry_the_quality_rate_the_estimate_aggregates(self) -> None:
+        # The gap this closes: signal_quality_estimate_fields reads
+        # "qualityWinRatePct" off each consensus wallet entry, but nothing in
+        # the production path used to write it there, so every recorded signal
+        # stored None. Build the summary from wallet snapshots rather than
+        # handing the field in, so the test fails if the producer stops
+        # satisfying the consumer's contract.
+        snapshots = [
+            {
+                "address": "0x1111111111111111111111111111111111111111",
+                "alias": "One",
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1000}],
+                "winRate90d": 90,
+                "closedTrades90d": 100,
+            },
+            {
+                "address": "0x2222222222222222222222222222222222222222",
+                "alias": "Two",
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 1500}],
+                "winRate90d": 50,
+                "closedTrades90d": 100,
+            },
+            {
+                "address": "0x3333333333333333333333333333333333333333",
+                "alias": "Three",
+                "positions": [{"coin": "BTC", "side": "Long", "positionValue": 2000}],
+                "winRate90d": 60,
+                "closedTrades90d": 3,
+            },
+        ]
+
+        summary = self.service.build_sentiment_summary(snapshots, min_wallets=3)
+        item = summary["consensus"][0]
+        rates = {
+            wallet["address"]: wallet["qualityWinRatePct"] for wallet in item["wallets"]
+        }
+        # Shrunk toward the 64.6% baseline with a 20-trade prior, as elsewhere.
+        self.assertEqual(rates["0x1111111111111111111111111111111111111111"], 85.8)
+        self.assertEqual(rates["0x2222222222222222222222222222222222222222"], 52.4)
+        # Three closed trades is below the 90d minimum, so it stays unscored.
+        self.assertIsNone(rates["0x3333333333333333333333333333333333333333"])
+
+        fields = server.signal_quality_estimate_fields(item)
+        self.assertEqual(fields["qualityScoredWallets"], 2)
+        self.assertEqual(fields["qualityWinRatePct"], 69.1)
+        self.assertEqual(fields["qualityBestWinRatePct"], 85.8)
+
     def test_build_sentiment_summary_respects_threshold_and_hip3(self) -> None:
         snapshots = [
             {
