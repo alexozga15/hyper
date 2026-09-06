@@ -95,15 +95,21 @@ class SegmentTests(unittest.TestCase):
         )
         self.assertAlmostEqual(baseline["convictionWinRateWeight"], 1.0, places=2)
 
+        # Neither of these touches a clamp (see test_..._clamps_at_both_ends
+        # for that), so the expected weight is derived from shrunk_win_rate
+        # applied to the same inputs rather than hardcoded - it must track
+        # CONVICTION_WIN_RATE_BASELINE automatically when that moves.
         hot = build_wallet_quality_rank(
             70, 20, 20_000, 100_000, hit_rate_90d=96, closed_trade_count_90d=1000
         )
-        self.assertAlmostEqual(hot["convictionWinRateWeight"], 1.477, places=2)
+        expected_hot_weight = server.shrunk_win_rate(96, 1000) / CONVICTION_WIN_RATE_BASELINE
+        self.assertAlmostEqual(hot["convictionWinRateWeight"], expected_hot_weight, places=2)
 
         cold = build_wallet_quality_rank(
             70, 20, 20_000, 100_000, hit_rate_90d=35, closed_trade_count_90d=1000
         )
-        self.assertAlmostEqual(cold["convictionWinRateWeight"], 0.551, places=2)
+        expected_cold_weight = server.shrunk_win_rate(35, 1000) / CONVICTION_WIN_RATE_BASELINE
+        self.assertAlmostEqual(cold["convictionWinRateWeight"], expected_cold_weight, places=2)
 
     def test_conviction_win_rate_weight_shrinks_small_samples_toward_baseline(self) -> None:
         # Same raw 90d win rate, two sample sizes: the thinner sample must land
@@ -119,15 +125,38 @@ class SegmentTests(unittest.TestCase):
         thick_weight = thick["convictionWinRateWeight"]
         self.assertLess(abs(thin_weight - 1.0), abs(thick_weight - 1.0))
 
-    def test_conviction_win_rate_weight_clamps_at_both_ends(self) -> None:
-        maxed = build_wallet_quality_rank(
-            70, 20, 20_000, 100_000, hit_rate_90d=100, closed_trade_count_90d=1000
-        )
+    def test_conviction_win_rate_weight_clamps_at_the_floor(self) -> None:
+        # The floor is reachable and does not depend on the baseline: a wallet
+        # that never wins gets prior * B / ((n + prior) * B) = prior / (n +
+        # prior), which is below 0.5 for any sample larger than the prior.
         floored = build_wallet_quality_rank(
             70, 20, 20_000, 100_000, hit_rate_90d=0, closed_trade_count_90d=1000
         )
-        self.assertEqual(maxed["convictionWinRateWeight"], 1.5)
         self.assertEqual(floored["convictionWinRateWeight"], 0.5)
+
+    def test_conviction_win_rate_weight_is_bounded_above_by_the_baseline(self) -> None:
+        # The 1.5 ceiling is deliberately slack at the current baseline rather
+        # than removed. shrunk_win_rate is a weighted average of a hit rate
+        # capped at 100% and CONVICTION_WIN_RATE_BASELINE, so it never exceeds
+        # 1.0 and the weight never exceeds 1 / baseline - 1.486 at 0.673, below
+        # the 1.5 clamp. It was 1.548 at the old 0.646 baseline, where the
+        # clamp did bind. Assert the real bound so this stays meaningful, and
+        # assert the clamp still holds if a future baseline makes it bind
+        # again.
+        ceiling = 1.0 / CONVICTION_WIN_RATE_BASELINE
+        perfect = build_wallet_quality_rank(
+            70, 20, 20_000, 100_000, hit_rate_90d=100, closed_trade_count_90d=1_000_000
+        )
+        weight = perfect["convictionWinRateWeight"]
+        # convictionWinRateWeight is rounded to three decimals, so allow half
+        # of the last place rather than an exact comparison.
+        self.assertLessEqual(weight, min(1.5, ceiling) + 0.0005)
+        self.assertGreater(weight, min(1.5, ceiling) - 0.01)
+
+        smaller = build_wallet_quality_rank(
+            70, 20, 20_000, 100_000, hit_rate_90d=100, closed_trade_count_90d=1000
+        )
+        self.assertLess(smaller["convictionWinRateWeight"], weight)
 
     def test_conviction_win_rate_weight_omitted_below_min_90d_sample(self) -> None:
         # Below RANKING_MIN_90D_CLOSED_TRADES the 90d sample is too thin to
@@ -349,16 +378,21 @@ class AlertSummaryTests(unittest.TestCase):
         rates = {
             wallet["address"]: wallet["qualityWinRatePct"] for wallet in item["wallets"]
         }
-        # Shrunk toward the 64.6% baseline with a 20-trade prior, as elsewhere.
-        self.assertEqual(rates["0x1111111111111111111111111111111111111111"], 85.8)
-        self.assertEqual(rates["0x2222222222222222222222222222222222222222"], 52.4)
+        # Shrunk toward CONVICTION_WIN_RATE_BASELINE with a 20-trade prior, as
+        # elsewhere - derived rather than hardcoded so this tracks the
+        # constant instead of the arithmetic of shrunk_win_rate, which has its
+        # own dedicated tests.
+        expected_rate_one = round(100.0 * server.shrunk_win_rate(90, 100), 1)
+        expected_rate_two = round(100.0 * server.shrunk_win_rate(50, 100), 1)
+        self.assertEqual(rates["0x1111111111111111111111111111111111111111"], expected_rate_one)
+        self.assertEqual(rates["0x2222222222222222222222222222222222222222"], expected_rate_two)
         # Three closed trades is below the 90d minimum, so it stays unscored.
         self.assertIsNone(rates["0x3333333333333333333333333333333333333333"])
 
         fields = server.signal_quality_estimate_fields(item)
         self.assertEqual(fields["qualityScoredWallets"], 2)
-        self.assertEqual(fields["qualityWinRatePct"], 69.1)
-        self.assertEqual(fields["qualityBestWinRatePct"], 85.8)
+        self.assertEqual(fields["qualityWinRatePct"], round((expected_rate_one + expected_rate_two) / 2, 1))
+        self.assertEqual(fields["qualityBestWinRatePct"], max(expected_rate_one, expected_rate_two))
 
     def test_build_sentiment_summary_respects_threshold_and_hip3(self) -> None:
         snapshots = [
@@ -5142,9 +5176,12 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertNotIn("&amp;", message)
 
     def test_group_quality_is_the_mean_of_its_scored_members(self) -> None:
-        # Shrunk toward the 64.6% baseline with a 20-trade prior: 90% over 100
-        # trades lands at 85.8%, 50% at 52.4%, 60% at 60.8%. Mean 66.3%, best
-        # 85.8% - and the best is the number the mean hides.
+        # Shrunk toward CONVICTION_WIN_RATE_BASELINE with a 20-trade prior -
+        # the mean/best below are derived from the same shrunk_win_rate the
+        # production path uses so this test tracks the constant instead of
+        # hardcoding its arithmetic; what is actually under test is that the
+        # mean is over the scored members and the best survives being
+        # averaged away.
         dashboard = {
             "wallets": [
                 {
@@ -5173,7 +5210,14 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_positions_message(dashboard)
 
-        self.assertIn("quality 66% (best 86%)", message)
+        rates = [
+            server.shrunk_win_rate(90, 100),
+            server.shrunk_win_rate(50, 100),
+            server.shrunk_win_rate(60, 100),
+        ]
+        expected_mean_pct = round(100.0 * sum(rates) / len(rates), 1)
+        expected_best_pct = round(100.0 * max(rates), 1)
+        self.assertIn(f"quality {expected_mean_pct:.0f}% (best {expected_best_pct:.0f}%)", message)
 
     def test_a_wallet_below_the_90d_minimum_does_not_score_the_group(self) -> None:
         # Two scored members out of three still describes a majority, so the
@@ -5206,7 +5250,17 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_positions_message(dashboard)
 
-        self.assertIn("quality 69% (best 86%)", message)
+        # Only the first two members are scorable - the third's 3 closed
+        # trades sit below RANKING_MIN_90D_CLOSED_TRADES - so the mean/best
+        # below are derived only from those two, the way the production
+        # aggregation must also exclude the unscorable member.
+        rates = [
+            server.shrunk_win_rate(90, 100),
+            server.shrunk_win_rate(50, 100),
+        ]
+        expected_mean_pct = round(100.0 * sum(rates) / len(rates), 1)
+        expected_best_pct = round(100.0 * max(rates), 1)
+        self.assertIn(f"quality {expected_mean_pct:.0f}% (best {expected_best_pct:.0f}%)", message)
 
     def test_quality_is_withheld_when_most_of_the_group_is_unscorable(self) -> None:
         # One estimate out of three would describe a minority while looking
@@ -5661,9 +5715,9 @@ class AlertSummaryTests(unittest.TestCase):
 
     def test_build_positions_message_marks_high_quality_actionable_rows_green(self) -> None:
         # Actionable (mark price matches the recent add price) and the
-        # displayed quality (76.4%, from 100% 90d win rate over 10 closes
-        # shrunk toward the 64.6% baseline) is above baseline -> green marker
-        # outside the bold wrapper, exactly once.
+        # displayed quality (100% 90d win rate over 10 closes shrunk toward
+        # CONVICTION_WIN_RATE_BASELINE, derived below) is above baseline ->
+        # green marker outside the bold wrapper, exactly once.
         now_ms = 1_700_000_000_000
         dashboard = {
             "wallets": [
@@ -5684,7 +5738,8 @@ class AlertSummaryTests(unittest.TestCase):
         line = next(line for line in message.splitlines() if "BTC LONG" in line)
         self.assertTrue(line.startswith("\U0001F7E2 <b>"))
         self.assertEqual(line.count("\U0001F7E2"), 1)
-        self.assertIn("quality 76%", line)
+        expected_pct = round(100.0 * server.shrunk_win_rate(100.0, 10), 1)
+        self.assertIn(f"quality {expected_pct:.0f}%", line)
 
     def test_build_positions_message_does_not_mark_green_at_or_below_baseline(self) -> None:
         # Below baseline: 50% raw win rate shrinks well under 64.6%.

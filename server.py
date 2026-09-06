@@ -553,9 +553,33 @@ WALLET_QUALITY_WINDOW_DAYS = int(float(os.environ.get("WALLET_QUALITY_WINDOW_DAY
 # to emit. Mirrors RANKING_MIN_30D_CLOSED_TRADES's role for the 30d score.
 RANKING_MIN_90D_CLOSED_TRADES = int(os.environ.get("RANKING_MIN_90D_CLOSED_TRADES", 10))
 # The win rate a wallet is shrunk toward when its 90d sample is small - the
-# measured baseline win rate across the tracked set at the time this was
-# calibrated. Not "50%" because closing runs are not coin flips.
-CONVICTION_WIN_RATE_BASELINE = float(os.environ.get("CONVICTION_WIN_RATE_BASELINE", 0.646))
+# measured baseline win rate across the tracked set. Not "50%" because closing
+# runs are not coin flips.
+#
+# Recalibrated 2026-09-06 from 0.646 after four algorithmic or persistently
+# losing wallets were removed, which lifted the surviving population. Three
+# independent measurements agreed and all three sat above the old value:
+# the quality cache's 90d pooled rate 67.3% (3168 closing runs, 25 wallets),
+# the same statistic rebuilt from fillcache180 over 90d 67.5%, and a live 30d
+# API walk 66.8%. Before the cuts the same three spanned 62.0-66.0% with 0.646
+# in the middle, which is why it was left alone then.
+#
+# Raising this lowers every wallet's conviction weight, because the constant is
+# both the prior in the numerator and the divisor: d(weight)/dB is
+# -hit*closes / (B^2 * (closes + prior)), always negative. Measured across the
+# 25 tracked wallets the summed weight fell 2.9% (25.290 -> 24.559) and no
+# wallet reached the 0.5 floor or the 1.5 ceiling. Displayed quality moves the
+# other way, rising 0.1-1.8 points, most for the smallest samples.
+#
+# One structural consequence: the weight's 1.5 ceiling is now slack. shrunk is
+# a weighted average of a hit rate capped at 100% and this baseline, so it
+# never exceeds 1.0 and the weight never exceeds 1 / baseline - 1.486 here,
+# against 1.548 at the old 0.646 where the clamp could bind. The upper bound is
+# therefore enforced by the estimator's own algebra rather than by the clamp,
+# which is left in place for the case a future baseline makes it bind again.
+# The floor is unaffected: a wallet that never wins scores prior / (sample +
+# prior), which carries no baseline term at all.
+CONVICTION_WIN_RATE_BASELINE = float(os.environ.get("CONVICTION_WIN_RATE_BASELINE", 0.673))
 # Telegram's HTML parse mode has no colour tag - only b/i/u/s/a/code/pre/
 # tg-spoiler/blockquote are accepted - so "green" is an emoji marker rather
 # than markup. Prepended outside the <b> wrapper so the escaping pass still
