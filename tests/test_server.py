@@ -7394,6 +7394,48 @@ class TransientFillFailureTests(unittest.TestCase):
         self.assertEqual(quality["fillsUnusableWallets"], 1)
 
 
+class SignalQualityEstimateFieldsTests(unittest.TestCase):
+    """The wallet-quality estimate carried onto signal/outcome records."""
+
+    def test_aggregates_scored_wallets_and_ignores_unscored_ones(self) -> None:
+        source = {
+            "wallets": [
+                {"address": "0xaaa", "qualityWinRatePct": 60.0},
+                {"address": "0xbbb", "qualityWinRatePct": 80.0},
+                {"address": "0xccc", "qualityWinRatePct": None},
+                {"address": "0xddd"},
+            ]
+        }
+
+        fields = server.signal_quality_estimate_fields(source)
+
+        self.assertEqual(fields["qualityWinRatePct"], 70.0)
+        self.assertEqual(fields["qualityBestWinRatePct"], 80.0)
+        self.assertEqual(fields["qualityScoredWallets"], 2)
+
+    def test_falls_back_to_already_aggregated_fields_when_no_wallets(self) -> None:
+        source = {
+            "qualityWinRatePct": 55.5,
+            "qualityBestWinRatePct": 91.2,
+            "qualityScoredWallets": 4,
+        }
+
+        fields = server.signal_quality_estimate_fields(source)
+
+        self.assertEqual(fields["qualityWinRatePct"], 55.5)
+        self.assertEqual(fields["qualityBestWinRatePct"], 91.2)
+        self.assertEqual(fields["qualityScoredWallets"], 4)
+
+    def test_empty_dict_and_non_dict_yield_the_none_shape(self) -> None:
+        for source in ({}, None, "not a dict", 5):
+            fields = server.signal_quality_estimate_fields(source)
+            self.assertEqual(
+                fields,
+                {"qualityWinRatePct": None, "qualityBestWinRatePct": None, "qualityScoredWallets": 0},
+                f"unexpected shape for source={source!r}",
+            )
+
+
 class ShadowSignalSamplingTests(unittest.TestCase):
     """The shadow control group must grow without stacking duplicate samples."""
 
@@ -7555,6 +7597,46 @@ class ShadowSignalSamplingTests(unittest.TestCase):
         records = self.service.update_shadow_signal_outcomes({}, summary, now_ms=self.started_at)
 
         self.assertEqual(records, {})
+
+    def test_shadow_record_carries_the_wallet_quality_estimate_at_observation_time(self) -> None:
+        item = self.consensus_item(
+            wallets=[
+                {"address": "0xaaa", "value": 500_000.0, "qualityWinRatePct": 60.0},
+                {"address": "0xbbb", "value": 500_000.0, "qualityWinRatePct": 80.0},
+            ]
+        )
+
+        records = self.sample({}, item, self.started_at)
+
+        record = self.newest(records)
+        self.assertEqual(record["qualityWinRatePct"], 70.0)
+        self.assertEqual(record["qualityBestWinRatePct"], 80.0)
+        self.assertEqual(record["qualityScoredWallets"], 2)
+
+    def test_an_existing_shadow_record_without_quality_fields_is_left_untouched(self) -> None:
+        item = self.consensus_item(
+            wallets=[
+                {"address": "0xaaa", "value": 500_000.0, "qualityWinRatePct": 60.0},
+                {"address": "0xbbb", "value": 500_000.0, "qualityWinRatePct": 80.0},
+            ]
+        )
+        records = self.sample({}, item, self.started_at)
+        legacy_key, legacy_record = next(iter(records.items()))
+        # Simulate a record written before this change: strip the fields it
+        # would not yet have carried.
+        legacy_record.pop("qualityWinRatePct", None)
+        legacy_record.pop("qualityBestWinRatePct", None)
+        legacy_record.pop("qualityScoredWallets", None)
+        previous = {legacy_key: legacy_record}
+
+        # Resample inside the min gap with the same setup: no new sample is
+        # due, so the pre-existing record must not be rewritten in place.
+        again = self.sample(previous, item, self.started_at + 15 * 60 * 1000)
+
+        self.assertEqual(len(again), 1)
+        self.assertNotIn("qualityWinRatePct", again[legacy_key])
+        self.assertNotIn("qualityBestWinRatePct", again[legacy_key])
+        self.assertNotIn("qualityScoredWallets", again[legacy_key])
 
 
 if __name__ == "__main__":
