@@ -399,8 +399,28 @@ HYPERLIQUID_REQUESTS_PER_SECOND = max(
     float(os.environ.get("HYPERLIQUID_REQUESTS_PER_SECOND", "6")),
 )
 WALLET_QUALITY_REFRESH_BATCH_SIZE = 3
-WALLET_QUALITY_SOFT_TTL_MS = 2 * 60 * 60 * 1000
-WALLET_QUALITY_HARD_TTL_MS = 6 * 60 * 60 * 1000
+# Calibrated for the 30-day quality window these once gated. The conviction
+# weight now rides on a 90-day win rate, which barely moves between refreshes:
+# measured across the 31 tracked wallets, the median wallet closes 0.21
+# positions in six hours, and even assuming every new close goes the worst
+# possible way the weight shifts by 0.010 for the median wallet and 0.034 for
+# the most active one - against a weight range of 0.5 to 1.5.
+#
+# Crossing the hard TTL, meanwhile, sets the weight to 0.0 and drops the wallet
+# out of the signal entirely. At six hours that traded a bounded 0.034 error for
+# an unbounded one: refresh rotation is three wallets a cycle against 31, and
+# with failed fetches retried the tail had reached 5.6h - one missed cycle from
+# expiry, for a score that would have been accurate to two decimal places.
+#
+# Raised to leave the observed tail four times the headroom while still
+# catching a refresh pipeline that has genuinely stopped for a day. The soft
+# TTL keeps its 1:3 ratio.
+WALLET_QUALITY_SOFT_TTL_MS = int(
+    float(os.environ.get("WALLET_QUALITY_SOFT_TTL_MS", 8 * 60 * 60 * 1000))
+)
+WALLET_QUALITY_HARD_TTL_MS = int(
+    float(os.environ.get("WALLET_QUALITY_HARD_TTL_MS", 24 * 60 * 60 * 1000))
+)
 WALLET_RECENT_FILL_CACHE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 # Measured on production against the 41 tracked wallets: 13 wallets sit
 # exactly at this cap, and their retained history spans a median of 7.8h -

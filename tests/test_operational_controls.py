@@ -5,6 +5,8 @@ import os
 import subprocess
 import tempfile
 import unittest
+
+import server
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -44,13 +46,25 @@ class OperationalControlTests(unittest.TestCase):
         self.service = WalletTrackerService(object(), HyperliquidClient(RequestRateLimiter(1000)))
 
     def test_stale_quality_is_downweighted_then_excluded(self) -> None:
+        # Ages are derived from the thresholds rather than hardcoded: these
+        # TTLs are tuned against how fast the quality window actually moves,
+        # and a fixture pinned to the old six-hour figure would silently stop
+        # testing the boundary the moment they were retuned.
+        soft_hours = server.WALLET_QUALITY_SOFT_TTL_MS / 3_600_000
+        hard_hours = server.WALLET_QUALITY_HARD_TTL_MS / 3_600_000
         now = datetime.now(timezone.utc)
         wallet = {
             "address": "0x1",
-            "dataQuality": {"qualityRefreshedAt": (now - timedelta(hours=3)).isoformat()},
+            "dataQuality": {
+                "qualityRefreshedAt": (
+                    now - timedelta(hours=(soft_hours + hard_hours) / 2)
+                ).isoformat()
+            },
         }
         self.assertEqual(self.service.wallet_conviction_weight(wallet), 0.75)
-        wallet["dataQuality"]["qualityRefreshedAt"] = (now - timedelta(hours=7)).isoformat()
+        wallet["dataQuality"]["qualityRefreshedAt"] = (
+            now - timedelta(hours=hard_hours + 1)
+        ).isoformat()
         self.assertEqual(self.service.wallet_conviction_weight(wallet), 0.0)
         self.assertFalse(self.service.should_count_wallet_for_conviction(wallet))
 
