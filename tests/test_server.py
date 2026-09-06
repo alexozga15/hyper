@@ -7932,13 +7932,15 @@ class LargePositionAlertFloorTests(unittest.TestCase):
     def test_position_group_display_floor_default(self) -> None:
         # The digest's "Open pos now" floor, separate from the single-wallet
         # alert floor above, and the ceiling the conviction discount works down
-        # from. Raised $1M -> $2M to cut clusters that padded the digest without
-        # changing a decision; the discount below then readmits the ones whose
-        # agreement is worth the space.
+        # from. It went $1M -> $2M to cut clusters that padded the digest, then
+        # back to $1M once seven wallet cuts had shrunk the board: at $1M it
+        # carries 13 groups against 10 and takes actionable rows from 6 to 9,
+        # and the readmitted groups measured better than the board average
+        # rather than worse. See the constant's comment for the figures.
         import server as server_module
 
-        self.assertEqual(server_module.POSITION_GROUP_DISPLAY_MIN_VALUE, 2_000_000)
-        self.assertEqual(server_module.MIN_POSITION_MESSAGE_VALUE, 2_000_000)
+        self.assertEqual(server_module.POSITION_GROUP_DISPLAY_MIN_VALUE, 1_000_000)
+        self.assertEqual(server_module.MIN_POSITION_MESSAGE_VALUE, 1_000_000)
 
     def test_position_group_floor_follows_the_patched_constant(self) -> None:
         # Same regression guard as below: the floor must be read at call time,
