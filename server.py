@@ -185,6 +185,25 @@ WALLET_QUARANTINE_MAX_7D_WIN_RATE = 35.0
 CMM_SIGNAL_PROBABILITY_THRESHOLD = 70.0
 CMM_WATCH_PROBABILITY_THRESHOLD = 60.0
 CMM_ALERT_PROBABILITY_THRESHOLD = 80.0
+# CoinMarketMan signals reach Telegram with zero outcome tracking. Measured
+# today: CMM produces 33 signals (28 at/above CMM_WATCH_PROBABILITY_THRESHOLD -
+# 4 alert, 7 actionable, 17 watch; 5 below). Every CMM signal's "price" field
+# is empty in practice (score_cmm_components only fills it when cohort entry
+# prices are reported, which is rare), so entry price must come from a
+# Hyperliquid mark instead. The existing signal_outcome_mark_maps source
+# covers only 19 of 33 (coins tracked wallets happen to hold); {"type":
+# "allMids"} alone covers 17 of 33 (HIP-3 markets are absent from it);
+# combined main allMids + per-HIP-3-dex allMids covers 31 of 33 (94%, 3 of
+# the 4 alert-eligible signals), at a cost of 12 API calls / ~3.2s per cycle.
+CMM_SIGNAL_OUTCOME_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
+# Mirror SHADOW_SIGNAL_OUTCOME_MIN_GAP_MS by reference rather than value, the
+# same way that constant itself mirrors SIGNAL_LIFETIME_MS.
+CMM_SIGNAL_OUTCOME_MIN_GAP_MS = SHADOW_SIGNAL_OUTCOME_MIN_GAP_MS
+# Only record signals the system actually surfaces (watch tier and above),
+# not all ~250 scored candidates the heatmap produces.
+CMM_SIGNAL_OUTCOME_MIN_PROBABILITY = CMM_WATCH_PROBABILITY_THRESHOLD
+# Score move that justifies a fresh sample even inside the min-gap window.
+CMM_SIGNAL_OUTCOME_PROBABILITY_MOVE = 10.0
 CMM_SIGNAL_MIN_TOTAL_VALUE = 500_000
 CMM_ACTIONABLE_MIN_TOTAL_VALUE = 1_000_000
 CMM_SIGNAL_DEFAULT_COINS: tuple[str, ...] = ()
@@ -7973,6 +7992,155 @@ class WalletTrackerService:
             )
         return measured
 
+    def combined_mark_map(self) -> dict[str, float]:
+        """Coin -> mark price, merging the main allMids book with every HIP-3
+        dex's own allMids.
+
+        CMM signals routinely name coins that only trade on a HIP-3 market
+        (stocks, commodities), which the main allMids response never carries -
+        see the coverage numbers documented above CMM_SIGNAL_OUTCOME_RETENTION_MS.
+        Every request goes through self.client.safe_post, so a failed call
+        degrades to whatever was already gathered instead of raising.
+        """
+        result: dict[str, float] = {}
+
+        def register(mids: Any) -> None:
+            if not isinstance(mids, dict):
+                return
+            for key, value in mids.items():
+                price = to_float(value)
+                if price <= 0:
+                    continue
+                result.setdefault(normalize_position_coin(key), price)
+                suffix = str(key).split(":")[-1]
+                result.setdefault(normalize_position_coin(suffix), price)
+
+        register(self.client.safe_post({"type": "allMids"}, {}))
+        dexes = self.client.safe_post({"type": "perpDexs"}, [])
+        for dex in dexes if isinstance(dexes, list) else []:
+            name = ""
+            if isinstance(dex, dict):
+                name = str(dex.get("name") or "").strip()
+            elif isinstance(dex, str):
+                name = dex.strip()
+            if not name:
+                # The main dex is represented by an empty/None entry in
+                # perpDexs; it is already covered by the plain allMids call
+                # above, so there is nothing extra to fetch for it here.
+                continue
+            register(self.client.safe_post({"type": "allMids", "dex": name}, {}))
+        return result
+
+    def cmm_signal_outcome_candidates(self, cmm_summary: dict[str, Any]) -> list[dict[str, Any]]:
+        """CMM signals eligible for outcome tracking: watch tier and above.
+
+        Below-threshold candidates are excluded so this stream only measures
+        signals the system actually surfaces, not all ~250 scored candidates
+        the heatmap produces every cycle.
+        """
+        candidates = list(cmm_summary.get("signals", [])) + list(cmm_summary.get("belowThresholdSignals", []))
+        return [
+            signal
+            for signal in candidates
+            if isinstance(signal, dict)
+            and to_float(signal.get("probabilityScore")) >= CMM_SIGNAL_OUTCOME_MIN_PROBABILITY
+        ]
+
+    def cmm_signal_outcome_sample_reason(
+        self,
+        signal: dict[str, Any],
+        previous_record: dict[str, Any] | None,
+        *,
+        now_ms: int,
+    ) -> str:
+        """Why this CMM signal is a new outcome sample, or "" to skip it."""
+        if not isinstance(previous_record, dict) or not previous_record:
+            return "initial"
+        elapsed_ms = now_ms - int(to_float(previous_record.get("startedAt")))
+        if elapsed_ms < CMM_SIGNAL_OUTCOME_MIN_GAP_MS:
+            return ""
+        if str(previous_record.get("signalTier") or "") != str(signal.get("signalTier") or ""):
+            return "tierChanged"
+        previous_probability = to_float(previous_record.get("probabilityScore"))
+        probability = to_float(signal.get("probabilityScore"))
+        if abs(probability - previous_probability) >= CMM_SIGNAL_OUTCOME_PROBABILITY_MOVE:
+            return "scoreMoved"
+        if elapsed_ms >= 24 * 60 * 60 * 1000:
+            # Unchanged for a full day - kept as a slow floor so a static CMM
+            # signal still contributes a fresh sample, mirroring the "periodic"
+            # reason in shadow_sample_reason.
+            return "periodic"
+        return ""
+
+    def update_cmm_signal_outcomes(
+        self,
+        previous: dict[str, Any],
+        cmm_summary: dict[str, Any],
+        *,
+        mark_map: dict[str, float],
+        now_ms: int,
+    ) -> dict[str, Any]:
+        """Track outcomes for CMM signals, entirely separate from the
+        Hyperliquid-sourced signalOutcomes/shadowSignalOutcomes/
+        candidateSignalOutcomes streams. Measurement only - nothing here
+        changes what is published or alerted.
+        """
+        records = {
+            str(key): dict(value)
+            for key, value in (previous.items() if isinstance(previous, dict) else [])
+            if isinstance(value, dict)
+            and now_ms - int(to_float(value.get("startedAt"))) <= CMM_SIGNAL_OUTCOME_RETENTION_MS
+        }
+        latest_records: dict[str, dict[str, Any]] = {}
+        for record in records.values():
+            identity_key = f'cmm:{normalize_position_coin(record.get("coin"))}:{str(record.get("side") or "")}'
+            previous_latest = latest_records.get(identity_key)
+            if previous_latest is None or int(to_float(record.get("startedAt"))) > int(
+                to_float(previous_latest.get("startedAt"))
+            ):
+                latest_records[identity_key] = record
+        for signal in self.cmm_signal_outcome_candidates(cmm_summary):
+            coin = normalize_position_coin(signal.get("coin"))
+            side = str(signal.get("side") or "")
+            entry_price = mark_map.get(coin, 0.0)
+            if entry_price <= 0:
+                continue
+            identity_key = f"cmm:{coin}:{side}"
+            previous_record = latest_records.get(identity_key)
+            sample_reason = self.cmm_signal_outcome_sample_reason(signal, previous_record, now_ms=now_ms)
+            if not sample_reason:
+                continue
+            record_key = f"cmm:{coin}:{side}:{now_ms}"
+            record = records.setdefault(
+                record_key,
+                {
+                    "source": "coinmarketman",
+                    "coin": coin,
+                    "side": side,
+                    "action": signal.get("action", ""),
+                    "entryPrice": round(entry_price, 8),
+                    "probabilityScore": round(to_float(signal.get("probabilityScore")), 1),
+                    "signalTier": signal.get("signalTier", ""),
+                    "alertEligible": bool(signal.get("alertEligible", False)),
+                    "actionableEligible": bool(signal.get("actionableEligible", False)),
+                    "smartCohortScore": round(to_float(signal.get("smartCohortScore")), 1),
+                    "contrarianScore": round(to_float(signal.get("contrarianScore")), 1),
+                    "valueBias": round(to_float(signal.get("valueBias")), 4),
+                    "countBias": round(to_float(signal.get("countBias")), 4),
+                    "cohortCount": int(to_float(signal.get("cohortCount"))),
+                    "totalValue": round(to_float(signal.get("totalValue")), 2),
+                    "startedAt": now_ms,
+                    "sampleReason": sample_reason,
+                    "shadow": True,
+                    "published": False,
+                    "outcomes": {},
+                },
+            )
+            latest_records[identity_key] = record
+        return self.measure_signal_outcome_records(
+            records, marks_by_key={}, marks_by_coin=mark_map, now_ms=now_ms
+        )
+
     def signal_calibration_group(self, coin: Any) -> str:
         normalized = normalize_position_coin(coin)
         return "hip3" if is_stock_like_position(normalized) or is_commodity_like_position(normalized) else "crypto"
@@ -8873,6 +9041,23 @@ class WalletTrackerService:
             alert_summary,
             now_ms=dedupe_now_ms,
         )
+        # CMM outcome tracking is measurement-only and separate from the three
+        # Hyperliquid-sourced outcome streams above. Only pay for the 12
+        # allMids calls in combined_mark_map() when there is actually a
+        # watch-tier-or-above CMM signal to price this cycle.
+        cmm_outcome_candidates = self.cmm_signal_outcome_candidates(cmm_summary)
+        cmm_mark_map = self.combined_mark_map() if cmm_outcome_candidates else {}
+        cmm_signal_outcomes = self.update_cmm_signal_outcomes(
+            state.get("cmmSignalOutcomes", {}),
+            cmm_summary,
+            mark_map=cmm_mark_map,
+            now_ms=dedupe_now_ms,
+        )
+        cmm_summary["cmmOutcomeUnpricedCount"] = sum(
+            1
+            for signal in cmm_outcome_candidates
+            if cmm_mark_map.get(normalize_position_coin(signal.get("coin")), 0.0) <= 0
+        )
         previous_positions = state.get("largePositions", {}) if isinstance(state, dict) else {}
         previous_dedupe = state.get("alertDedupe", {}) if isinstance(state, dict) else {}
         current_positions = self.build_large_position_snapshot(dashboard)
@@ -9003,6 +9188,7 @@ class WalletTrackerService:
             new_state["summary"] = alert_summary
             new_state["largePositions"] = current_positions
             new_state["cmmSignals"] = cmm_summary
+            new_state["cmmSignalOutcomes"] = cmm_signal_outcomes
         if sent or acknowledge_suppressed:
             new_state["alertDedupe"] = self.update_alert_dedupe(
                 previous_dedupe,
@@ -9078,6 +9264,23 @@ class WalletTrackerService:
             state.get("candidateSignalOutcomes", {}),
             alert_summary,
             now_ms=lifecycle_now_ms,
+        )
+        # CMM outcome tracking is measurement-only and separate from the three
+        # Hyperliquid-sourced outcome streams above. Only pay for the 12
+        # allMids calls in combined_mark_map() when there is actually a
+        # watch-tier-or-above CMM signal to price this cycle.
+        cmm_outcome_candidates = self.cmm_signal_outcome_candidates(cmm_summary)
+        cmm_mark_map = self.combined_mark_map() if cmm_outcome_candidates else {}
+        cmm_signal_outcomes = self.update_cmm_signal_outcomes(
+            state.get("cmmSignalOutcomes", {}),
+            cmm_summary,
+            mark_map=cmm_mark_map,
+            now_ms=lifecycle_now_ms,
+        )
+        cmm_summary["cmmOutcomeUnpricedCount"] = sum(
+            1
+            for signal in cmm_outcome_candidates
+            if cmm_mark_map.get(normalize_position_coin(signal.get("coin")), 0.0) <= 0
         )
         current_positions = self.build_large_position_snapshot(dashboard)
         self.send_telegram_message(
@@ -9159,6 +9362,7 @@ class WalletTrackerService:
             "shadowSignalOutcomes": shadow_signal_outcomes,
             "candidateSignalOutcomes": candidate_signal_outcomes,
             "cmmSignals": cmm_summary,
+            "cmmSignalOutcomes": cmm_signal_outcomes,
             "moniSocial": moni_summary,
         }
         if not should_send_position_alert or position_alert_sent or not config.get("enabled"):
