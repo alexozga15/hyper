@@ -139,6 +139,24 @@ SIGNAL_OUTCOME_HORIZON_TOLERANCE_PCT = 50.0
 # Keep unpublished consensus setups too. They are the control group needed to
 # check whether the probability score is genuinely predictive.
 SHADOW_SIGNAL_OUTCOME_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
+# The shadow stream exists to measure, not to publish, so it does not have to
+# use the publication threshold. Measured on the live board after the tracked
+# set went from 32 wallets to 25: at minConsensusWallets 4 only 6 coin/sides
+# still reach agreement and shadow sampling collapsed from ~50 records a day to
+# ~5, which pushes any measurement needing a few hundred observations out past
+# three months. At 3 the same board yields 22 consensus items, restoring the
+# sampling surface roughly fourfold. Publication is untouched - a setup that
+# clears the publication threshold is still excluded from the shadow stream,
+# because published_keys is taken from the publication summary.
+#
+# The cost of the widened population is that conclusions are drawn on
+# three-wallet agreement and applied to four. That is acceptable here because
+# the question the stream exists to answer - whether a wallet's quality
+# predicts how its position resolves - is a property of the wallet, not of the
+# agreement threshold.
+SHADOW_SIGNAL_MIN_CONSENSUS_WALLETS = int(
+    os.environ.get("SHADOW_SIGNAL_MIN_CONSENSUS_WALLETS", "3")
+)
 SHADOW_SIGNAL_OUTCOME_MAX_RECORDS = 6000
 # Ceiling on how often one coin:side can be re-sampled when nothing about the
 # consensus changed. A day of silence per key produced ~20 records/day, which
@@ -8164,14 +8182,50 @@ class WalletTrackerService:
             int(to_float(record.get("startedAt"))),
         )
 
+    def shadow_sampling_consensus(
+        self,
+        dashboard: dict[str, Any],
+        state: dict[str, Any],
+        publication_min_wallets: int,
+        *,
+        position_lifecycle: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]] | None:
+        """The wider consensus the shadow stream samples, or None to reuse the
+        publication summary's own list.
+
+        Built with persist=False so this second pass has no side effects. It
+        costs one in-memory summary build - measured at 0.065s on 25 wallets,
+        against a cycle that takes several seconds - and no API call, because
+        it runs on snapshots the cycle has already fetched.
+        """
+        if SHADOW_SIGNAL_MIN_CONSENSUS_WALLETS >= publication_min_wallets:
+            return None
+        wider, _cohort = self.build_monthly_sentiment_summary(
+            dashboard,
+            max(1, SHADOW_SIGNAL_MIN_CONSENSUS_WALLETS),
+            state,
+            persist=False,
+            position_lifecycle=position_lifecycle,
+        )
+        consensus = wider.get("consensus")
+        return consensus if isinstance(consensus, list) else None
+
     def update_shadow_signal_outcomes(
         self,
         previous: dict[str, Any],
         summary: dict[str, Any],
         *,
         now_ms: int,
+        consensus: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """Track consensus setups that are not published as alerts."""
+        """Track consensus setups that are not published as alerts.
+
+        ``consensus`` overrides the summary's own list so the stream can sample
+        a wider population than the one that publishes - see
+        SHADOW_SIGNAL_MIN_CONSENSUS_WALLETS. Everything else still comes from
+        the publication summary, including published_keys, so a setup that does
+        publish is still excluded here.
+        """
         records = {
             str(key): dict(value)
             for key, value in (previous.items() if isinstance(previous, dict) else [])
@@ -8195,7 +8249,8 @@ class WalletTrackerService:
                 to_float(previous_latest.get("startedAt"))
             ):
                 latest_records[key] = record
-        for item in summary.get("consensus", []):
+        sampled = consensus if consensus is not None else summary.get("consensus", [])
+        for item in sampled:
             if not isinstance(item, dict):
                 continue
             signal_key = self.signal_key(item)
@@ -9385,6 +9440,9 @@ class WalletTrackerService:
             state.get("shadowSignalOutcomes", {}),
             alert_summary,
             now_ms=dedupe_now_ms,
+            consensus=self.shadow_sampling_consensus(
+                dashboard, state, min_wallets, position_lifecycle=position_lifecycle
+            ),
         )
         candidate_signal_outcomes = self.update_candidate_signal_outcomes(
             state.get("candidateSignalOutcomes", {}),
@@ -9617,6 +9675,9 @@ class WalletTrackerService:
             state.get("shadowSignalOutcomes", {}),
             alert_summary,
             now_ms=lifecycle_now_ms,
+            consensus=self.shadow_sampling_consensus(
+                dashboard, state, min_wallets, position_lifecycle=position_lifecycle
+            ),
         )
         candidate_signal_outcomes = self.update_candidate_signal_outcomes(
             state.get("candidateSignalOutcomes", {}),
