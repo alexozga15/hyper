@@ -49,6 +49,7 @@ WALLET_QUALITY_CACHE_FILE = DATA_DIR / "wallet_quality_cache.json"
 WALLET_REVIEW_FILE = DATA_DIR / "wallet_review.json"
 RUNTIME_HEALTH_FILE = DATA_DIR / "runtime_health.json"
 DASHBOARD_SNAPSHOT_FILE = DATA_DIR / "dashboard_snapshot.json"
+CMM_HEATMAP_HISTORY_FILE = DATA_DIR / "cmm_heatmap_history.json"
 DASHBOARD_SNAPSHOT_VERSION = 1
 # The sentiment timer rebuilds the dashboard every 5 minutes. Three cadences of
 # slack means one skipped or slow sentiment run still serves a Telegram command
@@ -232,6 +233,16 @@ CMM_SIGNAL_SEGMENT_WEIGHTS = {
     8: 1.0,
     9: 0.7,
 }
+# CMM retains no history of its own and its API exposes none, so the only way
+# to test whether a measured cross-sectional effect holds week to week is to
+# start recording it ourselves. Three calls a day (one per window below)
+# capture what a single "openedWithin" filter cannot: differencing 24h from
+# 7d, and 7d from 30d, isolates the flow that opened in each of three periods
+# (0-1d, 1-7d, 7-30d ago) rather than three overlapping cumulative totals.
+# 120 days of retention is what makes a persistence test possible at all.
+CMM_HEATMAP_HISTORY_WINDOWS: tuple[str, ...] = ("24h", "7d", "30d")
+CMM_HEATMAP_SNAPSHOT_INTERVAL_MS = int(float(os.environ.get("CMM_HEATMAP_SNAPSHOT_INTERVAL_MS", 24 * 60 * 60 * 1000)))
+CMM_HEATMAP_HISTORY_RETENTION_MS = int(float(os.environ.get("CMM_HEATMAP_HISTORY_RETENTION_MS", 120 * 24 * 60 * 60 * 1000)))
 MONI_SOCIAL_CACHE_TTL_HOURS = 24
 MONI_SOCIAL_ERROR_BACKOFF_HOURS = 6
 MONI_SOCIAL_POINTS_PER_REFRESH = 8
@@ -3447,6 +3458,10 @@ class WalletTrackerService:
         untrusted_quality_window_wallets = sum(
             1 for wallet in snapshots if not wallet_quality_window_trusted(wallet)
         )
+        cmm_heatmap_history = load_json_file(CMM_HEATMAP_HISTORY_FILE, {"version": 1, "snapshots": []})
+        cmm_heatmap_snapshots = cmm_heatmap_history.get("snapshots") if isinstance(cmm_heatmap_history, dict) else None
+        cmm_heatmap_snapshots = cmm_heatmap_snapshots if isinstance(cmm_heatmap_snapshots, list) else []
+        cmm_heatmap_snapshot_at = str(cmm_heatmap_snapshots[-1].get("at", "")) if cmm_heatmap_snapshots else ""
         save_json_file(
             RUNTIME_HEALTH_FILE,
             {
@@ -3463,6 +3478,8 @@ class WalletTrackerService:
                 "throttle": self.client.rate_limiter.throttle_report(),
                 "fillsGloballyDegraded": fills_globally_degraded,
                 "untrustedQualityWindowWallets": untrusted_quality_window_wallets,
+                "cmmHeatmapSnapshotAt": cmm_heatmap_snapshot_at,
+                "cmmHeatmapSnapshotCount": len(cmm_heatmap_snapshots),
             },
         )
 
@@ -6425,6 +6442,94 @@ class WalletTrackerService:
                 return [item for item in value if isinstance(item, dict)]
         return []
 
+    def compact_cmm_heatmap_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Reduce heatmap rows (from self.cmm_heatmap_rows(payload)) to only
+        the row-level aggregates a persistence analysis needs, dropping the
+        per-segment breakdown."""
+        compacted: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            # CRITICAL: do not uppercase or otherwise normalise the coin.
+            # HIP-3 markets come back as "xyz:NVDA", and Hyperliquid's
+            # candleSnapshot only accepts that exact lowercase-prefixed form.
+            # Uppercasing it has already made 138 of 315 markets unpriceable
+            # once elsewhere in this file (build_cmm_signal_candidates upper()s
+            # for its own coin_filter matching) - do not repeat that mistake
+            # here.
+            coin = row.get("coin")
+            coin = coin if isinstance(coin, str) else ("" if coin is None else str(coin))
+            total_value = to_float(row.get("totalValue"))
+            if not coin or total_value <= 0:
+                continue
+            compacted.append(
+                {
+                    "coin": coin,
+                    "totalValue": round(total_value, 2),
+                    "totalLongValue": round(to_float(row.get("totalLongValue")), 2),
+                    "totalShortValue": round(to_float(row.get("totalShortValue")), 2),
+                    "count": int(to_float(row.get("count"))),
+                    "countLong": int(to_float(row.get("countLong"))),
+                    "countShort": int(to_float(row.get("countShort"))),
+                }
+            )
+        return compacted
+
+    def capture_cmm_heatmap_snapshot(
+        self, *, now_ms: int, history: dict[str, Any] | None = None
+    ) -> dict[str, Any] | None:
+        """Record at most one compacted CMM heatmap snapshot per day into
+        CMM_HEATMAP_HISTORY_FILE. Recording only: nothing this writes is read
+        by cmmSignals, cmmSignalOutcomes, or any alert/gate/publication path.
+        The `history` parameter exists so tests can inject a history dict
+        instead of touching the filesystem.
+        """
+        if history is None:
+            history = load_json_file(CMM_HEATMAP_HISTORY_FILE, {"version": 1, "snapshots": []})
+        snapshots = history.get("snapshots")
+        if not isinstance(snapshots, list):
+            snapshots = []
+            history["snapshots"] = snapshots
+
+        if snapshots:
+            latest_at_ms = to_float(snapshots[-1].get("atMs"))
+            if now_ms - latest_at_ms < CMM_HEATMAP_SNAPSHOT_INTERVAL_MS:
+                return None
+
+        windows: dict[str, list[dict[str, Any]]] = {}
+        row_counts: dict[str, int] = {}
+        totals: dict[str, dict[str, float]] = {}
+        for window in CMM_HEATMAP_HISTORY_WINDOWS:
+            try:
+                payload = self.cmm_client.positions_heatmap(opened_within=window)
+                rows = self.compact_cmm_heatmap_rows(self.cmm_heatmap_rows(payload))
+            except Exception as exc:  # includes CoinMarketManApiError; a CMM
+                # problem here can never break the alert cycle it rides along
+                # with, so abort without writing a partial snapshot.
+                history["lastError"] = str(exc)
+                save_json_file(CMM_HEATMAP_HISTORY_FILE, history)
+                return None
+            windows[window] = rows
+            row_counts[window] = len(rows)
+            totals[window] = {
+                "long": round(sum(row["totalLongValue"] for row in rows), 2),
+                "short": round(sum(row["totalShortValue"] for row in rows), 2),
+            }
+
+        history.pop("lastError", None)
+        snapshot = {
+            "at": now_iso(),
+            "atMs": now_ms,
+            "windows": windows,
+            "rowCounts": row_counts,
+            "totals": totals,
+        }
+        snapshots.append(snapshot)
+        cutoff_ms = now_ms - CMM_HEATMAP_HISTORY_RETENTION_MS
+        history["snapshots"] = [s for s in snapshots if to_float(s.get("atMs")) >= cutoff_ms]
+        save_json_file(CMM_HEATMAP_HISTORY_FILE, history)
+        return snapshot
+
     @staticmethod
     def cmm_component_entry_price(component: dict[str, Any], side: str) -> tuple[float, str]:
         reported_entry = to_float(component.get("price"))
@@ -9016,6 +9121,20 @@ class WalletTrackerService:
         moni_summary = self.build_cached_moni_social_summary(state, alert_summary.get("signals", []))
         alert_summary = self.apply_moni_social_context(alert_summary, moni_summary)
         dedupe_now_ms = current_time_ms()
+        # Recording-only: at most one CMM heatmap snapshot per day, and never
+        # when CMM is already rate-limited (three more requests would only
+        # make that worse). Any failure here must never affect the alert
+        # cycle it rides along with. Also gated on the same condition that
+        # decides whether this call persists any state at all (mirrors the
+        # early-return check below): /api/alerts/preview calls check_alerts
+        # with send_notification=False and is a pure read with zero side
+        # effects, so it must never trigger a CMM API call or write
+        # cmm_heatmap_history.json.
+        if (send_notification or acknowledge_suppressed) and not cmm_summary.get("rateLimited"):
+            try:
+                self.capture_cmm_heatmap_snapshot(now_ms=dedupe_now_ms)
+            except Exception:
+                pass
         alert_summary = self.apply_candidate_signal_lifecycle(
             alert_summary,
             previous_summary,
