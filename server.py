@@ -372,6 +372,13 @@ OPEN_POSITION_ALERT_WINDOW_MS = 5 * 60 * 1000
 ALERT_ACTIONABLE_MAX_DISTANCE_PCT = float(
     os.environ.get("ALERT_ACTIONABLE_MAX_DISTANCE_PCT", "3.0")
 )
+# Once a group has alerted on entering the band it stays latched until it moves
+# this far away, then re-arms. Without the gap a group hovering at the edge
+# would re-alert every time it crossed 3.00% in either direction; with it, the
+# group has to leave meaningfully before it can announce an entry again.
+ACTIONABLE_ENTRY_RELEASE_DISTANCE_PCT = float(
+    os.environ.get("ACTIONABLE_ENTRY_RELEASE_DISTANCE_PCT", "4.5")
+)
 # Quality decides what is worth an alert; size only scales it.
 #
 # Measured over 99 days across 31 tracked wallets, split chronologically in
@@ -1217,6 +1224,45 @@ def telegram_html_escape(value: str) -> str:
     text = text.replace("<", "&lt;")
     text = text.replace(">", "&gt;")
     return text
+
+
+def group_reference_and_mark(item: Any) -> tuple[float, float]:
+    """A position group's reference price and its implied mark.
+
+    The reference is the 7d add price when the group has one - the level these
+    wallets actually paid most recently, the same convention the signals
+    section uses - and the group's entry otherwise. The mark is value over
+    size, the way the position buckets already derive markPrice.
+
+    Extracted so the board and the actionable-entry alert cannot drift apart on
+    what "within reach" means.
+    """
+    if not isinstance(item, dict):
+        return 0.0, 0.0
+    total_size = to_float(item.get("totalSize"))
+    mark_price = to_float(item.get("totalValue")) / total_size if total_size > 0 else 0.0
+    reference_price = to_float(item.get("recentAddPx")) or to_float(item.get("entryPx"))
+    return reference_price, mark_price
+
+
+def group_quality_above_baseline(item: Any) -> bool:
+    """Does this group carry a displayed quality estimate above the baseline?
+
+    Requires the estimate to be shown, not merely present: below half the
+    members carrying one, the mean describes a minority of the group while
+    looking like it describes the group. Same condition the board uses to
+    decide whether to print the figure at all, so a row can never be marked on
+    a number the reader cannot see.
+    """
+    if not isinstance(item, dict):
+        return False
+    mean_pct = item.get("qualityWinRatePct")
+    if mean_pct is None:
+        return False
+    scored = int(to_float(item.get("qualityScoredWallets")))
+    if scored * 2 < int(to_float(item.get("walletCount"))):
+        return False
+    return to_float(mean_pct) > CONVICTION_WIN_RATE_BASELINE * 100
 
 
 def is_actionable_distance_pct(distance_pct: float) -> bool:
@@ -5370,6 +5416,7 @@ class WalletTrackerService:
             "changedConsensus": [],
             "hip3Added": [],
             "hip3Removed": [],
+            "actionableEntries": [],
             "clusteredOpenPositions": [],
             "newLargePositions": new_large_positions,
             "increasedLargePositions": increased_large_positions,
@@ -5931,6 +5978,28 @@ class WalletTrackerService:
                     f'p{to_float(item.get("probabilityScore")):.0f}{move_note}, '
                     f'{item.get("cohortCount", 0)} cohorts, bias {bias_pct:.0f}%, '
                     f'{format_money_compact(item.get("totalValue"))}, {cohorts}'
+                )
+
+        actionable_entries = changes.get("actionableEntries", [])[:8]
+        if actionable_entries:
+            lines.append("")
+            lines.append(
+                f"Now within {ALERT_ACTIONABLE_MAX_DISTANCE_PCT:.0f}% of where the wallets bought"
+            )
+            for item in actionable_entries:
+                coin = telegram_html_escape(str(item.get("coin", "")))
+                side = telegram_html_escape(str(item.get("side") or "").upper())
+                quality = ""
+                if item.get("qualityWinRatePct") is not None:
+                    quality = f' | quality {to_float(item.get("qualityWinRatePct")):.0f}%'
+                    if item.get("qualityBestWinRatePct") is not None:
+                        quality += f' (best {to_float(item.get("qualityBestWinRatePct")):.0f}%)'
+                lines.append(
+                    f'- {coin} {side}: {int(to_float(item.get("walletCount")))} wallets | '
+                    f'{format_money_compact(to_float(item.get("totalValue")))} open | '
+                    f'ref ${format_price(to_float(item.get("referencePrice")))} -> '
+                    f'${format_price(to_float(item.get("markPrice")))} '
+                    f'({to_float(item.get("distancePct")):+.1f}%){quality}'
                 )
 
         clustered_rendered = changes.get("clusteredOpenPositions", [])[:10]
@@ -8775,6 +8844,78 @@ class WalletTrackerService:
         lines.append(f'Updated: {format_update_time(summary.get("generatedAt", now_iso()))}')
         return "\n".join(lines)
 
+    def build_actionable_entry_alerts(
+        self,
+        dashboard: dict[str, Any],
+        previous: Any,
+        *,
+        now_ms: int,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Groups that have just come within reach, and the new latch state.
+
+        The board's actionable rows are the one thing here with a measured
+        edge - a wallet's quality predicts whether its position closes
+        profitable at AUC 0.586-0.753 out of sample - but they were only ever
+        seen on the four-hourly digest, so a group could sit inside the band
+        for hours before the reader heard about it. This fires on the
+        transition instead.
+
+        Only groups whose displayed quality is above the baseline qualify: the
+        same subset the board marks green, and the only one the measurement
+        speaks to. A group stays latched until it moves beyond
+        ACTIONABLE_ENTRY_RELEASE_DISTANCE_PCT, so hovering at the edge cannot
+        produce a stream of alerts.
+        """
+        latched = previous if isinstance(previous, dict) else {}
+        groups: list[dict[str, Any]] = []
+        for kwargs in (
+            {"hip3_only": False, "stock_like_only": False, "commodity_like_only": False},
+            {"hip3_only": False, "stock_like_only": True, "commodity_like_only": False},
+            {"hip3_only": False, "stock_like_only": False, "commodity_like_only": True},
+        ):
+            groups.extend(self.build_position_groups(dashboard, **kwargs))
+
+        alerts: list[dict[str, Any]] = []
+        next_state: dict[str, Any] = {}
+        for item in groups:
+            coin = str(item.get("coin") or "")
+            side = str(item.get("side") or "").lower()
+            if not coin or not side:
+                continue
+            key = f"{coin}:{side}"
+            reference_price, mark_price = group_reference_and_mark(item)
+            if reference_price <= 0 or mark_price <= 0:
+                # No usable reference, so neither entry nor release can be
+                # judged. Carry any existing latch rather than re-arming on
+                # missing data.
+                if key in latched:
+                    next_state[key] = latched[key]
+                continue
+            distance_pct = (mark_price / reference_price - 1.0) * 100.0
+            within = is_actionable_distance_pct(distance_pct)
+            if within and group_quality_above_baseline(item):
+                if key in latched:
+                    next_state[key] = latched[key]
+                    continue
+                entry = {
+                    "coin": coin,
+                    "side": side,
+                    "walletCount": int(to_float(item.get("walletCount"))),
+                    "totalValue": round(to_float(item.get("totalValue")), 2),
+                    "referencePrice": round(reference_price, 8),
+                    "markPrice": round(mark_price, 8),
+                    "distancePct": round(distance_pct, 2),
+                    "qualityWinRatePct": item.get("qualityWinRatePct"),
+                    "qualityBestWinRatePct": item.get("qualityBestWinRatePct"),
+                    "enteredAt": now_iso(),
+                    "enteredAtMs": int(now_ms),
+                }
+                alerts.append(entry)
+                next_state[key] = entry
+            elif key in latched and abs(distance_pct) <= ACTIONABLE_ENTRY_RELEASE_DISTANCE_PCT:
+                next_state[key] = latched[key]
+        return alerts, next_state
+
     def build_positions_message(
         self,
         dashboard: dict[str, Any],
@@ -8864,13 +9005,7 @@ class WalletTrackerService:
                         # section uses - and the group's entry otherwise. Mark
                         # is implied by value over size, the way the position
                         # buckets already derive markPrice.
-                        total_size = to_float(item.get("totalSize"))
-                        mark_price = (
-                            to_float(item.get("totalValue")) / total_size if total_size > 0 else 0.0
-                        )
-                        reference_price = to_float(item.get("recentAddPx")) or to_float(
-                            item.get("entryPx")
-                        )
+                        reference_price, mark_price = group_reference_and_mark(item)
                         row_index = len(lines)
                         is_actionable = is_within_actionable_distance(reference_price, mark_price)
                         if is_actionable:
@@ -8888,11 +9023,7 @@ class WalletTrackerService:
                             quality_note = f' | quality {to_float(mean_pct):.0f}%'
                             if best_pct is not None:
                                 quality_note += f' (best {to_float(best_pct):.0f}%)'
-                        if (
-                            is_actionable
-                            and quality_note_shown
-                            and to_float(mean_pct) > CONVICTION_WIN_RATE_BASELINE * 100
-                        ):
+                        if is_actionable and group_quality_above_baseline(item):
                             high_quality_actionable_lines.add(row_index)
                         lines.append(
                             f'- {item["coin"]} {str(item.get("side") or "").upper()}: '
@@ -9308,6 +9439,12 @@ class WalletTrackerService:
             fresh_flow_positions,
             now_ms=dedupe_now_ms,
         )
+        actionable_entries, actionable_entry_state = self.build_actionable_entry_alerts(
+            dashboard,
+            state.get("actionableGroups"),
+            now_ms=dedupe_now_ms,
+        )
+        changes["actionableEntries"] = actionable_entries
         changes["clusteredOpenPositions"] = clustered_open_positions
         changes["newLargePositions"] = position_changes["newLargePositions"]
         changes["increasedLargePositions"] = position_changes["increasedLargePositions"]
@@ -9327,6 +9464,7 @@ class WalletTrackerService:
                 changes["addedCandidateSignals"],
                 changes["addedCmmSignals"],
                 changes["changedCmmSignals"],
+                changes["actionableEntries"],
                 changes["clusteredOpenPositions"],
                 changes["newLargePositions"],
                 changes["increasedLargePositions"],
@@ -9399,6 +9537,7 @@ class WalletTrackerService:
             "topConvictionWallets": top_cohort,
             "walletPositionLifecycle": position_lifecycle,
             "signalOutcomes": signal_outcomes,
+            "actionableGroups": actionable_entry_state,
             "shadowSignalOutcomes": shadow_signal_outcomes,
             "candidateSignalOutcomes": candidate_signal_outcomes,
             "moniSocial": moni_summary,
