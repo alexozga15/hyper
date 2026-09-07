@@ -623,6 +623,15 @@ RANKING_FULL_CONFIDENCE_30D_CLOSED_TRADES = 30
 # CONVICTION_WIN_RATE_PRIOR_TRADES below) gives 0.690 while protecting small
 # samples. The wider window also lifts wallets with a usable score from 25 of
 # 31 to 29 of 31.
+#
+# Read 0.728 with its leave-one-wallet-out range. Measured out of sample on 915
+# positions from 16 wallets, dropping any single wallet moves it between 0.586
+# and 0.753 - and the low end is what remains without one standout that
+# supplied 297 of those positions. The estimator's demonstrated strength is
+# largely its ability to identify that wallet, not to rank the middle finely,
+# and the wallet-level rank correlation was rho +0.636 at p=0.054 on the ten
+# wallets with enough test positions to check. Treat the headline as the top of
+# a range, not a point estimate.
 WALLET_QUALITY_WINDOW_DAYS = int(float(os.environ.get("WALLET_QUALITY_WINDOW_DAYS", 90)))
 # Minimum 90d closed-run count before convictionWinRateWeight is trusted enough
 # to emit. Mirrors RANKING_MIN_30D_CLOSED_TRADES's role for the 30d score.
@@ -1373,6 +1382,62 @@ def capped_recent_quality_blend(base_30d_score: float, recent_7d_score: float, r
     return clamp(max(base - max_effect, min(base + max_effect, blended)))
 
 
+def quality_label_for_weight(weight: float, *, elite_eligible: bool) -> str:
+    """The tier a conviction weight falls in.
+
+    Shared by build_wallet_quality_rank and by the cached-rank refresh, so a
+    change to the tiers or to CONVICTION_WIN_RATE_BASELINE cannot take effect
+    in one place and not the other.
+
+    Compared with a tolerance rather than exactly: the weight is
+    shrunk / baseline with no rounding in between, so a wallet sitting on a
+    boundary lands at 0.79999999999999993 and would silently drop a tier. Same
+    defect and same fix as is_actionable_distance_pct.
+
+    elite_eligible stays a hard extra requirement for Elite because profit
+    factor and drawdown are a second dimension a win rate does not capture.
+    """
+    if weight >= LABEL_TIER_STRONG_WEIGHT - LABEL_TIER_EPSILON:
+        return "Elite" if elite_eligible else "Strong"
+    if weight >= LABEL_TIER_BALANCED_WEIGHT - LABEL_TIER_EPSILON:
+        return "Balanced"
+    if weight >= LABEL_TIER_WEAK_WEIGHT - LABEL_TIER_EPSILON:
+        return "Weak"
+    return "Cold"
+
+
+def refreshed_quality_rank(
+    rank: Any, hit_rate_90d: Any, closed_trade_count_90d: Any
+) -> Any:
+    """A cached rank with its weight-derived fields recomputed.
+
+    recentWinRateRank is carried forward verbatim whenever a wallet's quality
+    is served from cache, which meant convictionWinRateWeight and the label it
+    drives kept whatever values the constants had when the entry was written.
+    Measured on a live deploy: after CONVICTION_WIN_RATE_BASELINE moved, every
+    cached wallet kept a stale weight for up to the hard TTL, and a label
+    change left 17 of 25 wallets wrong for the same window.
+
+    Both are pure functions of fields the cache already holds, so this costs no
+    API call. Everything else in the rank is left exactly as stored - only the
+    two fields that a constant change invalidates are rebuilt.
+    """
+    if not isinstance(rank, dict):
+        return rank
+    shrunk = shrunk_win_rate(hit_rate_90d, closed_trade_count_90d)
+    if shrunk is None:
+        # Too thin a 90d sample to score. The key must stay absent, because
+        # wallet_conviction_weight relies on its absence to fall back to the
+        # score-derived weight, and the stored composite label stays with it.
+        return {key: value for key, value in rank.items() if key != "convictionWinRateWeight"}
+    weight = clamp(shrunk / CONVICTION_WIN_RATE_BASELINE, 0.5, 1.5)
+    return {
+        **rank,
+        "convictionWinRateWeight": round(weight, 3),
+        "label": quality_label_for_weight(weight, elite_eligible=bool(rank.get("eliteEligible"))),
+    }
+
+
 def shrunk_win_rate(hit_rate_pct: Any, closed_trades: Any) -> float | None:
     """The 90d win rate pulled toward the population baseline, or None.
 
@@ -1530,27 +1595,7 @@ def build_wallet_quality_rank(
     # with too small a 90d sample (conviction_win_rate_weight is None) fall
     # back to the old composite-derived chain, unchanged.
     if conviction_win_rate_weight is not None:
-        # Compared with a tolerance, not exactly. The weight is
-        # shrunk / baseline with no rounding in between, so a wallet sitting
-        # on a tier boundary lands at 0.79999999999999993 rather than 0.80 and
-        # would silently drop a tier. Same defect and same fix as
-        # is_actionable_distance_pct.
-        def at_or_above(threshold: float) -> bool:
-            return conviction_win_rate_weight >= threshold - LABEL_TIER_EPSILON
-
-        if elite_eligible and at_or_above(LABEL_TIER_STRONG_WEIGHT):
-            # elite_eligible stays a hard extra requirement for Elite: profit
-            # factor and drawdown are a second dimension a win rate alone
-            # does not capture.
-            label = "Elite"
-        elif at_or_above(LABEL_TIER_STRONG_WEIGHT):
-            label = "Strong"
-        elif at_or_above(LABEL_TIER_BALANCED_WEIGHT):
-            label = "Balanced"
-        elif at_or_above(LABEL_TIER_WEAK_WEIGHT):
-            label = "Weak"
-        else:
-            label = "Cold"
+        label = quality_label_for_weight(conviction_win_rate_weight, elite_eligible=elite_eligible)
     elif sample_size_7d < RANKING_MIN_7D_CLOSED_TRADES and sample_size_30d < RANKING_MIN_30D_CLOSED_TRADES:
         label = "Unranked"
     elif score >= ELITE_MIN_QUALITY_SCORE and elite_eligible:
@@ -3116,6 +3161,17 @@ class WalletTrackerService:
                 if field in cached:
                     snapshot[field] = cached[field]
                     cached_fields_used.append(field)
+            # The rank is carried verbatim like every other cached field, but
+            # its weight and label are pure functions of the constants, so a
+            # stale copy silently ignores a constant change until the wallet
+            # next gets a full refresh. Rebuild just those two from the cached
+            # 90d figures - no API call, no other field touched.
+            if "recentWinRateRank" in snapshot:
+                snapshot["recentWinRateRank"] = refreshed_quality_rank(
+                    snapshot["recentWinRateRank"],
+                    snapshot.get("winRate90d"),
+                    snapshot.get("closedTrades90d"),
+                )
         if recent_fills:
             latest_live_fill_ms = max(int(to_float(fill.get("time"))) for fill in recent_fills)
             snapshot["holdingOnly30d"] = False

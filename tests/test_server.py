@@ -51,7 +51,10 @@ from server import (
     normalize_address,
     parse_import_lines,
     side_from_size,
+    quality_label_for_weight,
+    refreshed_quality_rank,
     to_float,
+    shrunk_win_rate,
 )
 
 
@@ -199,6 +202,59 @@ class SegmentTests(unittest.TestCase):
             closed_trade_count_90d=100,
             **extra,
         )
+
+    def test_a_cached_rank_is_rebuilt_against_the_current_constants(self) -> None:
+        # recentWinRateRank is carried verbatim from cache, so before this a
+        # constant change was ignored until the wallet's next full refresh -
+        # measured live as 17 of 25 wallets keeping a stale label for a day.
+        stale = {
+            "label": "Elite",
+            "score": 71.5,
+            "convictionWeightScore": 78.5,
+            "convictionWinRateWeight": 1.480,
+            "eliteEligible": True,
+            "sampleSize30d": 18,
+        }
+        refreshed = refreshed_quality_rank(stale, 47.2, 36)
+
+        expected_weight = round(
+            shrunk_win_rate(47.2, 36) / CONVICTION_WIN_RATE_BASELINE, 3
+        )
+        self.assertEqual(refreshed["convictionWinRateWeight"], expected_weight)
+        self.assertEqual(
+            refreshed["label"],
+            quality_label_for_weight(expected_weight, elite_eligible=True),
+        )
+        self.assertNotEqual(refreshed["label"], "Elite")
+        # Every other stored field survives untouched.
+        for key in ("score", "convictionWeightScore", "sampleSize30d"):
+            self.assertEqual(refreshed[key], stale[key])
+
+    def test_a_cached_rank_below_the_90d_minimum_loses_the_weight_key(self) -> None:
+        # wallet_conviction_weight relies on the key's absence to fall back to
+        # the score-derived weight, so a thin sample must not leave a stale one.
+        stale = {"label": "Strong", "score": 70.0, "convictionWinRateWeight": 1.2}
+        refreshed = refreshed_quality_rank(
+            stale, 90, RANKING_MIN_90D_CLOSED_TRADES - 1
+        )
+        self.assertNotIn("convictionWinRateWeight", refreshed)
+        self.assertEqual(refreshed["label"], "Strong")
+
+    def test_refreshed_quality_rank_tolerates_a_non_dict(self) -> None:
+        self.assertIsNone(refreshed_quality_rank(None, 70, 100))
+
+    def test_the_helper_and_the_rank_builder_agree_on_every_tier(self) -> None:
+        # The tier logic lives in one place precisely so these cannot drift.
+        for weight in (1.30, 1.00, 0.999, 0.90, 0.899, 0.80, 0.799, 0.60):
+            for eligible in (True, False):
+                with self.subTest(weight=weight, eligible=eligible):
+                    rank = self.rank_at_weight(weight, eligible=eligible)
+                    self.assertEqual(
+                        rank["label"],
+                        quality_label_for_weight(
+                            rank["convictionWinRateWeight"], elite_eligible=eligible
+                        ),
+                    )
 
     def test_label_tiers_follow_the_conviction_weight(self) -> None:
         for weight, expected in (
