@@ -5588,8 +5588,8 @@ class WalletTrackerService:
         for key in current_signals.keys() & previous_signals.keys():
             old_item = previous_signals[key]
             new_item = current_signals[key]
-            old_score = to_float(old_item.get("probabilityScore", old_item.get("convictionScore")))
-            new_score = to_float(new_item.get("probabilityScore", new_item.get("convictionScore")))
+            old_score = to_float(old_item.get("probabilityScore"))
+            new_score = to_float(new_item.get("probabilityScore"))
             score_delta = new_score - old_score
             old_wallet_count = int(to_float(old_item.get("walletCount")))
             new_wallet_count = int(to_float(new_item.get("walletCount")))
@@ -5786,8 +5786,8 @@ class WalletTrackerService:
 
                 emit(f'{index}. {action} {coin} ({side}) - {status}')
                 support_note = (
-                    f'   {int(to_float(item.get("independentWalletCount", item.get("walletCount"))))} wallets, '
-                    f'net +{int(to_float(item.get("netIndependentWalletCount", item.get("netWalletCount"))))}, '
+                    f'   {int(to_float(item.get("independentWalletCount")))} wallets, '
+                    f'net +{int(to_float(item.get("netIndependentWalletCount")))}, '
                     f'quality {to_float(item.get("netIndependentWeightedWalletCount", item.get("netWeightedWalletCount"))):.1f}'
                 )
                 if "netFreshIndependentWalletCount" in item:
@@ -6049,8 +6049,8 @@ class WalletTrackerService:
                     lines.append(
                         f'{index}. {str(item.get("action", "watch")).upper()} '
                         f'{item["coin"]} ({str(item.get("side") or "").upper()}) - '
-                        f'{int(to_float(item.get("independentWalletCount", item.get("walletCount"))))} wallets, '
-                        f'net +{int(to_float(item.get("netIndependentWalletCount", item.get("netWalletCount"))))}, '
+                        f'{int(to_float(item.get("independentWalletCount")))} wallets, '
+                        f'net +{int(to_float(item.get("netIndependentWalletCount")))}, '
                         f'quality {to_float(item.get("netIndependentWeightedWalletCount", item.get("netWeightedWalletCount"))):.1f}'
                     )
             else:
@@ -6084,11 +6084,11 @@ class WalletTrackerService:
                     # Net support +0, where there is no consensus at all.
                     row = (
                         f'- {item["coin"]} {str(item.get("side") or "").upper()}: '
-                        f'{int(to_float(item.get("independentWalletCount", item.get("walletCount"))))} wallets'
+                        f'{int(to_float(item.get("independentWalletCount")))} wallets'
                     )
                     if "netWalletCount" in item:
                         row += (
-                            f', net +{int(to_float(item.get("netIndependentWalletCount", item.get("netWalletCount"))))}, '
+                            f', net +{int(to_float(item.get("netIndependentWalletCount")))}, '
                             f'quality {to_float(item.get("netIndependentWeightedWalletCount", item.get("netWeightedWalletCount"))):.1f}'
                         )
                     lines.append(row)
@@ -7112,10 +7112,10 @@ class WalletTrackerService:
                 for signal in (signals or [])
                 if isinstance(signal, dict)
                 and normalize_position_coin(signal.get("coin")) in handles
-                and to_float(signal.get("probabilityScore", signal.get("convictionScore")))
+                and to_float(signal.get("probabilityScore"))
                 >= ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD
             ],
-            key=lambda item: to_float(item.get("probabilityScore", item.get("convictionScore"))),
+            key=lambda item: to_float(item.get("probabilityScore")),
             reverse=True,
         )
         if not candidates:
@@ -7303,7 +7303,7 @@ class WalletTrackerService:
         return {"addedCmmSignals": added, "changedCmmSignals": changed}
 
     def combined_wallet_cmm_probability(self, wallet_signal: dict[str, Any], cmm_signal: dict[str, Any]) -> float:
-        wallet_score = to_float(wallet_signal.get("probabilityScore", wallet_signal.get("convictionScore")))
+        wallet_score = to_float(wallet_signal.get("probabilityScore"))
         cmm_score = to_float(cmm_signal.get("probabilityScore"))
         trend_score = to_float(cmm_signal.get("trendScore"))
         contrarian_score = max(0.0, to_float(cmm_signal.get("contrarianScore")))
@@ -7378,7 +7378,7 @@ class WalletTrackerService:
             opposite_side = "short" if side == "long" else "long"
             same_cmm = cmm_by_key.get(f"cmm:{coin}:{side}")
             opposite_cmm = cmm_by_key.get(f"cmm:{coin}:{opposite_side}")
-            original_probability = to_float(signal.get("probabilityScore", signal.get("convictionScore")))
+            original_probability = to_float(signal.get("probabilityScore"))
             wallet_native = self.is_wallet_native_signal(signal)
 
             if same_cmm and to_float(same_cmm.get("probabilityScore")) >= CMM_SIGNAL_PROBABILITY_THRESHOLD:
@@ -8651,7 +8651,7 @@ class WalletTrackerService:
         lines = [title, f'Publish gate: {ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD:.0f}/100']
         if signals:
             for index, item in enumerate(signals[:20], start=1):
-                probability = to_float(item.get("probabilityScore", item.get("convictionScore")))
+                probability = to_float(item.get("probabilityScore"))
                 lines.append(
                     f'{index}. {str(item.get("action", "watch")).upper()} '
                     f'{item["coin"]} ({str(item.get("side") or "").upper()}) - '
@@ -8659,7 +8659,7 @@ class WalletTrackerService:
                 )
                 lines.append(
                     f'   Support: {int(to_float(item.get("walletCount")))} wallets | '
-                    f'Net: +{int(to_float(item.get("netIndependentWalletCount", item.get("netWalletCount"))))} | '
+                    f'Net: +{int(to_float(item.get("netIndependentWalletCount")))} | '
                     f'Quality-adjusted: '
                     f'{to_float(item.get("netIndependentWeightedWalletCount", item.get("netWeightedWalletCount"))):.1f}'
                 )

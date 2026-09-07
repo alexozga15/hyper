@@ -51,6 +51,7 @@ from server import (
     normalize_address,
     parse_import_lines,
     side_from_size,
+    to_float,
 )
 
 
@@ -706,11 +707,11 @@ class AlertSummaryTests(unittest.TestCase):
             "overallBias": "bearish",
             "walletCount": 16,
             "consensus": [
-                {"coin": "BTC", "side": "long", "walletCount": 3, "totalValue": 12345.0, "convictionScore": 84.0},
-                {"coin": "OIL", "side": "short", "walletCount": 3, "totalValue": 789.0, "convictionScore": 72.0},
-                {"coin": "EWY", "side": "long", "walletCount": 3, "totalValue": 456.0, "convictionScore": 68.0},
+                {"coin": "BTC", "side": "long", "walletCount": 3, "independentWalletCount": 3, "totalValue": 12345.0, "convictionScore": 84.0},
+                {"coin": "OIL", "side": "short", "walletCount": 3, "independentWalletCount": 3, "totalValue": 789.0, "convictionScore": 72.0},
+                {"coin": "EWY", "side": "long", "walletCount": 3, "independentWalletCount": 3, "totalValue": 456.0, "convictionScore": 68.0},
             ],
-            "hip3Consensus": [{"coin": "@PUMP-1", "side": "short", "walletCount": 3, "totalValue": 456.0}],
+            "hip3Consensus": [{"coin": "@PUMP-1", "side": "short", "walletCount": 3, "independentWalletCount": 3, "totalValue": 456.0}],
         }
 
         message = self.service.build_summary_message(summary, min_wallets=3)
@@ -744,7 +745,12 @@ class AlertSummaryTests(unittest.TestCase):
                     "coin": "SOL",
                     "side": "short",
                     "walletCount": 10,
+                    # Production always writes the deduplicated counts beside
+                    # the raw ones (server.py build_sentiment_summary), and the
+                    # digest reads only the deduplicated ones.
+                    "independentWalletCount": 10,
                     "netWalletCount": 6,
+                    "netIndependentWalletCount": 6,
                     "netWeightedWalletCount": 5.9,
                 },
             ],
@@ -755,6 +761,62 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("- SOL SHORT: 10 wallets, net +6, quality 5.9", message)
         self.assertNotIn("Net support:", message)
         self.assertNotIn("Quality-adjusted support:", message)
+
+    def test_a_missing_probability_never_borrows_the_conviction_score(self) -> None:
+        # convictionScore is wallet crowding (net_score * 100), probabilityScore
+        # is a calibrated win probability. Both are 0-100, so substituting one
+        # for the other is undetectable downstream - and a crowding score of 98
+        # would clear ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD on its own.
+        previous = {"overallBias": "mixed", "consensus": [], "hip3Consensus": [], "signals": []}
+        current = {
+            "overallBias": "mixed",
+            "consensus": [],
+            "hip3Consensus": [],
+            "signals": [
+                {
+                    "coin": "BTC",
+                    "side": "long",
+                    "action": "buy",
+                    "walletCount": 5,
+                    "independentWalletCount": 5,
+                    "totalValue": 2_000_000.0,
+                    "convictionScore": 98.0,
+                },
+            ],
+        }
+
+        changes = self.service.summarize_changes(previous, current, track_hip3=False)
+
+        self.assertEqual(len(changes["addedSignals"]), 1)
+        self.assertEqual(
+            to_float(changes["addedSignals"][0].get("probabilityScore")),
+            0.0,
+            "a signal with no probabilityScore must score 0, not inherit convictionScore",
+        )
+
+    def test_a_missing_independent_count_never_borrows_the_raw_count(self) -> None:
+        # independentWalletCount deduplicates correlated wallets; walletCount
+        # does not. Falling back to the raw count overstates agreement, which is
+        # the one direction a crowding figure must never err in.
+        summary = {
+            "generatedAt": "2026-04-09T06:00:00Z",
+            "overallBias": "bearish",
+            "walletCount": 16,
+            "consensus": [
+                {
+                    "coin": "SOL",
+                    "side": "short",
+                    "walletCount": 10,
+                    "netWalletCount": 6,
+                    "netWeightedWalletCount": 5.9,
+                },
+            ],
+        }
+
+        message = self.service.build_summary_message(summary, min_wallets=3)
+
+        self.assertIn("SOL SHORT: 0 wallets", message)
+        self.assertNotIn("SOL SHORT: 10 wallets", message)
 
     def test_update_message_concatenation_has_single_updated_footer(self) -> None:
         # /update (and the 4-hour digest) build the summary block with
@@ -3455,6 +3517,7 @@ class AlertSummaryTests(unittest.TestCase):
                     "walletCount": 3,
                     "totalValue": 1_000_000.0,
                     "convictionScore": 82.0,
+                    "probabilityScore": 82.0,
                 }
             ],
         }
@@ -3470,6 +3533,7 @@ class AlertSummaryTests(unittest.TestCase):
                     "walletCount": 5,
                     "totalValue": 2_000_000.0,
                     "convictionScore": 98.0,
+                    "probabilityScore": 98.0,
                 },
                 {
                     "coin": "ETH",
@@ -3478,6 +3542,7 @@ class AlertSummaryTests(unittest.TestCase):
                     "walletCount": 4,
                     "totalValue": 1_500_000.0,
                     "convictionScore": 91.0,
+                    "probabilityScore": 91.0,
                 },
             ],
         }
@@ -3500,6 +3565,7 @@ class AlertSummaryTests(unittest.TestCase):
                     "walletCount": 3,
                     "totalValue": 1_250_000.0,
                     "convictionScore": 94.0,
+                    "probabilityScore": 94.0,
                 }
             ],
         }
