@@ -655,6 +655,16 @@ RANKING_MIN_90D_CLOSED_TRADES = int(os.environ.get("RANKING_MIN_90D_CLOSED_TRADE
 # The floor is unaffected: a wallet that never wins scores prior / (sample +
 # prior), which carries no baseline term at all.
 CONVICTION_WIN_RATE_BASELINE = float(os.environ.get("CONVICTION_WIN_RATE_BASELINE", 0.673))
+# Tiers for the weight-derived label below. convictionWinRateWeight is
+# shrunk / baseline, so 1.00 is exactly the measured average win rate across
+# the tracked set and these are steps away from that reference point - not
+# curve-fit thresholds.
+LABEL_TIER_STRONG_WEIGHT = 1.00
+LABEL_TIER_BALANCED_WEIGHT = 0.90
+LABEL_TIER_WEAK_WEIGHT = 0.80
+# The weight is a quotient carried at full float precision, so a wallet exactly
+# on a boundary can land just under it. Compare with this tolerance.
+LABEL_TIER_EPSILON = 1e-9
 # Telegram's HTML parse mode has no colour tag - only b/i/u/s/a/code/pre/
 # tg-spoiler/blockquote are accepted - so "green" is an emoji marker rather
 # than markup. Prepended outside the <b> wrapper so the escaping pass still
@@ -1507,7 +1517,41 @@ def build_wallet_quality_rank(
         and to_float(max_drawdown_pct) <= ELITE_MAX_DRAWDOWN_PCT
     )
 
-    if sample_size_7d < RANKING_MIN_7D_CLOSED_TRADES and sample_size_30d < RANKING_MIN_30D_CLOSED_TRADES:
+    # The label used to be derived from `score` (the convictionWeightScore
+    # composite) below, but that estimator is now known to be the weaker of
+    # the two: measured against actual position outcomes, the 90d win rate
+    # underlying convictionWinRateWeight predicts whether a position closes
+    # profitable at AUC 0.701-0.728 (in-sample / out-of-sample) against the
+    # composite's 0.643. convictionWinRateWeight is also what actually scales
+    # the wallet's influence, so leaving the label on `score` let the two
+    # disagree - a wallet could be labelled Elite while its weight was
+    # deliberately discounted below 1.0, or Cold while its weight was above
+    # it. The label now follows the weight whenever one exists; only wallets
+    # with too small a 90d sample (conviction_win_rate_weight is None) fall
+    # back to the old composite-derived chain, unchanged.
+    if conviction_win_rate_weight is not None:
+        # Compared with a tolerance, not exactly. The weight is
+        # shrunk / baseline with no rounding in between, so a wallet sitting
+        # on a tier boundary lands at 0.79999999999999993 rather than 0.80 and
+        # would silently drop a tier. Same defect and same fix as
+        # is_actionable_distance_pct.
+        def at_or_above(threshold: float) -> bool:
+            return conviction_win_rate_weight >= threshold - LABEL_TIER_EPSILON
+
+        if elite_eligible and at_or_above(LABEL_TIER_STRONG_WEIGHT):
+            # elite_eligible stays a hard extra requirement for Elite: profit
+            # factor and drawdown are a second dimension a win rate alone
+            # does not capture.
+            label = "Elite"
+        elif at_or_above(LABEL_TIER_STRONG_WEIGHT):
+            label = "Strong"
+        elif at_or_above(LABEL_TIER_BALANCED_WEIGHT):
+            label = "Balanced"
+        elif at_or_above(LABEL_TIER_WEAK_WEIGHT):
+            label = "Weak"
+        else:
+            label = "Cold"
+    elif sample_size_7d < RANKING_MIN_7D_CLOSED_TRADES and sample_size_30d < RANKING_MIN_30D_CLOSED_TRADES:
         label = "Unranked"
     elif score >= ELITE_MIN_QUALITY_SCORE and elite_eligible:
         label = "Elite"

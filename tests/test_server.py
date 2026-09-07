@@ -19,6 +19,9 @@ from server import (
     ALERTS_FILE,
     CONVICTION_WIN_RATE_BASELINE,
     CONVICTION_WIN_RATE_PRIOR_TRADES,
+    LABEL_TIER_BALANCED_WEIGHT,
+    LABEL_TIER_STRONG_WEIGHT,
+    LABEL_TIER_WEAK_WEIGHT,
     DORMANT_WALLET_MAX_IDLE_MS,
     FRESH_ACTIVITY_DIAGNOSTIC_WINDOWS_MS,
     FRESH_WALLET_FLOW_MIN_VALUE,
@@ -158,6 +161,126 @@ class SegmentTests(unittest.TestCase):
             70, 20, 20_000, 100_000, hit_rate_90d=100, closed_trade_count_90d=1000
         )
         self.assertLess(smaller["convictionWinRateWeight"], weight)
+
+    # --- the label follows the conviction weight -------------------------
+    #
+    # The label used to come from the `score` composite while the weight came
+    # from the 90d shrunk win rate, so the two could disagree: live wallets
+    # were labelled Elite at weight 0.749 and Cold at 1.050. The weight's
+    # estimator measures better (AUC 0.728 out of sample against the
+    # composite's 0.643), so the label now follows it.
+
+    ELIGIBLE = {
+        "hit_rate_30d": 70,
+        "closed_trade_count_30d": 20,
+        "pnl_30d": 50_000,
+        "gross_profit_30d": 30_000.0,
+        "gross_loss_30d": 10_000.0,
+        "max_drawdown_pct": 10.0,
+    }
+
+    @staticmethod
+    def hit_rate_for_weight(weight: float, closes: int = 100) -> float:
+        """The 90d hit rate that lands convictionWinRateWeight on `weight`.
+
+        Derived from the estimator rather than hardcoded, so these tests keep
+        testing the tier boundaries if the baseline or the prior ever move.
+        """
+        prior = CONVICTION_WIN_RATE_PRIOR_TRADES
+        base = CONVICTION_WIN_RATE_BASELINE
+        return base * (weight * (closes + prior) - prior) / closes * 100.0
+
+    def rank_at_weight(self, weight: float, *, eligible: bool = True) -> dict:
+        extra = dict(self.ELIGIBLE) if eligible else {}
+        return build_wallet_quality_rank(
+            70, 20, 20_000, 100_000,
+            hit_rate_90d=self.hit_rate_for_weight(weight),
+            closed_trade_count_90d=100,
+            **extra,
+        )
+
+    def test_label_tiers_follow_the_conviction_weight(self) -> None:
+        for weight, expected in (
+            (LABEL_TIER_STRONG_WEIGHT + 0.05, "Elite"),
+            (LABEL_TIER_STRONG_WEIGHT, "Elite"),
+            (LABEL_TIER_STRONG_WEIGHT - 0.001, "Balanced"),
+            (LABEL_TIER_BALANCED_WEIGHT, "Balanced"),
+            (LABEL_TIER_BALANCED_WEIGHT - 0.001, "Weak"),
+            (LABEL_TIER_WEAK_WEIGHT, "Weak"),
+            (LABEL_TIER_WEAK_WEIGHT - 0.001, "Cold"),
+        ):
+            with self.subTest(weight=weight):
+                self.assertEqual(self.rank_at_weight(weight)["label"], expected)
+
+    def test_label_boundaries_are_compared_with_a_tolerance(self) -> None:
+        # convictionWinRateWeight is shrunk / baseline with no rounding, so a
+        # wallet exactly on a boundary lands at 0.79999999999999993. Without a
+        # tolerance it silently drops a tier - the same float-boundary defect
+        # is_actionable_distance_pct exists to avoid.
+        for threshold, expected in (
+            (LABEL_TIER_STRONG_WEIGHT, "Elite"),
+            (LABEL_TIER_BALANCED_WEIGHT, "Balanced"),
+            (LABEL_TIER_WEAK_WEIGHT, "Weak"),
+        ):
+            with self.subTest(threshold=threshold):
+                rank = self.rank_at_weight(threshold)
+                self.assertLess(
+                    abs(rank["convictionWinRateWeight"] - threshold), 1e-6,
+                    "fixture did not land on the boundary",
+                )
+                self.assertEqual(rank["label"], expected)
+
+    def test_elite_still_requires_the_risk_filters(self) -> None:
+        # elite_eligible carries profit factor and drawdown, a dimension a win
+        # rate does not capture, so it stays a hard extra requirement.
+        strong = self.rank_at_weight(LABEL_TIER_STRONG_WEIGHT + 0.05, eligible=False)
+        self.assertFalse(strong["eliteEligible"])
+        self.assertEqual(strong["label"], "Strong")
+
+    def test_a_discounted_wallet_is_never_labelled_elite(self) -> None:
+        # The exact contradiction this change removes: live wallets carried
+        # "Elite" at weights of 0.749 and 0.808.
+        for weight in (0.972, 0.941, 0.808, 0.749):
+            with self.subTest(weight=weight):
+                rank = self.rank_at_weight(weight)
+                self.assertTrue(rank["eliteEligible"])
+                self.assertNotEqual(rank["label"], "Elite")
+                self.assertNotEqual(rank["label"], "Strong")
+
+    def test_changing_the_label_does_not_move_any_conviction_weight(self) -> None:
+        # The label feeds wallet_conviction_weight only in the branch that runs
+        # when convictionWinRateWeight is absent - and that is exactly the case
+        # where the old composite label is kept. So relabelling a wallet that
+        # has a weight must leave its weight untouched.
+        service = WalletTrackerService(WalletStore(Path(ALERTS_FILE)), HyperliquidClient())
+        for weight in (1.05, 0.972, 0.808, 0.749):
+            with self.subTest(weight=weight):
+                rank = self.rank_at_weight(weight)
+                wallet = {
+                    "address": "0x" + "1" * 40,
+                    "recentWinRateRank": rank,
+                    "dataQuality": {},
+                }
+                emitted = service.wallet_conviction_weight(wallet)
+                self.assertAlmostEqual(
+                    emitted, round(rank["convictionWinRateWeight"], 3), places=3,
+                    msg="the weight must come from convictionWinRateWeight, not the label",
+                )
+                # And it is genuinely independent of the label text.
+                relabelled = {**wallet, "recentWinRateRank": {**rank, "label": "Cold"}}
+                self.assertEqual(service.wallet_conviction_weight(relabelled), emitted)
+
+    def test_label_falls_back_to_the_composite_without_a_90d_sample(self) -> None:
+        # Below RANKING_MIN_90D_CLOSED_TRADES no weight is emitted, and
+        # wallet_conviction_weight reads the label in exactly that case, so the
+        # old chain must survive untouched.
+        thin = build_wallet_quality_rank(
+            100, 1, 10_000, 100_000,
+            hit_rate_90d=90,
+            closed_trade_count_90d=RANKING_MIN_90D_CLOSED_TRADES - 1,
+        )
+        self.assertNotIn("convictionWinRateWeight", thin)
+        self.assertEqual(thin["label"], "Unranked")
 
     def test_conviction_win_rate_weight_omitted_below_min_90d_sample(self) -> None:
         # Below RANKING_MIN_90D_CLOSED_TRADES the 90d sample is too thin to
