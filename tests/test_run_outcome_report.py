@@ -32,14 +32,38 @@ class HorizonReturnTests(unittest.TestCase):
         self.assertIsNone(report.horizon_return({"outcomes": "junk"}, "1h"))
         self.assertIsNone(report.horizon_return({"outcomes": {"1h": {}}}, "1h"))
 
-    def test_falls_back_to_gross_when_net_is_absent(self) -> None:
-        # Older records predate the net figure; dropping them would quietly
-        # shrink the sample the report is built from.
-        self.assertEqual(report.horizon_return({"outcomes": {"1h": {"grossReturnPct": 1.5}}}, "1h"), 1.5)
+    def test_a_gross_figure_is_never_reported_as_net(self) -> None:
+        # This previously fell back to gross, under a digest heading that says
+        # "net of costs" - so a record missing the net figure was reported as
+        # if the round-trip cost had been taken off it. Measured on the live
+        # state no record currently lacks it, so nothing already reported is
+        # affected, but the fallback is removed rather than left as a trap.
+        self.assertIsNone(report.horizon_return({"outcomes": {"1h": {"grossReturnPct": 1.5}}}, "1h"))
         self.assertEqual(
             report.horizon_return({"outcomes": {"1h": {"grossReturnPct": 1.5, "netReturnPct": 1.3}}}, "1h"),
             1.3,
         )
+
+    def test_a_degraded_measurement_is_not_counted(self) -> None:
+        # degraded means the price behind the return could not be trusted.
+        # 36 of 11,640 live measurements carry the flag and were being counted
+        # as clean.
+        self.assertIsNone(
+            report.horizon_return({"outcomes": {"1h": {"netReturnPct": 1.3, "degraded": True}}}, "1h")
+        )
+        self.assertEqual(
+            report.horizon_return({"outcomes": {"1h": {"netReturnPct": 1.3, "degraded": False}}}, "1h"),
+            1.3,
+        )
+
+    def test_excluded_measurements_are_counted_not_absorbed(self) -> None:
+        records = [
+            {"outcomes": {"1h": {"netReturnPct": 1.0}}},
+            {"outcomes": {"1h": {"netReturnPct": 1.0, "degraded": True}}},
+            {"outcomes": {"1h": {"grossReturnPct": 1.0}}},
+            {"outcomes": {"4h": {"netReturnPct": 1.0}}},
+        ]
+        self.assertEqual(report.excluded_measurement_count(records, "1h"), 2)
 
     def test_zero_return_is_a_measurement_not_a_gap(self) -> None:
         self.assertEqual(report.horizon_return({"outcomes": {"1h": {"netReturnPct": 0.0}}}, "1h"), 0.0)
