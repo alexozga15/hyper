@@ -760,27 +760,6 @@ MONTHLY_QUALITY_EVENT_WINDOW_MS = 5 * 60 * 1000
 # within 3 points of the same answer, so a more precise value would be fitting
 # noise rather than calibrating.
 QUALITY_CLOSING_RUN_GAP_MS = 12 * 60 * 60 * 1000
-BACKTEST_ELITE_WALLETS = {
-    "0x8bae3527e5a33fa0cf184f37bc112d071463ab6d",
-    "0xa20fb0c9e04063eec5be286e9269028d966646fa",
-}
-BACKTEST_STANDARD_WALLETS = {
-    "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
-    "0x7d5c17cddaabc227c7d1a34ac7f6cdfda6985d48",
-    "0x2d99fe0f36c1aebd28a1a2c0e82e8ca13c2ea351",
-    "0x418aa6bf98a2b2bc93779f810330d88cde488888",
-    "0x2fcb6898d5a0623de19c3691904927685014c4d8",
-    "0x9c2a2a966ed8e47f0c8b7e2ec2b91424f229f6a8",
-    "0xe9ffe7698f46f96f980f2877e18c43f5b4165903",
-    "0x1f67d79afc8d0e7609ddba6c9b657cc635f69981",
-}
-BACKTEST_REVIEW_WALLETS = {
-    "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
-    "0x8607a7d180de23645db594d90621d837749408d5",
-    "0x54a7240cea67b8c41b7c7f2b485360f37331aef4",
-    "0x63d417a577b50c96f4f09148d4e4d70950db0522",
-    "0xf5a523b171032c060d49c39fbf2e9bec473e1286",
-}
 TOXIC_CONVICTION_WALLET_MAX_30D_PNL = -500_000
 RANKING_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 HOLDING_ONLY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
@@ -4023,12 +4002,16 @@ class WalletTrackerService:
             else:
                 base_weight = round(max(0.5, min(score / ELITE_MIN_QUALITY_SCORE, 1.5)), 3)
         address = str(wallet.get("address") or "").lower()
-        if address in BACKTEST_ELITE_WALLETS:
-            base_weight = 1.5
-        elif address in BACKTEST_STANDARD_WALLETS:
-            base_weight = 1.0
-        elif address in BACKTEST_REVIEW_WALLETS:
-            base_weight = 0.5
+        # Three address-keyed sets used to overwrite base_weight here with a
+        # flat 1.5 / 1.0 / 0.5. They were named for a backtest and referenced
+        # nowhere else, but they applied in production and sat *after* the
+        # branch that reads convictionWinRateWeight, so for 11 of 25 tracked
+        # wallets the measured estimator was discarded outright: one computed
+        # at 1.087 was forced to 0.5, one at 1.006 was forced to 1.5. Removed,
+        # so the weight now comes from the estimator for every wallet. Anything
+        # that genuinely needs to override a wallet by hand should do it
+        # visibly, through the weekly review's reviewWeightMultiplier, which is
+        # reported rather than silent.
         if not top_wallet_addresses:
             multiplier = 1.0
         else:
