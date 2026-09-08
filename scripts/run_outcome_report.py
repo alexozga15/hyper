@@ -45,18 +45,46 @@ def format_started_at(started_at_ms: int) -> str:
 
 
 def horizon_return(record: dict[str, Any], horizon: str) -> float | None:
-    """Net return at one horizon, or None when it was never measured."""
+    """Net return at one horizon, or None when it was not cleanly measured.
+
+    Two things count as not measured, and the digest's own heading - "What the
+    observations did (net of costs)" - is why.
+
+    A missing netReturnPct is not filled in from grossReturnPct. A gross figure
+    overstates by the round-trip cost, and reporting it under a heading that
+    says "net" is simply wrong. Measured on the live state, 0 of 11,640
+    measurements lack the net figure, so this is a guard against a future
+    record rather than a correction to past ones.
+
+    A degraded measurement is dropped outright. That flag means the price this
+    return was computed from could not be trusted, and 36 of those 11,640
+    carry it - this half of the problem was live. Their count is surfaced in
+    the payload rather than silently absorbed.
+    """
     outcomes = record.get("outcomes")
     if not isinstance(outcomes, dict):
         return None
     entry = outcomes.get(horizon)
     if not isinstance(entry, dict):
         return None
-    if entry.get("netReturnPct") is None and entry.get("grossReturnPct") is None:
+    if entry.get("degraded"):
         return None
-    if entry.get("netReturnPct") is not None:
-        return to_float(entry.get("netReturnPct"))
-    return to_float(entry.get("grossReturnPct"))
+    if entry.get("netReturnPct") is None:
+        return None
+    return to_float(entry.get("netReturnPct"))
+
+
+def excluded_measurement_count(records: list[dict[str, Any]], horizon: str) -> int:
+    """Measurements at this horizon that horizon_return refuses to count."""
+    excluded = 0
+    for record in records:
+        outcomes = record.get("outcomes")
+        entry = outcomes.get(horizon) if isinstance(outcomes, dict) else None
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("degraded") or entry.get("netReturnPct") is None:
+            excluded += 1
+    return excluded
 
 
 def records_in_window(source: Any, *, now_ms: int, window_days: int) -> list[dict[str, Any]]:
@@ -132,6 +160,10 @@ def build_payload(state: dict[str, Any], *, now_ms: int, window_days: int = REPO
         ],
         "coins": summarize_by_coin(shadow, headline, minimum=MIN_COIN_OBSERVATIONS),
         "shadowCount": len(shadow),
+        # Surfaced rather than absorbed: a measurement horizon_return refuses
+        # to count still happened, and a reader comparing "Observed" against
+        # the per-horizon n needs to know where the difference went.
+        "excludedMeasurementCount": excluded_measurement_count(shadow, headline),
         "candidateCount": len(candidates),
         "publishedCount": len(published),
     }
@@ -152,6 +184,11 @@ def build_message(payload: dict[str, Any]) -> str:
         (
             f"Observed: {payload['shadowCount']} | candidates: {payload['candidateCount']} | "
             f"published: {payload['publishedCount']}"
+            + (
+                f" | not counted: {payload['excludedMeasurementCount']}"
+                if payload.get("excludedMeasurementCount")
+                else ""
+            )
         ),
         "",
         "What the observations did (net of costs)",

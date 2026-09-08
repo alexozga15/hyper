@@ -157,6 +157,21 @@ SHADOW_SIGNAL_OUTCOME_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 SHADOW_SIGNAL_MIN_CONSENSUS_WALLETS = int(
     os.environ.get("SHADOW_SIGNAL_MIN_CONSENSUS_WALLETS", "3")
 )
+# Calibration is grouped by asset class and score band. Since the shadow stream
+# began sampling below the publication threshold, a bucket can mix setups that
+# would publish with ones that never could, so the group also carries a wallet
+# tier when the record knows its own count.
+#
+# The split is deliberately asymmetric. Measured on the live pools: crypto score
+# bands hold 174-344 observations each and can afford to be halved, while every
+# hip3 band holds 2-13 and already sits under SIGNAL_CALIBRATION_MIN_SAMPLE
+# before any split. So a tiered bucket is used only once it reaches that
+# minimum on its own, and everything else keeps falling back to the untiered
+# bucket - which is also how the 2227 records written before walletCount
+# existed stay usable instead of being discarded.
+CALIBRATION_TIER_MIN_WALLETS = int(
+    os.environ.get("CALIBRATION_TIER_MIN_WALLETS", str(DEFAULT_CONSENSUS_THRESHOLD))
+)
 SHADOW_SIGNAL_OUTCOME_MAX_RECORDS = 6000
 # Ceiling on how often one coin:side can be re-sampled when nothing about the
 # consensus changed. A day of silence per key produced ~20 records/day, which
@@ -397,6 +412,11 @@ ALERT_ACTIONABLE_MAX_DISTANCE_PCT = float(
 ACTIONABLE_ENTRY_RELEASE_DISTANCE_PCT = float(
     os.environ.get("ACTIONABLE_ENTRY_RELEASE_DISTANCE_PCT", "4.5")
 )
+# These alerts are the only ones fired on the surface with a measured edge, and
+# until now nothing recorded how they resolved - the same gap CMM signals had.
+# One record per delivered alert, priced at the mark the message quoted, so the
+# measurement answers what a reader acting on the message would have got.
+ACTIONABLE_ENTRY_OUTCOME_RETENTION_MS = 90 * 24 * 60 * 60 * 1000
 # Quality decides what is worth an alert; size only scales it.
 #
 # Measured over 99 days across 31 tracked wallets, split chronologically in
@@ -8280,6 +8300,14 @@ class WalletTrackerService:
                 "probabilityScore": round(probability, 1),
                 "rawProbabilityScore": round(probability, 1),
                 "freshWalletCount": int(to_float(item.get("verifiedFreshIndependentWalletCount"))),
+                # Recorded so calibration can separate the population that
+                # publishes from the wider one the shadow stream samples - see
+                # SHADOW_SIGNAL_MIN_CONSENSUS_WALLETS. Absent on every record
+                # written before this field existed, which is why the
+                # calibration split has to fall back to an untiered bucket
+                # rather than discarding them.
+                "walletCount": int(to_float(item.get("walletCount"))),
+                "independentWalletCount": int(to_float(item.get("independentWalletCount"))),
                 # Stamped at observation time, not backfilled later: the wallet
                 # snapshot this estimate derives from is not recoverable once
                 # the cycle that produced it has passed.
@@ -8470,6 +8498,19 @@ class WalletTrackerService:
             records, marks_by_key={}, marks_by_coin=mark_map, now_ms=now_ms
         )
 
+    def signal_calibration_tier(self, record: Any) -> str:
+        """"pub", "wide", or "" when the record does not know its wallet count.
+
+        Records written before walletCount was recorded return "" and keep
+        landing in the untiered bucket, so none of the existing history is lost.
+        """
+        if not isinstance(record, dict):
+            return ""
+        count = record.get("walletCount")
+        if count is None:
+            return ""
+        return "pub" if int(to_float(count)) >= CALIBRATION_TIER_MIN_WALLETS else "wide"
+
     def signal_calibration_group(self, coin: Any) -> str:
         normalized = normalize_position_coin(coin)
         return "hip3" if is_stock_like_position(normalized) or is_commodity_like_position(normalized) else "crypto"
@@ -8528,9 +8569,16 @@ class WalletTrackerService:
                 if require_independent and "independentSample" in record and not record.get("independentSample"):
                     dependent_counts.setdefault(group, {})[bucket] = dependent_counts.setdefault(group, {}).get(bucket, 0) + 1
                     continue
-                buckets.setdefault(group, {}).setdefault(bucket, []).append(outcome)
-                if is_shadow:
-                    shadow_counts.setdefault(group, {})[bucket] = shadow_counts.setdefault(group, {}).get(bucket, 0) + 1
+                # Accumulated into the untiered group and, when the record
+                # knows its wallet count, into a tiered one alongside it. Both
+                # exist so apply_signal_calibration can prefer the tiered
+                # bucket where it has the sample and fall back where it does
+                # not - see CALIBRATION_TIER_MIN_WALLETS.
+                tier = self.signal_calibration_tier(record)
+                for target in ([group, f"{group}:{tier}"] if tier else [group]):
+                    buckets.setdefault(target, {}).setdefault(bucket, []).append(outcome)
+                    if is_shadow:
+                        shadow_counts.setdefault(target, {})[bucket] = shadow_counts.setdefault(target, {}).get(bucket, 0) + 1
 
         result: dict[str, Any] = {
             "horizon": horizon,
@@ -8605,7 +8653,20 @@ class WalletTrackerService:
             raw = to_float(signal.get("rawProbabilityScore", signal.get("probabilityScore")))
             group = self.signal_calibration_group(signal.get("coin"))
             bucket = f"{int(raw // 10) * 10}"
-            stats = groups.get(group, {}).get(bucket, {}) if isinstance(groups.get(group, {}), dict) else {}
+            # Prefer a bucket built only from setups with this signal's wallet
+            # tier. It is used only once it carries the minimum sample on its
+            # own; below that the untiered bucket is the honest fallback,
+            # because a calibration fitted on nine observations is worse than
+            # no split at all.
+            stats: dict[str, Any] = {}
+            tier = self.signal_calibration_tier(signal)
+            if tier:
+                tiered = groups.get(f"{group}:{tier}", {})
+                tiered_stats = tiered.get(bucket, {}) if isinstance(tiered, dict) else {}
+                if int(to_float(tiered_stats.get("sample"))) >= min_sample:
+                    stats = tiered_stats
+            if not stats:
+                stats = groups.get(group, {}).get(bucket, {}) if isinstance(groups.get(group, {}), dict) else {}
             sample = int(to_float(stats.get("sample")))
             calibrated = raw
             applied = sample >= min_sample
@@ -8898,6 +8959,82 @@ class WalletTrackerService:
         lines.append("")
         lines.append(f'Updated: {format_update_time(summary.get("generatedAt", now_iso()))}')
         return "\n".join(lines)
+
+    def update_actionable_entry_outcomes(
+        self,
+        previous: dict[str, Any],
+        delivered: list[dict[str, Any]],
+        *,
+        marks_by_coin: dict[str, float],
+        now_ms: int,
+    ) -> dict[str, Any]:
+        """One outcome record per delivered actionable-entry alert.
+
+        Called only when the Telegram send succeeded, so the stream contains
+        exactly the alerts a reader actually saw - an alert that failed to
+        deliver is retried on the next cycle instead of being measured as if it
+        had been read.
+
+        The entry price is the mark the message quoted, not the wallets' own
+        entry, because the question this stream exists to answer is what a
+        reader acting on the message would have got.
+        """
+        records = {
+            str(key): dict(value)
+            for key, value in (previous.items() if isinstance(previous, dict) else [])
+            if isinstance(value, dict)
+            and now_ms - int(to_float(value.get("startedAt"))) <= ACTIONABLE_ENTRY_OUTCOME_RETENTION_MS
+        }
+        for alert in delivered or []:
+            if not isinstance(alert, dict):
+                continue
+            coin = str(alert.get("coin") or "")
+            side = str(alert.get("side") or "").lower()
+            entry_price = to_float(alert.get("markPrice"))
+            if not coin or not side or entry_price <= 0:
+                continue
+            started_at = int(to_float(alert.get("enteredAtMs")) or now_ms)
+            records.setdefault(
+                f"entry:{coin}:{side}:{started_at}",
+                {
+                    "source": "actionableEntry",
+                    "coin": coin,
+                    "marketCoin": coin,
+                    "side": side,
+                    "startedAt": started_at,
+                    "entryPrice": round(entry_price, 8),
+                    "referencePrice": round(to_float(alert.get("referencePrice")), 8),
+                    "distancePct": round(to_float(alert.get("distancePct")), 2),
+                    "walletCount": int(to_float(alert.get("walletCount"))),
+                    "totalValue": round(to_float(alert.get("totalValue")), 2),
+                    "qualityWinRatePct": alert.get("qualityWinRatePct"),
+                    "qualityBestWinRatePct": alert.get("qualityBestWinRatePct"),
+                    "delivered": True,
+                    "outcomes": {},
+                },
+            )
+        return self.measure_signal_outcome_records(
+            records, marks_by_key={}, marks_by_coin=marks_by_coin, now_ms=now_ms
+        )
+
+    def position_group_mark_map(self, dashboard: dict[str, Any]) -> dict[str, float]:
+        """Coin -> mark for every displayed position group.
+
+        These alerts fire on position groups, which at the publication
+        threshold need not appear in consensus at all, so the consensus-derived
+        mark maps cannot price them on their own.
+        """
+        marks: dict[str, float] = {}
+        for kwargs in (
+            {"hip3_only": False, "stock_like_only": False, "commodity_like_only": False},
+            {"hip3_only": False, "stock_like_only": True, "commodity_like_only": False},
+            {"hip3_only": False, "stock_like_only": False, "commodity_like_only": True},
+        ):
+            for item in self.build_position_groups(dashboard, **kwargs):
+                _reference, mark = group_reference_and_mark(item)
+                if mark > 0:
+                    marks.setdefault(normalize_position_coin(item.get("coin")), mark)
+        return marks
 
     def build_actionable_entry_alerts(
         self,
@@ -9595,7 +9732,6 @@ class WalletTrackerService:
             "topConvictionWallets": top_cohort,
             "walletPositionLifecycle": position_lifecycle,
             "signalOutcomes": signal_outcomes,
-            "actionableGroups": actionable_entry_state,
             "shadowSignalOutcomes": shadow_signal_outcomes,
             "candidateSignalOutcomes": candidate_signal_outcomes,
             "moniSocial": moni_summary,
@@ -9603,8 +9739,22 @@ class WalletTrackerService:
         if not should_notify or sent or not config.get("enabled") or acknowledge_suppressed:
             new_state["summary"] = alert_summary
             new_state["largePositions"] = current_positions
+            # The latch belongs with the other baselines: advancing it after a
+            # failed send would mark a group as already announced and lose the
+            # alert entirely, since it only re-arms once the group moves beyond
+            # ACTIONABLE_ENTRY_RELEASE_DISTANCE_PCT.
+            new_state["actionableGroups"] = actionable_entry_state
             new_state["cmmSignals"] = cmm_summary
             new_state["cmmSignalOutcomes"] = cmm_signal_outcomes
+        # Runs every cycle so existing records reach their horizons, but only a
+        # delivered alert is added. An alert nobody saw must not enter the
+        # stream that answers how these alerts perform.
+        new_state["actionableEntryOutcomes"] = self.update_actionable_entry_outcomes(
+            state.get("actionableEntryOutcomes", {}),
+            actionable_entries if sent else [],
+            marks_by_coin=self.position_group_mark_map(dashboard),
+            now_ms=dedupe_now_ms,
+        )
         if sent or acknowledge_suppressed:
             new_state["alertDedupe"] = self.update_alert_dedupe(
                 previous_dedupe,
