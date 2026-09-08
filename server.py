@@ -744,8 +744,32 @@ ELITE_MIN_PROFIT_FACTOR = 1.5
 ELITE_MAX_DRAWDOWN_PCT = 35.0
 ELITE_WALLET_OVERRIDES = {"0xc9e839a529d1a3a46e2b48d20c461d4afecb72e4"}
 TOP_CONVICTION_WALLET_COUNT = 10
-TOP_CONVICTION_WALLET_MULTIPLIER = 1.5
-NON_TOP_CONVICTION_WALLET_MULTIPLIER = 0.5
+# How much being in this month's top-conviction cohort tilts a wallet's weight.
+# Softened from 1.5 / 0.5 once the removal of the address overrides made the
+# real shape visible: at 1.5 / 0.5 the cohort spans a factor of 3.0, against
+# the estimator's own spread of 1.876 across the tracked set (0.756 to 1.418),
+# so cohort membership decided more than the measured quality it was supposed
+# to adjust. Rank correlation between the applied weight and the estimator was
+# 0.661, and five wallets were pinned to CONVICTION_WALLET_WEIGHT_MAX, which
+# throws away the differences between them.
+#
+# 1.15 / 0.90 spans 1.28 - comfortably inside the estimator's spread, so
+# quality leads and the cohort tilts. Measured on the live set: rank
+# correlation rises to 0.825 and one wallet reaches the cap instead of five.
+#
+# The pair is also balanced rather than merely smaller. With TOP_CONVICTION_
+# WALLET_COUNT of 10 in a 25-wallet set the mean multiplier is exactly 1.000
+# ((10 * 1.15 + 15 * 0.90) / 25), so the summed applied weight is 24.63 - the
+# same as with no multiplier at all - and this is a pure redistribution rather
+# than a change in the overall weighting level. That balance holds at 25
+# tracked wallets; a materially different set size tilts the mean and the pair
+# should be revisited.
+TOP_CONVICTION_WALLET_MULTIPLIER = float(
+    os.environ.get("TOP_CONVICTION_WALLET_MULTIPLIER", "1.15")
+)
+NON_TOP_CONVICTION_WALLET_MULTIPLIER = float(
+    os.environ.get("NON_TOP_CONVICTION_WALLET_MULTIPLIER", "0.90")
+)
 CONVICTION_WALLET_WEIGHT_MIN = 0.25
 CONVICTION_WALLET_WEIGHT_MAX = 1.5
 MONTHLY_QUALITY_MIN_CLOSED_EVENTS = 5

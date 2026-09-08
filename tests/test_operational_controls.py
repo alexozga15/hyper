@@ -535,12 +535,23 @@ class OperationalControlTests(unittest.TestCase):
         self.assertNotIn("0xthin", reviews)
 
     def test_wallet_review_weight_reduces_non_top_conviction(self) -> None:
-        wallet = {
-            "address": "0xweak",
-            "recentWinRateRank": {"convictionWeightScore": 40, "label": "Cold"},
-            "reviewWeightMultiplier": 0.5,
-        }
-        self.assertEqual(self.service.wallet_conviction_weight(wallet, {"0xother"}), 0.25)
+        # Derived from the constants rather than hardcoded. The literal this
+        # once asserted (0.25) was the clamp floor, which the old 0.5 non-top
+        # multiplier drove it into - so the assertion held even if the review
+        # multiplier had done nothing.
+        rank = {"convictionWeightScore": 40, "label": "Cold"}
+        wallet = {"address": "0xweak", "recentWinRateRank": rank, "reviewWeightMultiplier": 0.5}
+        unreviewed = {"address": "0xweak", "recentWinRateRank": rank}
+
+        full = self.service.wallet_conviction_weight(unreviewed, {"0xother"})
+        reduced = self.service.wallet_conviction_weight(wallet, {"0xother"})
+
+        self.assertLess(reduced, full, "a review multiplier must actually reduce the weight")
+        self.assertAlmostEqual(
+            reduced,
+            round(max(server.CONVICTION_WALLET_WEIGHT_MIN, full * 0.5), 3),
+            places=3,
+        )
 
     def test_manual_zero_review_weight_excludes_wallet(self) -> None:
         wallet = {
