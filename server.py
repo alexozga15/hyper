@@ -716,6 +716,12 @@ RANKING_MIN_90D_CLOSED_TRADES = int(os.environ.get("RANKING_MIN_90D_CLOSED_TRADE
 # which is left in place for the case a future baseline makes it bind again.
 # The floor is unaffected: a wallet that never wins scores prior / (sample +
 # prior), which carries no baseline term at all.
+# This figure is measured with the same closing-run rule the win rates use,
+# including that rule's exclusion of opening fees (see reconstruct_closing_runs).
+# Under a fee-complete rule the same three sources give 0.657 rather than 0.673.
+# The two must therefore move together or not at all: the bias cancels between
+# the numerator and this denominator, and correcting one alone would shift every
+# wallet's weight at once for no real reason.
 CONVICTION_WIN_RATE_BASELINE = float(os.environ.get("CONVICTION_WIN_RATE_BASELINE", 0.673))
 # Tiers for the weight-derived label below. convictionWinRateWeight is
 # shrunk / baseline, so 1.00 is exactly the measured average win rate across
@@ -1134,6 +1140,35 @@ def reconstruct_closing_runs(
         if fill_time < cutoff_ms:
             continue
         closed_pnl = to_float(fill.get("closedPnl"))
+        # Two known biases live in this line, both deliberately left in place.
+        #
+        # Only closing fills reach it, so a position's opening fee is never
+        # charged to the run. Measured across 163,318 fills from the tracked
+        # set: 781,979 of fees sit on zero-closedPnl fills and 608,304 on
+        # closing ones, so 56% of all fees are outside the calculation and
+        # every run's PnL is overstated by roughly the opening fee. The effect
+        # on the win rate is one-directional but small and concentrated: mean
+        # -0.95pp, median 0.00, worst -7.69pp, and 15 of 23 wallets move by
+        # exactly nothing.
+        #
+        # abs() also turns a maker rebate into a cost. No fill in the same
+        # 163,318 carries a negative fee, so this is a trap rather than an
+        # active error - but it is one, and it belongs to the same fix.
+        #
+        # WHY THEY STAY: the conviction weight is shrunk / baseline, and
+        # CONVICTION_WIN_RATE_BASELINE is measured under this very rule, so the
+        # bias sits in both the numerator and the denominator and largely
+        # cancels. Correcting both together moves the weights by a mean of
+        # +0.006 with a largest single change of -0.065, leaves the ordering at
+        # rank correlation 0.9872, and takes the wallets above their own
+        # baseline from 9 to 10 of 23. What does NOT cancel is the figure the
+        # board prints as a probability: 75.0% where the fee-correct answer is
+        # 67.3% on the worst wallet.
+        #
+        # THE ONE RULE: fix this and the baseline together, or neither. Fixing
+        # the fees while leaving the baseline at a value measured without them
+        # turns a cancelling bias into a real systematic shift across every
+        # wallet at once.
         fee = abs(to_float(fill.get("fee")))
         run_coin = normalize_position_coin(fill.get("coin"))
         if closed_pnl == 0:
