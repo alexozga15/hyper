@@ -19,8 +19,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from unittest.mock import patch  # noqa: E402
+
 import server  # noqa: E402
 from server import (  # noqa: E402
+    ACTIONABLE_ENTRY_ALERTS_PER_MESSAGE,
     ACTIONABLE_ENTRY_OUTCOME_RETENTION_MS,
     ALERTS_FILE,
     CALIBRATION_TIER_MIN_WALLETS,
@@ -206,6 +209,141 @@ class CalibrationTierTests(unittest.TestCase):
         untiered = calibration["groups"]["crypto"]["80"]["calibratedProbability"]
         self.assertAlmostEqual(
             adjusted["signals"][0]["probabilityScore"], max(85.0 - 10.0, min(85.0 + 10.0, untiered)), places=1
+        )
+
+
+def qualifying_group(coin: str, *, quality: float = 75.0) -> dict:
+    reference = 100.0
+    mark = reference * 1.01
+    return {
+        "coin": coin,
+        "side": "long",
+        "walletCount": 4,
+        "qualityScoredWallets": 4,
+        "qualityWinRatePct": quality,
+        "qualityBestWinRatePct": quality,
+        "totalSize": 10.0,
+        "totalValue": mark * 10.0,
+        "recentAddPx": reference,
+        "entryPx": reference,
+        "positionCount": 4,
+    }
+
+
+class AnnouncedAndRecordedAgreeTests(unittest.TestCase):
+    """What is latched and recorded must equal what the message actually said."""
+
+    def setUp(self) -> None:
+        self.service = WalletTrackerService(WalletStore(Path(ALERTS_FILE)), HyperliquidClient())
+
+    def build(self, groups: list[dict], previous: dict | None = None):
+        def fake_groups(_dashboard, **kwargs):
+            if kwargs.get("stock_like_only") or kwargs.get("commodity_like_only"):
+                return []
+            return groups
+
+        with patch.object(self.service, "build_position_groups", side_effect=fake_groups):
+            return self.service.build_actionable_entry_alerts({}, previous, now_ms=NOW_MS)
+
+    def test_more_qualifying_groups_than_fit_are_capped_together(self) -> None:
+        # Before this, the message truncated at the render limit while the latch
+        # and the outcome stream took the whole list, so a group past the cap was
+        # marked announced and recorded as delivered without ever appearing.
+        over = ACTIONABLE_ENTRY_ALERTS_PER_MESSAGE + 1
+        groups = [qualifying_group(f"C{index}", quality=90.0 - index) for index in range(over)]
+        alerts, state = self.build(groups)
+
+        self.assertEqual(len(alerts), ACTIONABLE_ENTRY_ALERTS_PER_MESSAGE)
+        self.assertEqual(len(state), ACTIONABLE_ENTRY_ALERTS_PER_MESSAGE)
+
+        changes = {key: [] for key in (
+            "addedConsensus", "removedConsensus", "changedConsensus", "hip3Added", "hip3Removed",
+            "clusteredOpenPositions", "newLargePositions", "increasedLargePositions",
+            "closedLargePositions", "addedSignals", "removedSignals", "changedSignals",
+            "addedCandidateSignals", "addedCmmSignals", "changedCmmSignals",
+        )}
+        changes["biasChanged"] = False
+        changes["actionableEntries"] = alerts
+        message = self.service.build_telegram_message(changes, {"consensus": []}, min_wallets=3)
+
+        announced = {alert["coin"] for alert in alerts}
+        self.assertEqual(
+            announced,
+            {coin for coin in (f"C{index}" for index in range(over)) if f"{coin} LONG" in message},
+            "every latched alert must appear in the message, and nothing else",
+        )
+        self.assertNotIn("C8", announced, "the lowest-quality group waits for a later cycle")
+
+    def test_the_capped_group_is_announced_on_a_later_cycle(self) -> None:
+        over = ACTIONABLE_ENTRY_ALERTS_PER_MESSAGE + 1
+        groups = [qualifying_group(f"C{index}", quality=90.0 - index) for index in range(over)]
+        _alerts, state = self.build(groups)
+        # The others are latched now, so only the one held back can fire.
+        alerts, _next_state = self.build(groups, state)
+        self.assertEqual([alert["coin"] for alert in alerts], ["C8"])
+
+
+class FailedSendIsRetriedWithoutDuplicatingTests(unittest.TestCase):
+    """The whole chain: a Telegram failure, a retry, and no duplicate after."""
+
+    def setUp(self) -> None:
+        self.service = WalletTrackerService(WalletStore(Path(ALERTS_FILE)), HyperliquidClient())
+        self.group = qualifying_group("HYPE")
+
+    def run_cycle(self, state: dict, *, fail: bool):
+        saved: list[tuple] = []
+
+        def fake_groups(_dashboard, **kwargs):
+            if kwargs.get("stock_like_only") or kwargs.get("commodity_like_only"):
+                return []
+            return [self.group]
+
+        def send(*_args, **_kwargs):
+            if fail:
+                raise ValueError("telegram is down")
+
+        with patch("server.load_json_file", return_value={
+            "config": {"enabled": True, "botToken": "token", "chatId": "chat"},
+            "state": state,
+        }), patch("server.save_json_file", side_effect=lambda path, payload: saved.append((path, payload))), \
+            patch.object(self.service, "dashboard", return_value={"wallets": []}), \
+            patch.object(self.service, "build_sentiment_summary", return_value={
+                "overallBias": "mixed", "consensus": [], "hip3Consensus": [], "signals": [],
+            }), \
+            patch.object(self.service, "build_position_groups", side_effect=fake_groups), \
+            patch.object(self.service, "send_telegram_message", side_effect=send) as sender:
+            result = self.service.check_alerts(send_notification=True)
+
+        written = {}
+        for path, payload in saved:
+            if isinstance(payload, dict) and "state" in payload:
+                written = payload["state"]
+        return result, written, sender
+
+    def test_failure_then_retry_delivers_once(self) -> None:
+        first, state_after_failure, sender = self.run_cycle({}, fail=True)
+        self.assertTrue(first["shouldNotify"])
+        self.assertFalse(first["sent"])
+        sender.assert_called_once()
+        self.assertEqual(
+            state_after_failure.get("actionableGroups", {}), {},
+            "a failed send must not mark the group as announced",
+        )
+        self.assertEqual(
+            state_after_failure.get("actionableEntryOutcomes", {}), {},
+            "an alert nobody saw must not be measured",
+        )
+
+        second, state_after_success, sender = self.run_cycle(state_after_failure, fail=False)
+        self.assertTrue(second["sent"], "the retry delivers the alert that was lost")
+        self.assertEqual(len(state_after_success.get("actionableGroups", {})), 1)
+        self.assertEqual(len(state_after_success.get("actionableEntryOutcomes", {})), 1)
+
+        third, state_after_third, _sender = self.run_cycle(state_after_success, fail=False)
+        self.assertEqual(third["changes"]["actionableEntries"], [], "no duplicate on the next cycle")
+        self.assertEqual(
+            len(state_after_third.get("actionableEntryOutcomes", {})), 1,
+            "and no second record for the same alert",
         )
 
 

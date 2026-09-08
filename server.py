@@ -417,6 +417,14 @@ ACTIONABLE_ENTRY_RELEASE_DISTANCE_PCT = float(
 # One record per delivered alert, priced at the mark the message quoted, so the
 # measurement answers what a reader acting on the message would have got.
 ACTIONABLE_ENTRY_OUTCOME_RETENTION_MS = 90 * 24 * 60 * 60 * 1000
+# The message renders at most this many entries, so the latch and the outcome
+# stream must stop at the same number - otherwise a group beyond the cap is
+# marked announced and recorded as delivered while never appearing in any
+# message. Groups past the cap stay un-latched and are announced on a later
+# cycle instead of being silently swallowed.
+ACTIONABLE_ENTRY_ALERTS_PER_MESSAGE = int(
+    os.environ.get("ACTIONABLE_ENTRY_ALERTS_PER_MESSAGE", "8")
+)
 # Quality decides what is worth an alert; size only scales it.
 #
 # Measured over 99 days across 31 tracked wallets, split chronologically in
@@ -6018,7 +6026,9 @@ class WalletTrackerService:
                     f'{format_money_compact(item.get("totalValue"))}, {cohorts}'
                 )
 
-        actionable_entries = changes.get("actionableEntries", [])[:8]
+        actionable_entries = changes.get("actionableEntries", [])[
+            :ACTIONABLE_ENTRY_ALERTS_PER_MESSAGE
+        ]
         if actionable_entries:
             lines.append("")
             lines.append(
@@ -8071,6 +8081,12 @@ class WalletTrackerService:
                     "probabilityScore": round(to_float(signal.get("probabilityScore")), 1),
                     "rawProbabilityScore": round(to_float(signal.get("rawProbabilityScore", signal.get("probabilityScore"))), 1),
                     "freshWalletCount": int(to_float(signal.get("verifiedFreshIndependentWalletCount"))),
+                    # Without this a published record carries no tier and lands
+                    # only in the untiered calibration bucket, so the "pub"
+                    # tier would learn exclusively from shadow setups - which
+                    # by construction are the ones that did NOT publish.
+                    "walletCount": int(to_float(signal.get("walletCount"))),
+                    "independentWalletCount": int(to_float(signal.get("independentWalletCount"))),
                     **signal_quality_estimate_fields(signal),
                     "shadow": False,
                     "published": True,
@@ -9067,7 +9083,7 @@ class WalletTrackerService:
         ):
             groups.extend(self.build_position_groups(dashboard, **kwargs))
 
-        alerts: list[dict[str, Any]] = []
+        candidates: list[tuple[str, dict[str, Any]]] = []
         next_state: dict[str, Any] = {}
         for item in groups:
             coin = str(item.get("coin") or "")
@@ -9102,10 +9118,20 @@ class WalletTrackerService:
                     "enteredAt": now_iso(),
                     "enteredAtMs": int(now_ms),
                 }
-                alerts.append(entry)
-                next_state[key] = entry
+                candidates.append((key, entry))
             elif key in latched and abs(distance_pct) <= ACTIONABLE_ENTRY_RELEASE_DISTANCE_PCT:
                 next_state[key] = latched[key]
+
+        # Capped here rather than at render time so the message, the latch and
+        # the outcome stream cannot disagree about what was announced. Ordered
+        # by quality so that when more groups qualify than fit, the ones that
+        # get announced are the best-measured ones; the rest keep their turn on
+        # a later cycle because they are not latched.
+        candidates.sort(key=lambda item: -to_float(item[1].get("qualityWinRatePct")))
+        alerts: list[dict[str, Any]] = []
+        for key, entry in candidates[:ACTIONABLE_ENTRY_ALERTS_PER_MESSAGE]:
+            alerts.append(entry)
+            next_state[key] = entry
         return alerts, next_state
 
     def build_positions_message(
