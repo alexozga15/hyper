@@ -55,6 +55,7 @@ from server import (
     refreshed_quality_rank,
     to_float,
     shrunk_win_rate,
+    CONVICTION_WALLET_WEIGHT_MAX,
 )
 
 
@@ -2693,29 +2694,52 @@ class AlertSummaryTests(unittest.TestCase):
 
         self.assertGreater(btc_weight, eth_weight)
 
-    def test_backtest_tiers_and_global_caps_bound_wallet_weight(self) -> None:
+    def test_the_address_alone_never_changes_the_weight(self) -> None:
+        # Three address-keyed sets used to overwrite the computed weight with a
+        # flat 1.5 / 1.0 / 0.5, after the branch that reads the estimator. For
+        # 11 of 25 tracked wallets that discarded the measurement outright -
+        # one computed at 1.087 was forced to 0.5, one at 1.006 to 1.5 - and
+        # this test asserted that behaviour rather than catching it.
         rank = {"score": 100.0, "label": "Elite"}
-        elite = {
-            "address": "0x8bae3527e5a33fa0cf184f37bc112d071463ab6d",
-            "recentWinRateRank": rank,
+        addresses = [
+            "0x8bae3527e5a33fa0cf184f37bc112d071463ab6d",
+            "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
+            "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
+            "0x1111111111111111111111111111111111111111",
+        ]
+        weights = {
+            address: self.service.wallet_conviction_weight(
+                {"address": address, "recentWinRateRank": rank}, set()
+            )
+            for address in addresses
         }
-        review = {
-            "address": "0x350e33a777d510616fbdb483d1de3b50d1edfcfb",
-            "recentWinRateRank": rank,
-        }
-        standard = {
-            "address": "0xa5fd942d4badbab4fe84a9e10f565dd40d5f15ff",
-            "recentWinRateRank": rank,
-        }
+        self.assertEqual(
+            len(set(weights.values())), 1,
+            f"the same rank must weigh the same at every address, got {weights}",
+        )
+
+    def test_an_explicit_estimate_survives_at_every_address(self) -> None:
+        rank = {"score": 100.0, "label": "Elite", "convictionWinRateWeight": 1.087}
+        for address in (
+            "0xf5a523b171032c060d49c39fbf2e9bec473e1286",
+            "0x1111111111111111111111111111111111111111",
+        ):
+            with self.subTest(address=address):
+                weight = self.service.wallet_conviction_weight(
+                    {"address": address, "recentWinRateRank": rank}, set()
+                )
+                self.assertAlmostEqual(weight, 1.087, places=3)
+
+    def test_the_global_cap_still_binds(self) -> None:
+        rank = {"score": 100.0, "label": "Elite"}
         ordinary = {
             "address": "0x1111111111111111111111111111111111111111",
             "recentWinRateRank": rank,
         }
-
-        self.assertEqual(self.service.wallet_conviction_weight(elite, set()), 1.5)
-        self.assertEqual(self.service.wallet_conviction_weight(standard, set()), 1.0)
-        self.assertEqual(self.service.wallet_conviction_weight(review, set()), 0.5)
-        self.assertEqual(self.service.wallet_conviction_weight(ordinary, {ordinary["address"]}), 1.5)
+        self.assertEqual(
+            self.service.wallet_conviction_weight(ordinary, {ordinary["address"]}),
+            CONVICTION_WALLET_WEIGHT_MAX,
+        )
 
     def test_conviction_weight_without_win_rate_key_falls_back_to_score(self) -> None:
         # The deploy-transition case: a rank cached by the previous version -
