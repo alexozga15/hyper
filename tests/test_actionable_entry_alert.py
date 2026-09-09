@@ -31,7 +31,13 @@ ABOVE_BASELINE = CONVICTION_WIN_RATE_BASELINE * 100 + 5.0
 BELOW_BASELINE = CONVICTION_WIN_RATE_BASELINE * 100 - 5.0
 
 
-def group(distance_pct: float, *, quality: float | None = ABOVE_BASELINE, scored: int = 4) -> dict:
+def group(
+    distance_pct: float,
+    *,
+    quality: float | None = ABOVE_BASELINE,
+    scored: int = 4,
+    admitted: bool = True,
+) -> dict:
     """A position group whose mark sits `distance_pct` from its reference."""
     reference = 100.0
     mark = reference * (1.0 + distance_pct / 100.0)
@@ -48,6 +54,13 @@ def group(distance_pct: float, *, quality: float | None = ABOVE_BASELINE, scored
         "recentAddPx": reference,
         "entryPx": reference,
         "positionCount": 4,
+        "walletAddresses": ["0xa", "0xb", "0xc", "0xd"],
+        "eligibleWalletAddresses": ["0xa", "0xb", "0xc"] if admitted else [],
+        "tradeAdmission": {
+            "status": "eligible" if admitted else "pending",
+            "eligibleWalletCount": 3 if admitted else 0,
+            "requiredWalletCount": 3,
+        },
     }
 
 
@@ -102,24 +115,39 @@ class ActionableEntryAlertTests(unittest.TestCase):
         alerts, _ = self.run_cycle([group(1.0)], released)
         self.assertEqual(len(alerts), 1, "a genuine re-entry alerts again")
 
-    def test_quality_below_the_baseline_never_alerts(self) -> None:
+    def test_historical_wr_below_baseline_does_not_override_copyability(self) -> None:
         alerts, state = self.run_cycle([group(1.0, quality=BELOW_BASELINE)], None)
-        self.assertEqual(alerts, [])
-        self.assertEqual(state, {})
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("HYPE:long", state)
 
-    def test_an_undisplayed_quality_never_alerts(self) -> None:
-        # Fewer than half the members carry an estimate, so the board does not
-        # print the figure - and a row must never be flagged on a number the
-        # reader cannot see.
+    def test_missing_historical_wr_does_not_override_copyability(self) -> None:
         alerts, state = self.run_cycle([group(1.0, scored=1)], None)
-        self.assertEqual(alerts, [])
-        self.assertEqual(state, {})
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("HYPE:long", state)
 
         missing = group(1.0)
         missing["qualityWinRatePct"] = None
         alerts, state = self.run_cycle([missing], None)
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("HYPE:long", state)
+
+    def test_wr_alone_cannot_authorize_an_alert(self) -> None:
+        alerts, state = self.run_cycle([group(1.0, admitted=False)], None)
         self.assertEqual(alerts, [])
         self.assertEqual(state, {})
+
+    def test_pending_group_still_enters_the_silent_research_stream(self) -> None:
+        responses = [[group(1.0, admitted=False)], [], []]
+
+        def fake_groups(_dashboard, **_kwargs):
+            return responses.pop(0) if responses else []
+
+        with patch.object(self.service, "build_position_groups", side_effect=fake_groups):
+            observations, state = self.service.build_actionable_entry_alerts(
+                {}, None, now_ms=NOW_MS, require_admission=False, limit=None
+            )
+        self.assertEqual(len(observations), 1)
+        self.assertIn("HYPE:long", state)
 
     def test_a_group_without_a_usable_reference_keeps_its_latch(self) -> None:
         # Re-arming on missing data would let the next readable cycle fire a
@@ -160,7 +188,7 @@ class ActionableEntryAlertTests(unittest.TestCase):
         message = self.service.build_telegram_message(changes, {"consensus": []}, min_wallets=3)
         self.assertIn("Now within", message)
         self.assertIn("HYPE LONG", message)
-        self.assertIn("quality", message)
+        self.assertIn("WR90 est.", message)
 
 
 if __name__ == "__main__":

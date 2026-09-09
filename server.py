@@ -48,6 +48,7 @@ ALERTS_FILE = DATA_DIR / "alerts.json"
 TELEGRAM_STATE_FILE = DATA_DIR / "telegram_bot_state.json"
 WALLET_QUALITY_CACHE_FILE = DATA_DIR / "wallet_quality_cache.json"
 WALLET_REVIEW_FILE = DATA_DIR / "wallet_review.json"
+WALLET_COPYABILITY_FILE = DATA_DIR / "wallet_copyability.json"
 RUNTIME_HEALTH_FILE = DATA_DIR / "runtime_health.json"
 DASHBOARD_SNAPSHOT_FILE = DATA_DIR / "dashboard_snapshot.json"
 CMM_HEATMAP_HISTORY_FILE = DATA_DIR / "cmm_heatmap_history.json"
@@ -328,17 +329,16 @@ MARKET_VIEW_HISTORY_LIMIT = int(os.environ.get("MARKET_VIEW_HISTORY_LIMIT", "440
 # back. That ceiling does not move, so a veto on open unrealised loss - the one
 # half of the production toxic-wallet rule that actually fires - cannot be
 # tested at all, since historical marks are not reconstructible from fills.
-# Sized deliberately, because this is persisted state. An entry serialises to
-# 213 bytes measured live, so 40 wallets x 270 days = 10800 entries costs about
-# 2.3 MB at full retention. 270 days buys two 135-day halves, comfortably more
-# than the 99-day window that everything measured so far had to make do with;
-# 400 days would have cost 3.4 MB for resolution nothing needs yet.
+# Sized deliberately, because this is persisted state. With the four dimension
+# statuses an entry serialises to 323 bytes, so 40 wallets x 200 days = 8000
+# entries costs about 2.58 MB at full retention. That still buys two 100-day
+# halves, just beyond the 99-day exchange-history ceiling.
 #
 # The "projected 8 MB plateau" this was originally sized against was wrong.
 # Measured on the live file: shadowSignalOutcomes is 87% of the state at 1915
 # bytes per record, so its 6000-record cap alone projects to 11.5 MB of state
 # and about 15.9 MB of file once indentation is counted.
-WALLET_QUALITY_HISTORY_LIMIT = int(os.environ.get("WALLET_QUALITY_HISTORY_LIMIT", "10800"))
+WALLET_QUALITY_HISTORY_LIMIT = int(os.environ.get("WALLET_QUALITY_HISTORY_LIMIT", "8000"))
 # How much a wallet must add to a coin inside WALLET_SIGNAL_ACTIVITY_WINDOW_MS
 # for that add to count as verified fresh flow. It feeds two of the eight
 # signal gates - insufficient_verified_activity and weak_fresh_net, both of
@@ -812,6 +812,13 @@ MONTHLY_QUALITY_MIN_PROFIT_FACTOR = 1.2
 MONTHLY_QUALITY_MAX_WIN_CONCENTRATION_PCT = 60.0
 MONTHLY_QUALITY_HOLDOUT_MS = 6 * 24 * 60 * 60 * 1000
 MONTHLY_QUALITY_EVENT_WINDOW_MS = 5 * 60 * 1000
+# Copyability is the prospective result of entering after detection and leaving
+# when the wallet leaves. It is deliberately a separate, cost-adjusted record;
+# neither Hyperdash's proprietary score nor our historical win rate can fill it.
+COPYABILITY_METHOD = "enter_after_detection_exit_with_wallet"
+COPYABILITY_MIN_INDEPENDENT_EPISODES = int(
+    os.environ.get("COPYABILITY_MIN_INDEPENDENT_EPISODES", "30")
+)
 # Spot fills carry no perp position, so startPosition is meaningless on them
 # and they must not open, extend or close a position episode. Measured across
 # 183,558 cached fills, 9,713 are spot; under the closing-run rule they acted
@@ -970,16 +977,178 @@ def append_market_view_history(
     return kept[-limit:]
 
 
-def wallet_quality_snapshot(wallet: dict[str, Any], weight: float, day: str) -> dict[str, Any]:
-    """One day's readable facts about a wallet, and nothing derived.
+def wallet_open_loss(wallet: Any) -> float:
+    """Absolute unrealised loss across losing legs, without winner netting."""
+    if not isinstance(wallet, dict):
+        return 0.0
+    positions = wallet.get("positions")
+    if isinstance(positions, list):
+        return abs(sum(
+            to_float(position.get("unrealizedPnl"))
+            for position in positions
+            if isinstance(position, dict) and to_float(position.get("unrealizedPnl")) < 0
+        ))
+    return abs(min(0.0, to_float(wallet.get("unrealizedPnl"))))
 
-    Stores the inputs a future test would need rather than a score, so that a
-    weighting or veto rule invented later can be measured against what was
-    actually true at the time instead of against today's formula applied
-    backwards.
+
+def wallet_is_toxic(wallet: Any) -> bool:
+    """Risk veto shared by cohort selection and the four-part quality view."""
+    if not isinstance(wallet, dict):
+        return True
+    account_value = to_float(wallet.get("accountValue"))
+    open_loss = wallet_open_loss(wallet)
+    ratio_toxic = (
+        account_value > 0
+        and open_loss >= TOXIC_UNREALIZED_LOSS_MIN_ABS
+        and open_loss >= account_value * (TOXIC_UNREALIZED_LOSS_TO_ACCOUNT_PCT / 100.0)
+    )
+    return (
+        to_float(wallet.get("realizedPnl30d")) < TOXIC_CONVICTION_WALLET_MAX_30D_PNL
+        or to_float(wallet.get("unrealizedPnl")) < COUNTED_POSITION_MAX_UNREALIZED_LOSS
+        or ratio_toxic
+    )
+
+
+def copyability_assessment(record: Any) -> dict[str, Any]:
+    """Validate a prospective, cost-adjusted wallet-copying result.
+
+    A positive point estimate is not enough. Admission needs at least thirty
+    independent completed episodes and a positive lower confidence bound. A
+    missing or unfinished record stays pending, which makes admission fail
+    closed while the prospective experiment accumulates evidence.
+    """
+    if not isinstance(record, dict):
+        return {
+            "status": "pending",
+            "method": COPYABILITY_METHOD,
+            "independentCompletedEpisodes": 0,
+            "costAdjustedNetReturnPct": None,
+            "lowerConfidenceBoundPct": None,
+        }
+    method = str(record.get("method") or "")
+    sample = max(0, int(to_float(record.get("independentCompletedEpisodes"))))
+    net_return = record.get("costAdjustedNetReturnPct")
+    lower_bound = record.get("lowerConfidenceBoundPct")
+    complete = bool(record.get("observationComplete"))
+    enough = sample >= COPYABILITY_MIN_INDEPENDENT_EPISODES
+    comparable = method == COPYABILITY_METHOD and net_return is not None and lower_bound is not None
+    if not complete or not enough or not comparable:
+        status = "pending"
+    elif to_float(net_return) > 0 and to_float(lower_bound) > 0:
+        status = "pass"
+    else:
+        status = "fail"
+    return {
+        "status": status,
+        "method": method or COPYABILITY_METHOD,
+        "independentCompletedEpisodes": sample,
+        "costAdjustedNetReturnPct": None if net_return is None else round(to_float(net_return), 3),
+        "lowerConfidenceBoundPct": None if lower_bound is None else round(to_float(lower_bound), 3),
+    }
+
+
+def wallet_quality_dimensions(wallet: Any, copyability: Any = None) -> dict[str, Any]:
+    """Four independent wallet-quality dimensions; never a blended score."""
+    if not isinstance(wallet, dict):
+        wallet = {}
+    profit_factor_raw = wallet.get("qualityProfitFactor30d")
+    profit_factor = float("inf") if profit_factor_raw == "inf" else to_float(profit_factor_raw)
+    has_performance = all(
+        key in wallet for key in ("qualityNetPnl30d", "qualityProfitFactor30d")
+    )
+    performance_pass = (
+        has_performance
+        and to_float(wallet.get("qualityNetPnl30d")) > 0
+        and profit_factor > MONTHLY_QUALITY_MIN_PROFIT_FACTOR
+    )
+    performance = {
+        "status": "pass" if performance_pass else "fail" if has_performance else "unknown",
+        "netPnl30d": round(to_float(wallet.get("qualityNetPnl30d")), 2)
+        if "qualityNetPnl30d" in wallet else None,
+        "profitFactor30d": "inf" if profit_factor == float("inf") else round(profit_factor, 3)
+        if "qualityProfitFactor30d" in wallet else None,
+    }
+
+    trusted = wallet_quality_window_trusted(wallet)
+    has_evidence = all(
+        key in wallet
+        for key in ("closedTrades90d", "qualityClosedEvents30d", "qualityTopWinConcentrationPct")
+    )
+    evidence_pass = (
+        has_evidence
+        and trusted
+        and int(to_float(wallet.get("closedTrades90d"))) >= RANKING_MIN_90D_CLOSED_TRADES
+        and int(to_float(wallet.get("qualityClosedEvents30d"))) >= MONTHLY_QUALITY_MIN_CLOSED_EVENTS
+        and to_float(wallet.get("qualityTopWinConcentrationPct", 100.0))
+        < MONTHLY_QUALITY_MAX_WIN_CONCENTRATION_PCT
+    )
+    evidence = {
+        "status": "pass" if evidence_pass else "fail" if has_evidence else "unknown",
+        "closedEpisodes90d": int(to_float(wallet.get("closedTrades90d"))),
+        "closedEpisodes30d": int(to_float(wallet.get("qualityClosedEvents30d"))),
+        "windowTrusted": bool(trusted),
+        "windowCoverageDays": round(to_float(wallet.get("qualityWindowCoverageMs")) / 86_400_000, 2)
+        if wallet.get("qualityWindowCoverageMs") is not None else None,
+        "topWinConcentrationPct": round(to_float(wallet.get("qualityTopWinConcentrationPct")), 2)
+        if wallet.get("qualityTopWinConcentrationPct") is not None else None,
+    }
+
+    account_value = to_float(wallet.get("accountValue"))
+    total_notional = abs(to_float(wallet.get("totalNotional")))
+    open_loss = wallet_open_loss(wallet)
+    risk_known = account_value > 0
+    risk_pass = risk_known and not wallet_is_toxic(wallet)
+    risk = {
+        "status": "pass" if risk_pass else "fail" if risk_known else "unknown",
+        "accountValue": round(account_value, 2) if risk_known else None,
+        "notionalToEquity": round(total_notional / account_value, 3) if risk_known else None,
+        "openLossToEquityPct": round(open_loss / account_value * 100.0, 2) if risk_known else None,
+        "toxic": wallet_is_toxic(wallet) if risk_known else None,
+    }
+
+    copy = copyability_assessment(copyability)
+    statuses = [performance["status"], evidence["status"], risk["status"], copy["status"]]
+    return {
+        "performance": performance,
+        "evidence": evidence,
+        "risk": risk,
+        "copyability": copy,
+        "tradeEligible": all(status == "pass" for status in statuses),
+    }
+
+
+def load_wallet_copyability(path: Path | None = None) -> dict[str, dict[str, Any]]:
+    """Address-keyed results approved from the prospective copyability study."""
+    raw = load_json_file(path or WALLET_COPYABILITY_FILE, {})
+    records = raw.get("wallets", {}) if isinstance(raw, dict) else {}
+    if not isinstance(records, dict):
+        return {}
+    return {
+        str(address).lower(): value
+        for address, value in records.items()
+        if normalize_address(str(address)) and isinstance(value, dict)
+    }
+
+
+def wallet_quality_snapshot(
+    wallet: dict[str, Any],
+    weight: float,
+    day: str,
+    dimensions: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """One day's readable wallet facts plus separate dimension verdicts.
+
+    It never stores a blended quality score. The compact pass/fail/pending
+    statuses make regime changes visible over time; the underlying metrics
+    remain in the wallet snapshots and the copyability registry.
     """
     rank = wallet.get("recentWinRateRank")
     rank = rank if isinstance(rank, dict) else {}
+    dimensions = dimensions if isinstance(dimensions, dict) else wallet_quality_dimensions(wallet)
+    dimension_status = {
+        name: str((dimensions.get(name) or {}).get("status") or "unknown")
+        for name in ("performance", "evidence", "risk", "copyability")
+    }
     return {
         "day": day,
         "address": str(wallet.get("address") or "").lower(),
@@ -988,6 +1157,7 @@ def wallet_quality_snapshot(wallet: dict[str, Any], weight: float, day: str) -> 
         "winRateScore": round(to_float(rank.get("score")), 3),
         "convictionWeight": round(to_float(weight), 3),
         "qualityTrusted": bool(wallet_quality_window_trusted(wallet)),
+        "qualityDimensions": dimension_status,
         "positionCount": len([
             item for item in (wallet.get("positions") or [])
             if str(item.get("side") or "").lower() in {"long", "short"}
@@ -1440,7 +1610,7 @@ def group_reference_and_mark(item: Any) -> tuple[float, float]:
 
 
 def group_quality_above_baseline(item: Any) -> bool:
-    """Does this group carry a displayed quality estimate above the baseline?
+    """Legacy WR comparison used for diagnostics, never trade admission.
 
     Requires the estimate to be shown, not merely present: below half the
     members carrying one, the mean describes a minority of the group while
@@ -1466,6 +1636,21 @@ def group_quality_above_baseline(item: Any) -> bool:
     return to_float(mean_pct) > round(CONVICTION_WIN_RATE_BASELINE * 100, 1)
 
 
+def group_trade_admission(item: Any) -> bool:
+    """Whether a group has cleared the four-dimensional, fail-closed gate."""
+    if not isinstance(item, dict):
+        return False
+    admission = item.get("tradeAdmission")
+    if not isinstance(admission, dict):
+        return False
+    return (
+        admission.get("status") == "eligible"
+        and int(to_float(admission.get("eligibleWalletCount")))
+        >= int(to_float(admission.get("requiredWalletCount")))
+        >= MIN_POSITION_MESSAGE_WALLETS
+    )
+
+
 def is_actionable_distance_pct(distance_pct: float) -> bool:
     """Is this signed distance-from-entry inside the actionable band?
 
@@ -1479,7 +1664,7 @@ def is_actionable_distance_pct(distance_pct: float) -> bool:
 
 
 def position_quality_note(item: Any) -> str:
-    """The wallet's win-rate estimate as an alert suffix, or nothing.
+    """The wallet's shrunk 90d win-rate estimate as a diagnostic suffix.
 
     Absent on closed positions by design: the estimate answers how likely the
     position is to close in profit, and for one that already closed the answer
@@ -1491,7 +1676,7 @@ def position_quality_note(item: Any) -> str:
     pct = item.get("qualityWinRatePct")
     if pct is None:
         return ""
-    return f" | quality {to_float(pct):.0f}%"
+    return f" | WR90 est. {to_float(pct):.0f}%"
 
 
 def is_within_actionable_distance(reference_price: float, mark_price: float) -> bool:
@@ -4003,31 +4188,7 @@ class WalletTrackerService:
         )
 
     def is_toxic_conviction_wallet(self, wallet: dict[str, Any]) -> bool:
-        positions = wallet.get("positions")
-        if isinstance(positions, list):
-            # Sum only the negative legs: a wallet whose one big winner nets
-            # out a big loser must still be caught, since the loser is real
-            # risk sitting on the book regardless of what else is open.
-            unrealized_loss = sum(
-                to_float(position.get("unrealizedPnl"))
-                for position in positions
-                if isinstance(position, dict) and to_float(position.get("unrealizedPnl")) < 0
-            )
-        else:
-            # No positions array (a snapshot written before this change) -
-            # fall back to the wallet-level net figure so it still gets judged.
-            unrealized_loss = min(0.0, to_float(wallet.get("unrealizedPnl")))
-        account_value = to_float(wallet.get("accountValue"))
-        ratio_toxic = (
-            account_value > 0
-            and -unrealized_loss >= TOXIC_UNREALIZED_LOSS_MIN_ABS
-            and -unrealized_loss >= account_value * (TOXIC_UNREALIZED_LOSS_TO_ACCOUNT_PCT / 100.0)
-        )
-        return (
-            to_float(wallet.get("realizedPnl30d")) < TOXIC_CONVICTION_WALLET_MAX_30D_PNL
-            or to_float(wallet.get("unrealizedPnl")) < COUNTED_POSITION_MAX_UNREALIZED_LOSS
-            or ratio_toxic
-        )
+        return wallet_is_toxic(wallet)
 
     def is_monthly_quality_eligible(self, wallet: dict[str, Any]) -> bool:
         if "qualityClosedEvents30d" not in wallet:
@@ -6234,7 +6395,7 @@ class WalletTrackerService:
                 side = telegram_html_escape(str(item.get("side") or "").upper())
                 quality = ""
                 if item.get("qualityWinRatePct") is not None:
-                    quality = f' | quality {to_float(item.get("qualityWinRatePct")):.0f}%'
+                    quality = f' | WR90 est. {to_float(item.get("qualityWinRatePct")):.0f}%'
                     if item.get("qualityBestWinRatePct") is not None:
                         quality += f' (best {to_float(item.get("qualityBestWinRatePct")):.0f}%)'
                 lines.append(
@@ -6532,6 +6693,7 @@ class WalletTrackerService:
         checked_ms = current_time_ms() if now_ms is None else now_ms
         recent_add_cutoff = checked_ms - POSITION_RECENT_ADD_WINDOW_MS
         recent_adds: dict[str, dict[str, float]] = {}
+        copyability_by_address = load_wallet_copyability()
 
         for wallet in dashboard.get("wallets", []):
             address = str(wallet.get("address") or "")
@@ -6598,6 +6760,7 @@ class WalletTrackerService:
                         "entrySum": 0.0,
                         "entryCount": 0,
                         "walletAddresses": set(),
+                        "walletQualityDimensions": {},
                         # One estimate per scored member wallet. A list rather than a
                         # running mean so the best member stays recoverable: a group
                         # carrying one strong wallet reads very differently from an
@@ -6618,6 +6781,9 @@ class WalletTrackerService:
                     bucket["walletAddresses"].add(address)
                     bucket["walletCount"] += 1
                     bucket["qualityWeight"] += self.wallet_conviction_weight(wallet, coin=coin)
+                    bucket["walletQualityDimensions"][address.lower()] = wallet_quality_dimensions(
+                        wallet, copyability_by_address.get(address.lower())
+                    )
                     member_rate = wallet_shrunk_win_rate(wallet)
                     if member_rate is not None:
                         bucket["qualityRates"].append(member_rate)
@@ -6649,6 +6815,30 @@ class WalletTrackerService:
                 if entry_count > 0
                 else 0.0
             )
+            member_dimensions = item["walletQualityDimensions"]
+            eligible_addresses = sorted(
+                address
+                for address, dimensions in member_dimensions.items()
+                if bool(dimensions.get("tradeEligible"))
+            )
+            dimension_status_counts = {
+                dimension: {
+                    status: sum(
+                        1
+                        for dimensions in member_dimensions.values()
+                        if (dimensions.get(dimension) or {}).get("status") == status
+                    )
+                    for status in ("pass", "fail", "unknown", "pending")
+                }
+                for dimension in ("performance", "evidence", "risk", "copyability")
+            }
+            required_eligible = MIN_POSITION_MESSAGE_WALLETS
+            if len(eligible_addresses) >= required_eligible:
+                admission_status = "eligible"
+            elif dimension_status_counts["copyability"]["pending"]:
+                admission_status = "pending"
+            else:
+                admission_status = "rejected"
             rows.append(
                 {
                     "coin": item["coin"],
@@ -6660,6 +6850,15 @@ class WalletTrackerService:
                     else None,
                     "qualityBestWinRatePct": round(100.0 * max(item["qualityRates"]), 1) if item["qualityRates"] else None,
                     "qualityScoredWallets": len(item["qualityRates"]),
+                    "walletAddresses": sorted(str(address).lower() for address in item["walletAddresses"]),
+                    "eligibleWalletAddresses": eligible_addresses,
+                    "qualityDimensions": dimension_status_counts,
+                    "tradeAdmission": {
+                        "status": admission_status,
+                        "eligibleWalletCount": len(eligible_addresses),
+                        "requiredWalletCount": required_eligible,
+                        "method": COPYABILITY_METHOD,
+                    },
                     "positionCount": item["positionCount"],
                     "totalValue": round(item["totalValue"], 2),
                     "totalSize": round(total_size, 8),
@@ -9178,6 +9377,8 @@ class WalletTrackerService:
         *,
         marks_by_coin: dict[str, float],
         now_ms: int,
+        source: str = "actionableEntry",
+        delivered_flag: bool = True,
     ) -> dict[str, Any]:
         """One outcome record per delivered actionable-entry alert.
 
@@ -9208,7 +9409,7 @@ class WalletTrackerService:
             records.setdefault(
                 f"entry:{coin}:{side}:{started_at}",
                 {
-                    "source": "actionableEntry",
+                    "source": source,
                     "coin": coin,
                     "marketCoin": coin,
                     "side": side,
@@ -9220,7 +9421,11 @@ class WalletTrackerService:
                     "totalValue": round(to_float(alert.get("totalValue")), 2),
                     "qualityWinRatePct": alert.get("qualityWinRatePct"),
                     "qualityBestWinRatePct": alert.get("qualityBestWinRatePct"),
-                    "delivered": True,
+                    "walletAddresses": list(alert.get("walletAddresses") or []),
+                    "eligibleWalletAddresses": list(alert.get("eligibleWalletAddresses") or []),
+                    "qualityDimensions": alert.get("qualityDimensions") or {},
+                    "tradeAdmission": alert.get("tradeAdmission") or {},
+                    "delivered": delivered_flag,
                     "outcomes": {},
                 },
             )
@@ -9253,19 +9458,15 @@ class WalletTrackerService:
         previous: Any,
         *,
         now_ms: int,
+        require_admission: bool = True,
+        limit: int | None = ACTIONABLE_ENTRY_ALERTS_PER_MESSAGE,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """Groups that have just come within reach, and the new latch state.
 
-        The board's actionable rows are the one thing here with a measured
-        edge - a wallet's quality predicts whether its position closes
-        profitable at AUC 0.586-0.753 out of sample - but they were only ever
-        seen on the four-hourly digest, so a group could sit inside the band
-        for hours before the reader heard about it. This fires on the
-        transition instead.
-
-        Only groups whose displayed quality is above the baseline qualify: the
-        same subset the board marks green, and the only one the measurement
-        speaks to. A group stays latched until it moves beyond
+        Publication fails closed until at least three member wallets pass all
+        four separate dimensions, including prospective, cost-adjusted
+        copyability. Historical WR remains visible for diagnosis but cannot
+        authorize an alert. A group stays latched until it moves beyond
         ACTIONABLE_ENTRY_RELEASE_DISTANCE_PCT, so hovering at the edge cannot
         produce a stream of alerts.
         """
@@ -9296,7 +9497,7 @@ class WalletTrackerService:
                 continue
             distance_pct = (mark_price / reference_price - 1.0) * 100.0
             within = is_actionable_distance_pct(distance_pct)
-            if within and group_quality_above_baseline(item):
+            if within and (not require_admission or group_trade_admission(item)):
                 if key in latched:
                     next_state[key] = latched[key]
                     continue
@@ -9310,6 +9511,10 @@ class WalletTrackerService:
                     "distancePct": round(distance_pct, 2),
                     "qualityWinRatePct": item.get("qualityWinRatePct"),
                     "qualityBestWinRatePct": item.get("qualityBestWinRatePct"),
+                    "walletAddresses": list(item.get("walletAddresses") or []),
+                    "eligibleWalletAddresses": list(item.get("eligibleWalletAddresses") or []),
+                    "qualityDimensions": item.get("qualityDimensions") or {},
+                    "tradeAdmission": item.get("tradeAdmission") or {},
                     "enteredAt": now_iso(),
                     "enteredAtMs": int(now_ms),
                 }
@@ -9319,12 +9524,17 @@ class WalletTrackerService:
 
         # Capped here rather than at render time so the message, the latch and
         # the outcome stream cannot disagree about what was announced. Ordered
-        # by quality so that when more groups qualify than fit, the ones that
-        # get announced are the best-measured ones; the rest keep their turn on
-        # a later cycle because they are not latched.
-        candidates.sort(key=lambda item: -to_float(item[1].get("qualityWinRatePct")))
+        # by measured copyability evidence, then size. Historical win rate is
+        # intentionally absent from the publication decision.
+        candidates.sort(
+            key=lambda item: (
+                -int(to_float((item[1].get("tradeAdmission") or {}).get("eligibleWalletCount"))),
+                -to_float(item[1].get("totalValue")),
+            )
+        )
+        selected = candidates if limit is None else candidates[:limit]
         alerts: list[dict[str, Any]] = []
-        for key, entry in candidates[:ACTIONABLE_ENTRY_ALERTS_PER_MESSAGE]:
+        for key, entry in selected:
             alerts.append(entry)
             next_state[key] = entry
         return alerts, next_state
@@ -9433,10 +9643,10 @@ class WalletTrackerService:
                         best_pct = item.get("qualityBestWinRatePct")
                         quality_note_shown = mean_pct is not None and scored * 2 >= int(item["walletCount"])
                         if quality_note_shown:
-                            quality_note = f' | quality {to_float(mean_pct):.0f}%'
+                            quality_note = f' | WR90 est. {to_float(mean_pct):.0f}%'
                             if best_pct is not None:
                                 quality_note += f' (best {to_float(best_pct):.0f}%)'
-                        if is_actionable and group_quality_above_baseline(item):
+                        if is_actionable and group_trade_admission(item):
                             high_quality_actionable_lines.add(row_index)
                         lines.append(
                             f'- {item["coin"]} {str(item.get("side") or "").upper()}: '
@@ -9860,6 +10070,16 @@ class WalletTrackerService:
             state.get("actionableGroups"),
             now_ms=dedupe_now_ms,
         )
+        # A silent, broader stream keeps collecting the evidence needed to
+        # unlock copyability. It has its own latch and never enters `changes`,
+        # so a pending research observation cannot trigger Telegram.
+        copyability_entries, copyability_entry_state = self.build_actionable_entry_alerts(
+            dashboard,
+            state.get("copyabilityGroups"),
+            now_ms=dedupe_now_ms,
+            require_admission=False,
+            limit=None,
+        )
         changes["actionableEntries"] = actionable_entries
         changes["clusteredOpenPositions"] = clustered_open_positions
         changes["newLargePositions"] = position_changes["newLargePositions"]
@@ -9936,10 +10156,19 @@ class WalletTrackerService:
             alert_summary.get("overallBias"),
         )
         quality_day = str(checked_at)[:10]
+        copyability_by_address = load_wallet_copyability()
         quality_history = append_wallet_quality_history(
             state.get("walletQualityHistory"),
             [
-                wallet_quality_snapshot(wallet, self.wallet_conviction_weight(wallet), quality_day)
+                wallet_quality_snapshot(
+                    wallet,
+                    self.wallet_conviction_weight(wallet),
+                    quality_day,
+                    wallet_quality_dimensions(
+                        wallet,
+                        copyability_by_address.get(str(wallet.get("address") or "").lower()),
+                    ),
+                )
                 for wallet in dashboard.get("wallets", [])
                 if str(wallet.get("address") or "").strip()
             ],
@@ -9955,6 +10184,7 @@ class WalletTrackerService:
             "signalOutcomes": signal_outcomes,
             "shadowSignalOutcomes": shadow_signal_outcomes,
             "candidateSignalOutcomes": candidate_signal_outcomes,
+            "copyabilityGroups": copyability_entry_state,
             "moniSocial": moni_summary,
         }
         if not should_notify or sent or not config.get("enabled") or acknowledge_suppressed:
@@ -9975,6 +10205,14 @@ class WalletTrackerService:
             actionable_entries if sent else [],
             marks_by_coin=self.position_group_mark_map(dashboard),
             now_ms=dedupe_now_ms,
+        )
+        new_state["copyabilityEntryOutcomes"] = self.update_actionable_entry_outcomes(
+            state.get("copyabilityEntryOutcomes", {}),
+            copyability_entries,
+            marks_by_coin=self.position_group_mark_map(dashboard),
+            now_ms=dedupe_now_ms,
+            source="copyabilityResearch",
+            delivered_flag=False,
         )
         if sent or acknowledge_suppressed:
             new_state["alertDedupe"] = self.update_alert_dedupe(

@@ -48,6 +48,10 @@ def alert(coin: str = "HYPE", *, mark: float = 88.0, started: int = NOW_MS) -> d
         "distancePct": 1.15,
         "qualityWinRatePct": 70.6,
         "qualityBestWinRatePct": 82.0,
+        "walletAddresses": ["0xa", "0xb", "0xc"],
+        "eligibleWalletAddresses": ["0xa", "0xb", "0xc"],
+        "qualityDimensions": {"copyability": {"pass": 3}},
+        "tradeAdmission": {"status": "eligible", "eligibleWalletCount": 3, "requiredWalletCount": 3},
         "enteredAt": "2026-09-08T00:00:00Z",
         "enteredAtMs": started,
     }
@@ -74,6 +78,15 @@ class DeliveredAlertMeasurementTests(unittest.TestCase):
             {}, [], marks_by_coin={"HYPE": 88.0}, now_ms=NOW_MS
         )
         self.assertEqual(records, {})
+
+    def test_silent_copyability_observation_is_identified_as_research(self) -> None:
+        records = self.service.update_actionable_entry_outcomes(
+            {}, [alert()], marks_by_coin={"HYPE": 88.0}, now_ms=NOW_MS,
+            source="copyabilityResearch", delivered_flag=False,
+        )
+        record = next(iter(records.values()))
+        self.assertEqual(record["source"], "copyabilityResearch")
+        self.assertIs(record["delivered"], False)
 
     def test_an_existing_record_keeps_being_measured_with_no_new_alerts(self) -> None:
         first = self.service.update_actionable_entry_outcomes(
@@ -227,6 +240,9 @@ def qualifying_group(coin: str, *, quality: float = 75.0) -> dict:
         "recentAddPx": reference,
         "entryPx": reference,
         "positionCount": 4,
+        "walletAddresses": ["0xa", "0xb", "0xc", "0xd"],
+        "eligibleWalletAddresses": ["0xa", "0xb", "0xc"],
+        "tradeAdmission": {"status": "eligible", "eligibleWalletCount": 3, "requiredWalletCount": 3},
     }
 
 
@@ -332,6 +348,10 @@ class FailedSendIsRetriedWithoutDuplicatingTests(unittest.TestCase):
         self.assertEqual(
             state_after_failure.get("actionableEntryOutcomes", {}), {},
             "an alert nobody saw must not be measured",
+        )
+        self.assertEqual(
+            len(state_after_failure.get("copyabilityEntryOutcomes", {})), 1,
+            "the silent research stream must not depend on Telegram delivery",
         )
 
         second, state_after_success, sender = self.run_cycle(state_after_failure, fail=False)

@@ -5640,7 +5640,7 @@ class AlertSummaryTests(unittest.TestCase):
         ]
         expected_mean_pct = round(100.0 * sum(rates) / len(rates), 1)
         expected_best_pct = round(100.0 * max(rates), 1)
-        self.assertIn(f"quality {expected_mean_pct:.0f}% (best {expected_best_pct:.0f}%)", message)
+        self.assertIn(f"WR90 est. {expected_mean_pct:.0f}% (best {expected_best_pct:.0f}%)", message)
 
     def test_a_wallet_below_the_90d_minimum_does_not_score_the_group(self) -> None:
         # Two scored members out of three still describes a majority, so the
@@ -5683,7 +5683,7 @@ class AlertSummaryTests(unittest.TestCase):
         ]
         expected_mean_pct = round(100.0 * sum(rates) / len(rates), 1)
         expected_best_pct = round(100.0 * max(rates), 1)
-        self.assertIn(f"quality {expected_mean_pct:.0f}% (best {expected_best_pct:.0f}%)", message)
+        self.assertIn(f"WR90 est. {expected_mean_pct:.0f}% (best {expected_best_pct:.0f}%)", message)
 
     def test_quality_is_withheld_when_most_of_the_group_is_unscorable(self) -> None:
         # One estimate out of three would describe a minority while looking
@@ -6136,11 +6136,9 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertNotIn("XYZ100 long", message)
         self.assertIn("SP500 LONG: 3 wallets | $1.1M open", message)
 
-    def test_build_positions_message_marks_high_quality_actionable_rows_green(self) -> None:
-        # Actionable (mark price matches the recent add price) and the
-        # displayed quality (100% 90d win rate over 10 closes shrunk toward
-        # CONVICTION_WIN_RATE_BASELINE, derived below) is above baseline ->
-        # green marker outside the bold wrapper, exactly once.
+    def test_build_positions_message_marks_admitted_actionable_rows_green(self) -> None:
+        # Green means the four-dimensional admission gate passed. The WR value
+        # remains visible but does not authorize the marker.
         now_ms = 1_700_000_000_000
         dashboard = {
             "wallets": [
@@ -6155,17 +6153,18 @@ class AlertSummaryTests(unittest.TestCase):
             ]
         }
 
-        with patch("server.current_time_ms", return_value=now_ms):
+        with patch("server.current_time_ms", return_value=now_ms), patch(
+            "server.group_trade_admission", return_value=True
+        ):
             message = self.service.build_positions_message(dashboard, html=True)
 
         line = next(line for line in message.splitlines() if "BTC LONG" in line)
         self.assertTrue(line.startswith("\U0001F7E2 <b>"))
         self.assertEqual(line.count("\U0001F7E2"), 1)
         expected_pct = round(100.0 * server.shrunk_win_rate(100.0, 10), 1)
-        self.assertIn(f"quality {expected_pct:.0f}%", line)
+        self.assertIn(f"WR90 est. {expected_pct:.0f}%", line)
 
-    def test_build_positions_message_does_not_mark_green_at_or_below_baseline(self) -> None:
-        # Below baseline: 50% raw win rate shrinks well under the baseline.
+    def test_build_positions_message_does_not_mark_green_without_admission(self) -> None:
         now_ms = 1_700_000_000_000
 
         def dashboard_with_win_rate(win_rate_pct: float) -> dict[str, Any]:
@@ -6184,10 +6183,6 @@ class AlertSummaryTests(unittest.TestCase):
 
         with patch("server.current_time_ms", return_value=now_ms):
             below_message = self.service.build_positions_message(dashboard_with_win_rate(50.0), html=True)
-            # Exact boundary: winRate90d equal to the baseline itself shrinks
-            # to precisely the baseline regardless of sample size, so this is
-            # a true "==" case, not an approximation - it must NOT go green
-            # because the comparison is strictly greater.
             boundary_message = self.service.build_positions_message(
                 dashboard_with_win_rate(server.CONVICTION_WIN_RATE_BASELINE * 100), html=True
             )
@@ -6214,18 +6209,17 @@ class AlertSummaryTests(unittest.TestCase):
             ]
         }
 
-        with patch("server.current_time_ms", return_value=now_ms):
+        with patch("server.current_time_ms", return_value=now_ms), patch(
+            "server.group_trade_admission", return_value=True
+        ):
             message = self.service.build_positions_message(dashboard, html=True)
 
         line = next(line for line in message.splitlines() if "BTC LONG" in line)
         self.assertNotIn("\U0001F7E2", line)
         self.assertNotIn("<b>", line)
 
-    def test_build_positions_message_does_not_mark_green_when_quality_note_is_hidden(self) -> None:
-        # Actionable, and the one scored wallet is well above baseline, but
-        # only 1 of 4 members is scored (1*2 < 4), so the quality note itself
-        # is suppressed - green must never appear on a row whose justifying
-        # figure is not shown.
+    def test_build_positions_message_can_mark_admission_when_wr_note_is_hidden(self) -> None:
+        # Copyability admission is independent of the optional WR diagnostic.
         now_ms = 1_700_000_000_000
         wallets = [
             {
@@ -6246,13 +6240,14 @@ class AlertSummaryTests(unittest.TestCase):
             )
         dashboard = {"wallets": wallets}
 
-        with patch("server.current_time_ms", return_value=now_ms):
+        with patch("server.current_time_ms", return_value=now_ms), patch(
+            "server.group_trade_admission", return_value=True
+        ):
             message = self.service.build_positions_message(dashboard, html=True)
 
         line = next(line for line in message.splitlines() if "BTC LONG" in line)
-        self.assertNotIn("\U0001F7E2", line)
-        self.assertNotIn("quality", line)
-        self.assertTrue(line.startswith("<b>"))
+        self.assertTrue(line.startswith("\U0001F7E2 <b>"))
+        self.assertNotIn("WR90 est.", line)
 
     def test_build_positions_message_plain_text_has_no_marker_or_tags(self) -> None:
         # html=False must never leak the marker or any markup, on a row that
@@ -6271,7 +6266,9 @@ class AlertSummaryTests(unittest.TestCase):
             ]
         }
 
-        with patch("server.current_time_ms", return_value=now_ms):
+        with patch("server.current_time_ms", return_value=now_ms), patch(
+            "server.group_trade_admission", return_value=True
+        ):
             message = self.service.build_positions_message(dashboard, html=False)
 
         self.assertNotIn("\U0001F7E2", message)
@@ -6295,7 +6292,9 @@ class AlertSummaryTests(unittest.TestCase):
             ]
         }
 
-        with patch("server.current_time_ms", return_value=now_ms):
+        with patch("server.current_time_ms", return_value=now_ms), patch(
+            "server.group_trade_admission", return_value=True
+        ):
             message = self.service.build_positions_message(dashboard, html=True)
 
         line = next(line for line in message.splitlines() if "A&amp;B&lt;C LONG" in line)
@@ -6906,7 +6905,7 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_telegram_message(changes, summary, 3)
 
-        self.assertIn("quality 86%", message)
+        self.assertIn("WR90 est. 86%", message)
 
     def test_a_closed_position_never_states_quality(self) -> None:
         # The estimate forecasts whether a position will close in profit. For
