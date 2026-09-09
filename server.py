@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import decimal
 import hashlib
 import hmac
 import json
@@ -716,13 +717,25 @@ RANKING_MIN_90D_CLOSED_TRADES = int(os.environ.get("RANKING_MIN_90D_CLOSED_TRADE
 # which is left in place for the case a future baseline makes it bind again.
 # The floor is unaffected: a wallet that never wins scores prior / (sample +
 # prior), which carries no baseline term at all.
-# This figure is measured with the same closing-run rule the win rates use,
-# including that rule's exclusion of opening fees (see reconstruct_closing_runs).
-# Under a fee-complete rule the same three sources give 0.657 rather than 0.673.
-# The two must therefore move together or not at all: the bias cancels between
-# the numerator and this denominator, and correcting one alone would shift every
-# wallet's weight at once for no real reason.
-CONVICTION_WIN_RATE_BASELINE = float(os.environ.get("CONVICTION_WIN_RATE_BASELINE", 0.673))
+#
+# Recalibrated 2026-09-09 together with the move from closing runs to position
+# episodes (see reconstruct_position_episodes): the constant is measured under
+# whatever rule the win rates use, so the two must always move together - the
+# "ONE RULE" note above applies here too and is being honoured, not broken.
+# Two independent measurements over the 25 tracked wallets agreed: the 90-day
+# fill cache gives 72.70% (1652 episodes) and the 180-day cache windowed to 90
+# days gives 72.45% (1274 episodes). Under the old closing-run rule the same
+# two sources gave 66.84% and 68.74%.
+#
+# These figures are net of all fees, opening fees included, which the previous
+# rule excluded. The gross-of-fee equivalents are 73.73% and 73.78%, so the
+# fee correction accounts for roughly 1.1 points of the move and the unit
+# change - runs collapsing into episodes - accounts for the rest.
+#
+# Structural note updated for the new value: the maximum attainable weight is
+# now 1 / 0.724 = 1.381, down from 1.486 at the old baseline, so
+# CONVICTION_WALLET_WEIGHT_MAX (1.5) remains slack.
+CONVICTION_WIN_RATE_BASELINE = float(os.environ.get("CONVICTION_WIN_RATE_BASELINE", 0.724))
 # Tiers for the weight-derived label below. convictionWinRateWeight is
 # shrunk / baseline, so 1.00 is exactly the measured average win rate across
 # the tracked set and these are steps away from that reference point - not
@@ -783,13 +796,11 @@ MONTHLY_QUALITY_MIN_PROFIT_FACTOR = 1.2
 MONTHLY_QUALITY_MAX_WIN_CONCENTRATION_PCT = 60.0
 MONTHLY_QUALITY_HOLDOUT_MS = 6 * 24 * 60 * 60 * 1000
 MONTHLY_QUALITY_EVENT_WINDOW_MS = 5 * 60 * 1000
-# A decision ends when the wallet adds back to the position. The gap is only a
-# secondary guard, for a position dribbled out over a long stretch with no
-# adds in between. Deliberately not tuned: measured against Hyperlaunch-style
-# position-level win rates for five wallets, every value from 1h to 72h landed
-# within 3 points of the same answer, so a more precise value would be fitting
-# noise rather than calibrating.
-QUALITY_CLOSING_RUN_GAP_MS = 12 * 60 * 60 * 1000
+# Spot fills carry no perp position, so startPosition is meaningless on them
+# and they must not open, extend or close a position episode. Measured across
+# 183,558 cached fills, 9,713 are spot; under the closing-run rule they acted
+# as spurious run splitters because their closedPnl is zero.
+SPOT_FILL_DIRECTIONS = frozenset({"Buy", "Sell"})
 TOXIC_CONVICTION_WALLET_MAX_30D_PNL = -500_000
 RANKING_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 HOLDING_ONLY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
@@ -1118,81 +1129,101 @@ def collapse_twap_slice_fills(slices: Any) -> list[dict[str, Any]]:
     return collapsed
 
 
-def reconstruct_closing_runs(
-    fills: list[dict[str, Any]], cutoff_ms: float, gap_ms: float
+def reconstruct_position_episodes(
+    fills: list[dict[str, Any]], cutoff_ms: float
 ) -> list[dict[str, Any]]:
-    """Rebuild per-coin closing runs from time-sorted fills at/after cutoff_ms.
+    """Rebuild per-coin position episodes from time-sorted fills at/after cutoff_ms.
 
-    Mirrors, rule for rule, the closing-run construction inlined in
-    fetch_wallet_snapshot for closedTrades30d/qualityClosedEvents30d: a run is
-    the contiguous stretch of closes on one coin, ended either by a
-    zero-closedPnl fill (the wallet added back to the position) or by more
-    than gap_ms elapsing since the run's last close, whichever comes first.
-    Used to derive the 90d win rate from the same reconstruction rule the 30d
-    fields already use, just over a different window of the same fetched
-    fills. Any run still open at the end of the scan is flushed as closed,
-    same as the inline version.
+    An episode is one position: it runs from the moment the coin's position
+    leaves zero until it returns to zero, or flips sign in a single fill (which
+    closes one position and opens the next). This is the unit a person means by
+    "a trade", and it is read from the exchange's own ``startPosition`` on each
+    fill rather than accumulated across fills. That distinction is the whole
+    design: the fill feed is not complete, and a chain of signed sizes
+    disagrees with the reported ``startPosition`` on 7.6% of transitions
+    (17,497 of 229,148 measured), which is what sank the earlier round-trip
+    attempt. Anchored per fill, flat detection is confirmed by the exchange's
+    next observation on 2,064 of 2,101 crossings (98.2%) and misses 30.
+
+    Episodes still open when the scan ends are not returned. An unfinished
+    position is not a closed trade; the previous rule flushed 579 of them into
+    the win/loss counts.
+
+    ``pnl`` is net of every fee inside the episode, opening fees included, and
+    the fee is taken signed so a maker rebate credits rather than costs. The
+    previous rule saw only closing fills and so charged 44% of fees; correcting
+    it is safe here only because CONVICTION_WIN_RATE_BASELINE is recalibrated
+    in the same change (see its comment).
+
+    ``anchored`` is False when the episode's first fill already had a position
+    open - the position predates the window. Its realized pnl is still exact,
+    because ``closedPnl`` is computed by the exchange against the true entry
+    price, but its opening fee is outside the window and is not charged.
     """
-    open_runs: dict[str, dict[str, Any]] = {}
-    closed_runs: list[dict[str, Any]] = []
+    open_episodes: dict[str, dict[str, Any]] = {}
+    finished_episodes: list[dict[str, Any]] = []
     for fill in fills:
         fill_time = int(to_float(fill.get("time")))
         if fill_time < cutoff_ms:
             continue
-        closed_pnl = to_float(fill.get("closedPnl"))
-        # Two known biases live in this line, both deliberately left in place.
-        #
-        # Only closing fills reach it, so a position's opening fee is never
-        # charged to the run. Measured across 163,318 fills from the tracked
-        # set: 781,979 of fees sit on zero-closedPnl fills and 608,304 on
-        # closing ones, so 56% of all fees are outside the calculation and
-        # every run's PnL is overstated by roughly the opening fee. The effect
-        # on the win rate is one-directional but small and concentrated: mean
-        # -0.95pp, median 0.00, worst -7.69pp, and 15 of 23 wallets move by
-        # exactly nothing.
-        #
-        # abs() also turns a maker rebate into a cost. No fill in the same
-        # 163,318 carries a negative fee, so this is a trap rather than an
-        # active error - but it is one, and it belongs to the same fix.
-        #
-        # WHY THEY STAY: the conviction weight is shrunk / baseline, and
-        # CONVICTION_WIN_RATE_BASELINE is measured under this very rule, so the
-        # bias sits in both the numerator and the denominator and largely
-        # cancels. Correcting both together moves the weights by a mean of
-        # +0.006 with a largest single change of -0.065, leaves the ordering at
-        # rank correlation 0.9872, and takes the wallets above their own
-        # baseline from 9 to 10 of 23. What does NOT cancel is the figure the
-        # board prints as a probability: 75.0% where the fee-correct answer is
-        # 67.3% on the worst wallet.
-        #
-        # THE ONE RULE: fix this and the baseline together, or neither. Fixing
-        # the fees while leaving the baseline at a value measured without them
-        # turns a cancelling bias into a real systematic shift across every
-        # wallet at once.
-        fee = abs(to_float(fill.get("fee")))
-        run_coin = normalize_position_coin(fill.get("coin"))
-        if closed_pnl == 0:
-            reopened = open_runs.pop(run_coin, None)
-            if reopened is not None:
-                closed_runs.append(reopened)
+        if str(fill.get("dir") or "") in SPOT_FILL_DIRECTIONS:
             continue
-        run = open_runs.get(run_coin)
-        if run is not None and fill_time - int(run["endMs"]) > gap_ms:
-            closed_runs.append(open_runs.pop(run_coin))
-            run = None
-        if run is None:
-            run = open_runs[run_coin] = {
-                "coin": run_coin,
+        coin = normalize_position_coin(fill.get("coin"))
+        try:
+            start_position = decimal.Decimal(str(fill.get("startPosition")))
+        except (decimal.InvalidOperation, TypeError, ValueError):
+            continue
+        try:
+            size = decimal.Decimal(str(fill.get("sz")))
+        except (decimal.InvalidOperation, TypeError, ValueError):
+            continue
+        signed = size if fill.get("side") == "B" else -size
+        end_position = start_position + signed
+
+        episode = open_episodes.get(coin)
+        if episode is None:
+            episode = open_episodes[coin] = {
+                "coin": coin,
                 "pnl": 0.0,
+                "fee": 0.0,
                 "startMs": fill_time,
                 "endMs": fill_time,
                 "fills": 0,
+                "anchored": start_position == 0,
             }
-        run["pnl"] += closed_pnl - fee
-        run["endMs"] = fill_time
-        run["fills"] = int(run["fills"]) + 1
-    closed_runs.extend(open_runs.values())
-    return closed_runs
+        episode["pnl"] += to_float(fill.get("closedPnl"))
+        episode["fee"] += to_float(fill.get("fee"))
+        episode["fills"] = int(episode["fills"]) + 1
+        episode["endMs"] = fill_time
+
+        flat = end_position == 0
+        flipped = (
+            start_position != 0
+            and end_position != 0
+            and (start_position > 0) != (end_position > 0)
+        )
+        if not flat and not flipped:
+            continue
+
+        finished = open_episodes.pop(coin)
+        finished["pnl"] = finished["pnl"] - finished["fee"]
+        del finished["fee"]
+        finished_episodes.append(finished)
+        if flipped:
+            # The flip fill's own fee and pnl were just charged in full to the
+            # episode this closed, above, so the fresh episode it opens here
+            # starts empty rather than splitting that one fill's fee across
+            # both halves - a small approximation.
+            open_episodes[coin] = {
+                "coin": coin,
+                "pnl": 0.0,
+                "fee": 0.0,
+                "startMs": fill_time,
+                "endMs": fill_time,
+                "fills": 0,
+                "anchored": True,
+            }
+    return finished_episodes
 
 
 def cached_window_fill_count(entry: Any) -> int | None:
@@ -1346,7 +1377,14 @@ def group_quality_above_baseline(item: Any) -> bool:
     scored = int(to_float(item.get("qualityScoredWallets")))
     if scored * 2 < int(to_float(item.get("walletCount"))):
         return False
-    return to_float(mean_pct) > CONVICTION_WIN_RATE_BASELINE * 100
+    # mean_pct was rounded to one decimal before it ever reached here (see the
+    # qualityWinRatePct aggregation), but CONVICTION_WIN_RATE_BASELINE * 100 is
+    # not - it can land a float epsilon on either side of the rounded value
+    # (0.724 * 100 == 72.39999999999999). Rounding the threshold to the same
+    # precision the displayed figure already carries is what makes a wallet
+    # sitting exactly on the baseline compare equal rather than falling on one
+    # side by binary floating-point accident.
+    return to_float(mean_pct) > round(CONVICTION_WIN_RATE_BASELINE * 100, 1)
 
 
 def is_actionable_distance_pct(distance_pct: float) -> bool:
@@ -2835,8 +2873,6 @@ class WalletTrackerService:
         fills_30d_count = 0
         last_fill_time = 0
         asset_pnl: dict[str, float] = {}
-        open_runs: dict[str, dict[str, Any]] = {}
-        closed_runs: list[dict[str, Any]] = []
         for fill in fills:
             closed_pnl = to_float(fill.get("closedPnl"))
             fee = abs(to_float(fill.get("fee")))
@@ -2844,29 +2880,8 @@ class WalletTrackerService:
             last_fill_time = max(last_fill_time, fill_time)
             if fill_time >= cutoff_30d_ms:
                 fills_30d_count += 1
-                run_coin = normalize_position_coin(fill.get("coin"))
-                if closed_pnl == 0:
-                    # Adding to the position ends the decision that was being
-                    # unwound; whatever closes next is a new one.
-                    reopened = open_runs.pop(run_coin, None)
-                    if reopened is not None:
-                        closed_runs.append(reopened)
-                else:
-                    run = open_runs.get(run_coin)
-                    if run is not None and fill_time - int(run["endMs"]) > QUALITY_CLOSING_RUN_GAP_MS:
-                        closed_runs.append(open_runs.pop(run_coin))
-                        run = None
-                    if run is None:
-                        run = open_runs[run_coin] = {
-                            "coin": run_coin,
-                            "pnl": 0.0,
-                            "startMs": fill_time,
-                            "endMs": fill_time,
-                            "fills": 0,
-                        }
-                    run["pnl"] += closed_pnl - fee
-                    run["endMs"] = fill_time
-                    run["fills"] = int(run["fills"]) + 1
+                if closed_pnl != 0:
+                    run_coin = normalize_position_coin(fill.get("coin"))
                     realized_pnl_30d += closed_pnl
                     if closed_pnl > 0:
                         gross_profit_30d += closed_pnl
@@ -2978,19 +2993,26 @@ class WalletTrackerService:
         # against position-level win rates for five wallets, 5-minute buckets
         # were out by as much as 39 points.
         #
-        # A decision is therefore a closing run - the contiguous stretch of
-        # closes on one coin, ended when the wallet adds back to the position.
-        # Unlike requiring a return to flat it stays readable for a wallet that
-        # scales out without ever closing fully (one tracked wallet completed 5
-        # round trips in 30 days but 11 closing runs). Same five wallets, worst
-        # error 8 points against 39 for buckets and 36 for round trips; it is
-        # the bounded worst case that matters here, since it was a 39-point
-        # error that quarantined a wallet running +$396k over the same month.
-        #
-        # Sums are unaffected by fragmentation and stay per fill: splitting one
-        # exit into 100 pieces does not change realized pnl, only the count.
-        closed_runs.extend(open_runs.values())
-        open_runs.clear()
+        # A round trip - the position from flat to flat - was tried next and
+        # also rejected, at 36 points off the same five wallets. That
+        # rejection blamed the unit, and installed closing runs instead: the
+        # contiguous stretch of closes on one coin, ended when the wallet
+        # added back to the position or a 12-hour idle gap elapsed.
+        # That was the wrong diagnosis. The 36-point error came from how the
+        # round trip was reconstructed, not from the round trip itself: it
+        # chained signed fill sizes to find flat, and that chain disagrees
+        # with the exchange's own startPosition on 7.6% of transitions
+        # (17,497 of 229,148 measured) because the fill feed is not complete.
+        # Anchoring flat detection on startPosition per fill instead of on the
+        # accumulated chain sidesteps that gap: measured over 245,181 fills it
+        # is 98.2% precise (2,064 of 2,101 crossings confirmed by the
+        # exchange's next startPosition == 0) and misses only 30 flats. The
+        # round trip - now called a position episode, see
+        # reconstruct_position_episodes - is the right unit after all; closing
+        # runs over-counted it 4,356 to 2,080 measured across the tracked set,
+        # by splitting on zero-closedPnl fills and idle gaps that were not
+        # actually flat.
+        closed_runs = reconstruct_position_episodes(fills, cutoff_30d_ms)
 
         def _run_wins_losses(window_start_ms: float | None) -> tuple[int, int]:
             wins = losses = 0
@@ -3009,12 +3031,13 @@ class WalletTrackerService:
         # qualityClosedEvents30d below.
         win_count_30d, loss_count_30d = _run_wins_losses(None)
         win_count, loss_count = _run_wins_losses(cutoff_7d_ms)
-        # winRate90d/closedTrades90d use the same closing-run rule as the 30d
-        # fields above (see reconstruct_closing_runs), just reconstructed over
-        # the wider cutoff_90d_ms window that `fills` now covers on a full
-        # refresh. A laddered exit collapses into one decision here exactly as
-        # it does for the 30d fields, since it is the same rule.
-        closed_runs_90d = reconstruct_closing_runs(fills, cutoff_90d_ms, QUALITY_CLOSING_RUN_GAP_MS)
+        # winRate90d/closedTrades90d use the same position-episode rule as the
+        # 30d fields above (see reconstruct_position_episodes), just
+        # reconstructed over the wider cutoff_90d_ms window that `fills` now
+        # covers on a full refresh. A laddered exit collapses into one episode
+        # here exactly as it does for the 30d fields, since it is the same
+        # rule.
+        closed_runs_90d = reconstruct_position_episodes(fills, cutoff_90d_ms)
         win_count_90d = sum(1 for run in closed_runs_90d if run["pnl"] > 0)
         loss_count_90d = sum(1 for run in closed_runs_90d if run["pnl"] < 0)
         closed_trade_count_90d = win_count_90d + loss_count_90d
@@ -3127,9 +3150,9 @@ class WalletTrackerService:
             "closedTrades30d": win_count_30d + loss_count_30d,
             "grossProfit30d": gross_profit_30d,
             "grossLoss30d": gross_loss_30d,
-            # Same closing-run reconstruction as closedTrades30d, over the
+            # Same position-episode reconstruction as closedTrades30d, over the
             # wider WALLET_QUALITY_WINDOW_DAYS (90d) window - see
-            # reconstruct_closing_runs. Feeds convictionWinRateWeight in
+            # reconstruct_position_episodes. Feeds convictionWinRateWeight in
             # build_wallet_quality_rank; does not replace any 30d field above.
             "winRate90d": round(win_rate_90d, 1),
             "closedTrades90d": closed_trade_count_90d,
