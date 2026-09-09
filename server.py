@@ -812,6 +812,22 @@ MONTHLY_QUALITY_EVENT_WINDOW_MS = 5 * 60 * 1000
 # as spurious run splitters because their closedPnl is zero.
 SPOT_FILL_DIRECTIONS = frozenset({"Buy", "Sell"})
 TOXIC_CONVICTION_WALLET_MAX_30D_PNL = -500_000
+# The pre-existing open-book guard (COUNTED_POSITION_MAX_UNREALIZED_LOSS,
+# -$1,000,000) is a flat dollar figure that does not scale with account size:
+# on a hypothetical $50M account it fires at 2% of equity, while on a $900k
+# account it fires at 111%. What actually matters is open losses relative to
+# the wallet's own equity, so toxicity also fires when unrealized loss reaches
+# this fraction of accountValue.
+TOXIC_UNREALIZED_LOSS_TO_ACCOUNT_PCT = 100.0
+# The ratio alone is not enough: one tracked wallet holds $351 of equity
+# against $238 of unrealized loss, a 67.8% ratio that is pure noise from a
+# dust account. This absolute floor keeps the ratio rule from tripping on
+# accounts too small to matter.
+TOXIC_UNREALIZED_LOSS_MIN_ABS = 100_000.0
+# Matches the existing quarantine penalty (wallet_conviction_weight's
+# `multiplier *= 0.5` for is_wallet_quarantined) rather than inventing a
+# second severity level for a different failure mode.
+TOXIC_CONVICTION_WALLET_WEIGHT_MULTIPLIER = 0.5
 RANKING_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 HOLDING_ONLY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
 # Fresh-flow, VWAP, and activity checks consume recent fills for up to seven
@@ -3934,9 +3950,30 @@ class WalletTrackerService:
         )
 
     def is_toxic_conviction_wallet(self, wallet: dict[str, Any]) -> bool:
+        positions = wallet.get("positions")
+        if isinstance(positions, list):
+            # Sum only the negative legs: a wallet whose one big winner nets
+            # out a big loser must still be caught, since the loser is real
+            # risk sitting on the book regardless of what else is open.
+            unrealized_loss = sum(
+                to_float(position.get("unrealizedPnl"))
+                for position in positions
+                if isinstance(position, dict) and to_float(position.get("unrealizedPnl")) < 0
+            )
+        else:
+            # No positions array (a snapshot written before this change) -
+            # fall back to the wallet-level net figure so it still gets judged.
+            unrealized_loss = min(0.0, to_float(wallet.get("unrealizedPnl")))
+        account_value = to_float(wallet.get("accountValue"))
+        ratio_toxic = (
+            account_value > 0
+            and -unrealized_loss >= TOXIC_UNREALIZED_LOSS_MIN_ABS
+            and -unrealized_loss >= account_value * (TOXIC_UNREALIZED_LOSS_TO_ACCOUNT_PCT / 100.0)
+        )
         return (
             to_float(wallet.get("realizedPnl30d")) < TOXIC_CONVICTION_WALLET_MAX_30D_PNL
             or to_float(wallet.get("unrealizedPnl")) < COUNTED_POSITION_MAX_UNREALIZED_LOSS
+            or ratio_toxic
         )
 
     def is_monthly_quality_eligible(self, wallet: dict[str, Any]) -> bool:
@@ -3953,6 +3990,26 @@ class WalletTrackerService:
             return False
         profit_factor_raw = wallet.get("qualityProfitFactor30d")
         profit_factor = float("inf") if profit_factor_raw == "inf" else to_float(profit_factor_raw)
+        if profit_factor == float("inf"):
+            # inf means the window closed no losses at all - that is either
+            # genuine excellence or losers that simply have not been closed
+            # yet, and the open book is what tells the two apart. This method
+            # already refuses to promote on unknown data (see the window-trust
+            # comment above); this is the same principle applied to a
+            # different unknown. Direction only, no magnitude threshold: a
+            # wallet with no closed losses and a green (or flat) open book
+            # still passes.
+            positions = wallet.get("positions")
+            if isinstance(positions, list):
+                net_unrealized = sum(
+                    to_float(position.get("unrealizedPnl"))
+                    for position in positions
+                    if isinstance(position, dict)
+                )
+            else:
+                net_unrealized = to_float(wallet.get("unrealizedPnl"))
+            if net_unrealized < 0:
+                profit_factor = float("-inf")
         holdout_events = int(to_float(wallet.get("qualityHoldout6dEvents")))
         return (
             int(to_float(wallet.get("qualityClosedEvents30d"))) >= MONTHLY_QUALITY_MIN_CLOSED_EVENTS
@@ -4121,6 +4178,16 @@ class WalletTrackerService:
                 multiplier *= max(0.75, min(1.25, asset_win_rate / 60.0))
         if self.is_wallet_quarantined(wallet):
             multiplier *= 0.5
+        # Not guarded by wallet_quality_window_trusted the way quarantine is.
+        # Quarantine reads 7d fill-derived fields, which an unreadable fill
+        # window can corrupt, so it refuses to judge on unknown data.
+        # unrealizedPnl and accountValue come from clearinghouseState, not
+        # from fills, so a truncated fill window cannot produce a false
+        # positive here - there is nothing to refuse. The two penalties
+        # compose: a wallet that is both quarantined and toxic takes both,
+        # because they are different failures.
+        if self.is_toxic_conviction_wallet(wallet):
+            multiplier *= TOXIC_CONVICTION_WALLET_WEIGHT_MULTIPLIER
         review_multiplier = max(0.0, min(to_float(wallet.get("reviewWeightMultiplier", 1.0)), 1.0))
         if review_multiplier == 0:
             return 0.0
