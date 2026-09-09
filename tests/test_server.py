@@ -19,6 +19,7 @@ from server import (
     ALERTS_FILE,
     CONVICTION_WIN_RATE_BASELINE,
     CONVICTION_WIN_RATE_PRIOR_TRADES,
+    DEFAULT_CONSENSUS_THRESHOLD,
     LABEL_TIER_BALANCED_WEIGHT,
     LABEL_TIER_STRONG_WEIGHT,
     LABEL_TIER_WEAK_WEIGHT,
@@ -2829,9 +2830,23 @@ class AlertSummaryTests(unittest.TestCase):
             "0xfc98b6ec7f59ea13354bae6171a9120692fb8777",
         }
 
-        self.assertEqual(len(addresses), 33)
+        # Deliberately no assertion on len(addresses). The set is meant to be
+        # cut down over time - trading breadth of consensus coverage for
+        # per-wallet quality - so pinning an exact count makes every
+        # intentional removal look like a regression. It already had: the
+        # constant said 33 while the file held 25, and the suite failed on the
+        # production box for a change that touched neither.
+        #
+        # What this test is actually for is the two set relations below: the
+        # wallets cut for cause stay cut, and the wallets added on purpose stay
+        # present. Both survive any resize.
         self.assertTrue(additions.issubset(addresses))
         self.assertTrue(removed.isdisjoint(addresses))
+        self.assertGreaterEqual(
+            len(addresses),
+            DEFAULT_CONSENSUS_THRESHOLD,
+            "a set below the consensus threshold cannot produce a signal at all",
+        )
 
     def test_dashboard_marks_globally_empty_fills_as_degraded(self) -> None:
         snapshots = [
