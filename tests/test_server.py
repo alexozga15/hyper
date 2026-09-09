@@ -8876,6 +8876,101 @@ class LegacyOutcomeFieldTests(unittest.TestCase):
         )
 
 
+class MissedCloseEpisodeTests(unittest.TestCase):
+    """A dropped closing fill must not merge two positions into one."""
+
+    @staticmethod
+    def _fill(time, start_position, size, side, closed_pnl, coin="BTC", fee="0"):
+        return {
+            "time": time,
+            "coin": coin,
+            "dir": "Close Long" if side == "A" else "Open Long",
+            "side": side,
+            "sz": size,
+            "startPosition": start_position,
+            "closedPnl": closed_pnl,
+            "fee": fee,
+        }
+
+    def test_a_new_position_opening_from_flat_is_not_merged_into_the_previous_one(self) -> None:
+        # The exchange reports startPosition == 0 while an episode is still
+        # open, so the fill that closed the previous position never reached
+        # us. Merging them put both pnls on one episode and turned a +2 win
+        # into a -3 loss.
+        fills = [
+            self._fill(1, "0", "10", "B", "0"),
+            self._fill(2, "10", "4", "A", "-5"),
+            # the fill taking it from 6 to 0 is missing from the feed
+            self._fill(3, "0", "7", "B", "0"),
+            self._fill(4, "7", "7", "A", "2"),
+        ]
+        episodes = reconstruct_position_episodes(fills, 0)
+        self.assertEqual(len(episodes), 1, "the two positions must not merge")
+        self.assertEqual(episodes[0]["pnl"], 2.0, "the surviving episode is the clean one")
+        self.assertEqual(episodes[0]["startMs"], 3)
+
+    def test_the_position_whose_close_went_missing_is_dropped_not_guessed(self) -> None:
+        # We know it ended but not for how much, so emitting it with only the
+        # closes we happened to see would be a wrong measurement rather than a
+        # partial one - the same reasoning that keeps still-open episodes out.
+        fills = [
+            self._fill(1, "0", "10", "B", "0"),
+            self._fill(2, "10", "4", "A", "-5"),
+            self._fill(3, "0", "7", "B", "0"),
+        ]
+        self.assertEqual(reconstruct_position_episodes(fills, 0), [])
+
+    def test_a_feed_gap_that_does_not_reach_flat_keeps_one_episode(self) -> None:
+        # startPosition disagrees with the previous end, but away from zero:
+        # fills were dropped mid-position, the boundary is intact, and
+        # splitting here would rebuild the fragmentation this unit removes.
+        fills = [
+            self._fill(1, "0", "10", "B", "0"),
+            # a fill taking 10 -> 8 never arrived; the next reports 8, not 10
+            self._fill(2, "8", "8", "A", "3"),
+        ]
+        episodes = reconstruct_position_episodes(fills, 0)
+        self.assertEqual(len(episodes), 1)
+        self.assertEqual(episodes[0]["pnl"], 3.0)
+
+    def test_an_uninterrupted_sequence_is_unaffected_by_the_check(self) -> None:
+        fills = [
+            self._fill(1, "0", "10", "B", "0"),
+            self._fill(2, "10", "4", "A", "-5"),
+            self._fill(3, "6", "6", "A", "1"),
+            self._fill(4, "0", "7", "B", "0"),
+            self._fill(5, "7", "7", "A", "2"),
+        ]
+        episodes = reconstruct_position_episodes(fills, 0)
+        self.assertEqual([e["pnl"] for e in episodes], [-4.0, 2.0])
+
+    def test_a_missed_close_on_one_coin_does_not_disturb_another(self) -> None:
+        fills = [
+            self._fill(1, "0", "10", "B", "0", coin="BTC"),
+            self._fill(2, "0", "5", "B", "0", coin="ETH"),
+            self._fill(3, "10", "4", "A", "-5", coin="BTC"),
+            self._fill(4, "0", "7", "B", "0", coin="BTC"),
+            self._fill(5, "5", "5", "A", "9", coin="ETH"),
+            self._fill(6, "7", "7", "A", "2", coin="BTC"),
+        ]
+        episodes = reconstruct_position_episodes(fills, 0)
+        self.assertEqual(
+            sorted((e["coin"], e["pnl"]) for e in episodes),
+            [("BTC", 2.0), ("ETH", 9.0)],
+        )
+
+    def test_no_episode_carries_the_internal_position_bookkeeping(self) -> None:
+        # `expected` is a Decimal held only to detect the gap; it must not
+        # reach a consumer or a json dump.
+        fills = [
+            self._fill(1, "0", "10", "B", "0"),
+            self._fill(2, "10", "10", "A", "4"),
+        ]
+        for episode in reconstruct_position_episodes(fills, 0):
+            self.assertNotIn("expected", episode)
+            json.dumps(episode)
+
+
 class OpenBookToxicityTests(unittest.TestCase):
     """A wallet that never closes its losers must not score perfectly.
 

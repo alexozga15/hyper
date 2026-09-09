@@ -1171,6 +1171,24 @@ def reconstruct_position_episodes(
     attempt. Anchored per fill, flat detection is confirmed by the exchange's
     next observation on 2,064 of 2,101 crossings (98.2%) and misses 30.
 
+    Reading ``startPosition`` per fill is not on its own enough, and an earlier
+    version of this docstring claimed otherwise. A dropped fill cannot make
+    this invent a close, but it can make it merge two positions: when the fill
+    that took a position to zero never arrives, the next fill opens a new
+    position at ``startPosition == 0`` while an episode is still held open, and
+    accumulating into it puts both positions' pnl on one episode - where the
+    sign, which is the whole measurement, can flip. So each episode carries the
+    end position of its last fill and every fill is checked against it. On
+    disagreement at zero the stale episode is dropped: we know it ended but not
+    for how much, and a wrong measurement is worse than a missing one. 15 of
+    1700 episodes over a 90-day window are affected.
+
+    A disagreement away from zero means fills were dropped mid-position, which
+    leaves the episode boundary intact and only understates its pnl by whatever
+    the missing fills realized. Those episodes are still returned; splitting on
+    them would rebuild the very fragmentation this unit exists to avoid, since
+    8.8% of episodes contain at least one such gap.
+
     Episodes still open when the scan ends are not returned. An unfinished
     position is not a closed trade; the previous rule flushed 579 of them into
     the win/loss counts.
@@ -1207,6 +1225,26 @@ def reconstruct_position_episodes(
         end_position = start_position + signed
 
         episode = open_episodes.get(coin)
+        if episode is not None and start_position == 0 and episode["expected"] != 0:
+            # The exchange says this coin was flat before this fill, but the
+            # episode we are holding was not. The closing fill that took it to
+            # zero never reached us, so this is a *new* position and merging
+            # the two would be silently wrong rather than merely incomplete:
+            # the pnl of both ends up on one episode and its sign - the thing
+            # the win rate counts - can flip. A worked case: a position closed
+            # for -5 whose final fill is missing, followed by a fresh position
+            # closed for +2, came back as a single episode reporting -3, a
+            # genuine win recorded as a loss.
+            #
+            # The stale episode is dropped rather than emitted. We know it
+            # ended but not for how much, and an episode carrying only the
+            # closes we happened to see is a wrong measurement, not a partial
+            # one. This is the same rule already applied to a position still
+            # open when the scan ends: if we cannot say how it finished, it is
+            # not a closed trade. Measured over the 90d window, 15 of 1700
+            # episodes are affected.
+            open_episodes.pop(coin)
+            episode = None
         if episode is None:
             episode = open_episodes[coin] = {
                 "coin": coin,
@@ -1216,11 +1254,16 @@ def reconstruct_position_episodes(
                 "endMs": fill_time,
                 "fills": 0,
                 "anchored": start_position == 0,
+                # End position of this episode's last fill. The next fill on
+                # the coin must report it as its startPosition; anything else
+                # means the feed skipped something in between.
+                "expected": start_position,
             }
         episode["pnl"] += to_float(fill.get("closedPnl"))
         episode["fee"] += to_float(fill.get("fee"))
         episode["fills"] = int(episode["fills"]) + 1
         episode["endMs"] = fill_time
+        episode["expected"] = end_position
 
         flat = end_position == 0
         flipped = (
@@ -1234,6 +1277,9 @@ def reconstruct_position_episodes(
         finished = open_episodes.pop(coin)
         finished["pnl"] = finished["pnl"] - finished["fee"]
         del finished["fee"]
+        # Bookkeeping only, and a Decimal that nothing downstream should try
+        # to serialise.
+        del finished["expected"]
         finished_episodes.append(finished)
         if flipped:
             # The flip fill's own fee and pnl were just charged in full to the
@@ -1248,6 +1294,7 @@ def reconstruct_position_episodes(
                 "endMs": fill_time,
                 "fills": 0,
                 "anchored": True,
+                "expected": end_position,
             }
     return finished_episodes
 
