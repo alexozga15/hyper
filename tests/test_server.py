@@ -56,6 +56,8 @@ from server import (
     to_float,
     shrunk_win_rate,
     CONVICTION_WALLET_WEIGHT_MAX,
+    NON_TOP_CONVICTION_WALLET_MULTIPLIER,
+    TOP_CONVICTION_WALLET_MULTIPLIER,
 )
 
 
@@ -1246,6 +1248,51 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertGreater(consensus_by_key["BTC:long"]["netWeightedWalletCount"], 0)
         self.assertEqual(consensus_by_key["BTC:long"]["convictionScore"], 100.0)
         self.assertEqual(consensus_by_key["BTC:short"]["convictionScore"], 0.0)
+
+    def test_cohort_membership_tilts_the_weight_without_overriding_quality(self) -> None:
+        # The test above asserts only that the weighted net is positive when the
+        # raw net is zero, which holds for any pair where top exceeds non-top -
+        # it would pass at 1.5/0.5, at 1.15/0.90 and at 1.01/0.99 alike. These
+        # pin the two properties the current pair was actually chosen for.
+        rank = {"score": 90.0, "label": "Strong", "convictionWinRateWeight": 1.0}
+        wallet = {"address": "0x" + "1" * 40, "recentWinRateRank": rank}
+        other = "0x" + "2" * 40
+
+        inside = self.service.wallet_conviction_weight(wallet, {wallet["address"], other})
+        outside = self.service.wallet_conviction_weight(wallet, {other})
+
+        self.assertGreater(inside, outside, "cohort membership must still help")
+        self.assertAlmostEqual(inside, TOP_CONVICTION_WALLET_MULTIPLIER, places=3)
+        self.assertAlmostEqual(outside, NON_TOP_CONVICTION_WALLET_MULTIPLIER, places=3)
+
+        # One: the cohort must not outrank the estimator. Its spread has to stay
+        # inside the estimator's observed 1.876, or membership of a monthly group
+        # decides more than the measurement it exists to adjust - which is what
+        # 1.5 / 0.5 did, at a factor of 3.0.
+        self.assertLess(
+            TOP_CONVICTION_WALLET_MULTIPLIER / NON_TOP_CONVICTION_WALLET_MULTIPLIER,
+            1.876,
+            "the cohort spread must stay inside the estimator's observed spread",
+        )
+
+        # Two: a strong non-top wallet must still outweigh a weak cohort member,
+        # or the tilt has quietly become an override again.
+        strong_outside = self.service.wallet_conviction_weight(
+            {"address": "0x" + "3" * 40,
+             "recentWinRateRank": {"score": 90.0, "label": "Strong",
+                                   "convictionWinRateWeight": 1.4}},
+            {other},
+        )
+        weak_inside = self.service.wallet_conviction_weight(
+            {"address": other,
+             "recentWinRateRank": {"score": 40.0, "label": "Cold",
+                                   "convictionWinRateWeight": 0.8}},
+            {other},
+        )
+        self.assertGreater(
+            strong_outside, weak_inside,
+            "quality must still beat cohort membership at the extremes",
+        )
 
     def test_monthly_top_conviction_cohort_reuses_same_month(self) -> None:
         wallets = [
