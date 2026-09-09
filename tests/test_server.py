@@ -2823,13 +2823,10 @@ class AlertSummaryTests(unittest.TestCase):
         # set depending on which machine ran it. It is synced now.
         #
         # 0x939f95036d2e7b6d7419ec072bf9d967352204d2 was listed below as cut
-        # for cause and is not: it appears in every production backup going
-        # back to 2026-08-20, so the entry was simply wrong. Removed from the
-        # list rather than left to fail. It is flagged toxic by
-        # is_toxic_conviction_wallet as of 2026-09-09 - 100% win rate on two
-        # closed trades against -$5.78M of unrealized loss, 164.5% of its own
-        # account value - and is a cut candidate, but cutting a wallet is not
-        # a test's decision to make.
+        # for cause when it had never been cut - it appeared in every
+        # production backup back to 2026-08-20. Surfacing that discrepancy is
+        # what got it looked at, and it has since been cut for real, so the
+        # entry is now true rather than aspirational.
         removed = {
             "0xb3e475368ed0fa0ad23c04de0423d48a0758806f",
             "0x3d89bcea338f35edfaeb313b1c713978c6dceb14",
@@ -2837,6 +2834,17 @@ class AlertSummaryTests(unittest.TestCase):
             "0x99b1098d9d50aa076f78bd26ab22e6abd3710729",
             "0x091144e651b334341eabdbbbfed644ad0100023e",
             "0xdbcc96bcada067864902aad14e029fe7c422f147",
+            # Cut 2026-09-09. 100% win rate on two closed trades against
+            # -$5.78M of unrealized loss, 164.5% of its own account value -
+            # no evidence of quality and an open book half again larger than
+            # the account backing it. This entry previously sat here in error,
+            # claiming a cut that had never happened; the cut is real now.
+            "0x939f95036d2e7b6d7419ec072bf9d967352204d2",
+            # Cut 2026-09-09. Effectively dormant: a $351 account, one fill in
+            # thirty days, idle 26.8 days, and the 100% win rate on six closed
+            # trades that follows from having almost stopped trading. It was
+            # in `additions` below until then.
+            "0x215b369a532dc84654c244449cb119986ceaf603",
             # Cut 2026-09-09 on request, after its detector work was done. It
             # was in `additions` below until then.
             "0x1ce8ed87b7b4cb60f0cc3664bf1fe216163ff55a",
@@ -2850,7 +2858,6 @@ class AlertSummaryTests(unittest.TestCase):
         }
         addresses = {wallet.address.lower() for wallet in WalletStore(Path(WALLETS_FILE)).list_wallets()}
         additions = {
-            "0x215b369a532dc84654c244449cb119986ceaf603",
             "0x1e771e1b95c86491299d6e2a5c3b3842d03b552e",
             "0xd487e26c62ed8c28ce3cc70b5791e501c2934982",
         }
