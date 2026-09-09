@@ -2816,22 +2816,43 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(self.service.wallet_conviction_weight(wallet, set()), 1.3)
 
     def test_tracked_wallet_list_excludes_backtest_removals(self) -> None:
+        # This ledger is only worth anything if it matches reality, and it had
+        # drifted on both sides. data/tracked_wallets.json - the file this
+        # reads outside production - was a month stale at 33 wallets against
+        # production's 24, so the test silently asserted against a different
+        # set depending on which machine ran it. It is synced now.
+        #
+        # 0x939f95036d2e7b6d7419ec072bf9d967352204d2 was listed below as cut
+        # for cause and is not: it appears in every production backup going
+        # back to 2026-08-20, so the entry was simply wrong. Removed from the
+        # list rather than left to fail. It is flagged toxic by
+        # is_toxic_conviction_wallet as of 2026-09-09 - 100% win rate on two
+        # closed trades against -$5.78M of unrealized loss, 164.5% of its own
+        # account value - and is a cut candidate, but cutting a wallet is not
+        # a test's decision to make.
         removed = {
             "0xb3e475368ed0fa0ad23c04de0423d48a0758806f",
             "0x3d89bcea338f35edfaeb313b1c713978c6dceb14",
             "0x69906b0ed626ca01a4b7c001e5711e5714ccf207",
-            "0x939f95036d2e7b6d7419ec072bf9d967352204d2",
             "0x99b1098d9d50aa076f78bd26ab22e6abd3710729",
             "0x091144e651b334341eabdbbbfed644ad0100023e",
             "0xdbcc96bcada067864902aad14e029fe7c422f147",
+            # Cut 2026-09-09 on request, after its detector work was done. It
+            # was in `additions` below until then.
+            "0x1ce8ed87b7b4cb60f0cc3664bf1fe216163ff55a",
+            # Cut 2026-09-09. It read a 96.4% win rate over 337 closed
+            # episodes and a profit factor of 12.5 while holding -$1.02M of
+            # unrealized loss against a $968k account at 103% margin usage -
+            # the shape no closed-position metric can see, since it wins
+            # constantly in small amounts and carries the losses open. It was
+            # in `additions` below until then.
+            "0xfc98b6ec7f59ea13354bae6171a9120692fb8777",
         }
         addresses = {wallet.address.lower() for wallet in WalletStore(Path(WALLETS_FILE)).list_wallets()}
         additions = {
-            "0x1ce8ed87b7b4cb60f0cc3664bf1fe216163ff55a",
             "0x215b369a532dc84654c244449cb119986ceaf603",
             "0x1e771e1b95c86491299d6e2a5c3b3842d03b552e",
             "0xd487e26c62ed8c28ce3cc70b5791e501c2934982",
-            "0xfc98b6ec7f59ea13354bae6171a9120692fb8777",
         }
 
         # Deliberately no assertion on len(addresses). The set is meant to be
