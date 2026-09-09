@@ -722,20 +722,30 @@ RANKING_MIN_90D_CLOSED_TRADES = int(os.environ.get("RANKING_MIN_90D_CLOSED_TRADE
 # episodes (see reconstruct_position_episodes): the constant is measured under
 # whatever rule the win rates use, so the two must always move together - the
 # "ONE RULE" note above applies here too and is being honoured, not broken.
-# Two independent measurements over the 25 tracked wallets agreed: the 90-day
-# fill cache gives 72.70% (1652 episodes) and the 180-day cache windowed to 90
-# days gives 72.45% (1274 episodes). Under the old closing-run rule the same
-# two sources gave 66.84% and 68.74%.
+#
+# Measured on live production data, after every tracked wallet had been through
+# a full quality refresh under the new rule: 750 wins over 1126 closed episodes
+# across the 18 wallets that clear RANKING_MIN_90D_CLOSED_TRADES, pooled
+# 66.61%. Under the old closing-run rule the same population read 68.74%.
+#
+# It first shipped at 0.724 and that was wrong. That figure came from the
+# fillcache90/fillcache180 files, which turned out to lag live by 18-19 days,
+# so it described a 90-day window ending two and a half weeks in the past -
+# a period that happened to read better. Production finds materially more
+# closed episodes than those files do (one wallet 225 against 164, another 138
+# against 89), because live paging covers the recent weeks the caches were
+# missing. The lesson is in the derivation, not the number: measure this
+# constant from the same source the win rates are computed from, and check
+# that source's freshness before trusting it.
 #
 # These figures are net of all fees, opening fees included, which the previous
-# rule excluded. The gross-of-fee equivalents are 73.73% and 73.78%, so the
-# fee correction accounts for roughly 1.1 points of the move and the unit
-# change - runs collapsing into episodes - accounts for the rest.
+# rule excluded.
 #
-# Structural note updated for the new value: the maximum attainable weight is
-# now 1 / 0.724 = 1.381, down from 1.486 at the old baseline, so
-# CONVICTION_WALLET_WEIGHT_MAX (1.5) remains slack.
-CONVICTION_WIN_RATE_BASELINE = float(os.environ.get("CONVICTION_WIN_RATE_BASELINE", 0.724))
+# Structural note: the maximum attainable weight is 1 / 0.666 = 1.502, so
+# CONVICTION_WALLET_WEIGHT_MAX (1.5) binds again - barely, and only for a
+# wallet whose shrunk rate is essentially 100%. At the mistaken 0.724 the
+# ceiling was slack at 1.381.
+CONVICTION_WIN_RATE_BASELINE = float(os.environ.get("CONVICTION_WIN_RATE_BASELINE", 0.666))
 # Tiers for the weight-derived label below. convictionWinRateWeight is
 # shrunk / baseline, so 1.00 is exactly the measured average win rate across
 # the tracked set and these are steps away from that reference point - not
