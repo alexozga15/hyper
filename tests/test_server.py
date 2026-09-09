@@ -52,6 +52,7 @@ from server import (
     parse_import_lines,
     side_from_size,
     quality_label_for_weight,
+    reconstruct_position_episodes,
     refreshed_quality_rank,
     to_float,
     shrunk_win_rate,
@@ -116,10 +117,13 @@ class SegmentTests(unittest.TestCase):
         expected_hot_weight = server.shrunk_win_rate(96, 1000) / CONVICTION_WIN_RATE_BASELINE
         self.assertAlmostEqual(hot["convictionWinRateWeight"], expected_hot_weight, places=2)
 
+        # 35 sat just above the floor under the old 0.673 baseline; at 0.724 it
+        # now clamps (see test_..._clamps_at_the_floor for that case), so this
+        # picks a value that stays clear of the floor at the current baseline.
         cold = build_wallet_quality_rank(
-            70, 20, 20_000, 100_000, hit_rate_90d=35, closed_trade_count_90d=1000
+            70, 20, 20_000, 100_000, hit_rate_90d=50, closed_trade_count_90d=1000
         )
-        expected_cold_weight = server.shrunk_win_rate(35, 1000) / CONVICTION_WIN_RATE_BASELINE
+        expected_cold_weight = server.shrunk_win_rate(50, 1000) / CONVICTION_WIN_RATE_BASELINE
         self.assertAlmostEqual(cold["convictionWinRateWeight"], expected_cold_weight, places=2)
 
     def test_conviction_win_rate_weight_shrinks_small_samples_toward_baseline(self) -> None:
@@ -149,11 +153,11 @@ class SegmentTests(unittest.TestCase):
         # The 1.5 ceiling is deliberately slack at the current baseline rather
         # than removed. shrunk_win_rate is a weighted average of a hit rate
         # capped at 100% and CONVICTION_WIN_RATE_BASELINE, so it never exceeds
-        # 1.0 and the weight never exceeds 1 / baseline - 1.486 at 0.673, below
-        # the 1.5 clamp. It was 1.548 at the old 0.646 baseline, where the
-        # clamp did bind. Assert the real bound so this stays meaningful, and
-        # assert the clamp still holds if a future baseline makes it bind
-        # again.
+        # 1.0 and the weight never exceeds 1 / baseline - 1.381 at 0.724, below
+        # the 1.5 clamp. It was 1.486 at the 0.673 baseline measured under
+        # closing runs, and 1.548 at 0.646 before that, where the clamp did
+        # bind. Assert the real bound so this stays meaningful, and assert the
+        # clamp still holds if a future baseline makes it bind again.
         ceiling = 1.0 / CONVICTION_WIN_RATE_BASELINE
         perfect = build_wallet_quality_rank(
             70, 20, 20_000, 100_000, hit_rate_90d=100, closed_trade_count_90d=1_000_000
@@ -2973,12 +2977,18 @@ class AlertSummaryTests(unittest.TestCase):
         }
         now_ms = current_time_ms()
         total_fills = RECENT_FILL_ALERT_LIMIT * 2 + 37
+        # One long position unwound one unit at a time: the oldest fill (the
+        # largest index, since time counts back from now_ms) starts at the
+        # full size and the newest fill (index 0) is the one that reaches
+        # flat, so the whole run is a single episode.
         fills = [
             {
                 "coin": "BTC",
-                "dir": "Open Long",
+                "dir": "Close Long",
                 "px": "70000",
                 "sz": "1",
+                "startPosition": str(index + 1),
+                "side": "A",
                 "closedPnl": "100",
                 "fee": "1",
                 "time": now_ms - (index + 1) * 60_000,
@@ -3041,9 +3051,12 @@ class AlertSummaryTests(unittest.TestCase):
     def test_laddered_exit_counts_as_one_closed_trade(self) -> None:
         # 40 slices of one exit, seconds apart, are one decision. Counting them
         # individually is what made a profitable wallet read as a 6.6% hit rate.
+        # Oldest slice (largest index) starts the position at size 40; the
+        # newest (index 0) is the one that brings it to flat.
         now_ms = current_time_ms()
         fills = [
             {"coin": "BTC", "dir": "Close Long", "px": "70000", "sz": "1",
+             "startPosition": str(index + 1), "side": "A",
              "closedPnl": "100", "fee": "1", "time": now_ms - 60_000 - index * 1_000}
             for index in range(40)
         ]
@@ -3056,14 +3069,15 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertAlmostEqual(snapshot["realizedPnl30d"], 4000.0)
 
     def test_90d_win_rate_collapses_a_laddered_exit_into_one_decision(self) -> None:
-        # Same closing-run rule as the 30d fields above, just applied to the
-        # wider 90d window: 40 slices of one exit, seconds apart, 45 days back
-        # - well outside the 30d window, where only the 90d fields see them at
-        # all - are one decision, not 40.
+        # Same position-episode rule as the 30d fields above, just applied to
+        # the wider 90d window: 40 slices of one exit, seconds apart, 45 days
+        # back - well outside the 30d window, where only the 90d fields see
+        # them at all - are one decision, not 40.
         now_ms = current_time_ms()
         day = 24 * 60 * 60 * 1000
         fills = [
             {"coin": "BTC", "dir": "Close Long", "px": "70000", "sz": "1",
+             "startPosition": str(index + 1), "side": "A",
              "closedPnl": "100", "fee": "1", "time": now_ms - 45 * day - index * 1_000}
             for index in range(40)
         ]
@@ -3073,16 +3087,20 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(snapshot["winRate90d"], 100.0)
 
     def test_collapsed_event_is_won_or_lost_on_its_net(self) -> None:
-        # A bucket that nets negative is one loss, even though most of its
-        # slices printed green - the decision lost money.
+        # An episode that nets negative is one loss, even though most of its
+        # slices printed green - the decision lost money. A short position of
+        # 6 unwound one unit at a time: the oldest fill starts it at -6, the
+        # newest brings it to flat.
         now_ms = current_time_ms()
         fills = [
             {"coin": "ETH", "dir": "Close Short", "px": "2000", "sz": "1",
+             "startPosition": str(-(index + 1)), "side": "B",
              "closedPnl": "10", "fee": "0", "time": now_ms - 60_000 - index * 1_000}
             for index in range(5)
         ]
         fills.append(
             {"coin": "ETH", "dir": "Close Short", "px": "2000", "sz": "1",
+             "startPosition": "-6", "side": "B",
              "closedPnl": "-500", "fee": "0", "time": now_ms - 60_000 - 5_000}
         )
         snapshot = self._snapshot_from_fills(fills)
@@ -3090,34 +3108,45 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(snapshot["recentWins"], 0)
         self.assertEqual(snapshot["recentLosses"], 1)
 
-    def test_adding_back_starts_a_new_decision(self) -> None:
-        # The rule that ends a closing run: the wallet buys back in. Without it
-        # a whole month of trading one coin would read as a single decision.
+    def test_adding_back_does_not_end_the_episode(self) -> None:
+        # Under the old closing-run rule, a zero-closedPnl fill was read as
+        # "the wallet added back to the position" and ended the run right
+        # there - splitting one continuous position into two decisions. A
+        # position episode has no such rule: adding back just keeps the same
+        # position open, so this is one episode won on its net, not a win and
+        # a loss.
         now_ms = current_time_ms()
         hour = 60 * 60 * 1000
         fills = [
+            # Long of 2, partial close to 1 - not flat, episode stays open.
             {"coin": "BTC", "dir": "Close Long", "px": "70000", "sz": "1",
+             "startPosition": "2", "side": "A",
              "closedPnl": "100", "fee": "0", "time": now_ms - 4 * hour},
-            # An opening fill carries no closedPnl and ends the run above.
+            # Adds back to 2 - still not flat, still the same episode.
             {"coin": "BTC", "dir": "Open Long", "px": "70000", "sz": "1",
+             "startPosition": "1", "side": "B",
              "closedPnl": "0", "fee": "0", "time": now_ms - 3 * hour},
-            {"coin": "BTC", "dir": "Close Long", "px": "70000", "sz": "1",
+            # Closes the whole remaining size - reaches flat, episode ends.
+            {"coin": "BTC", "dir": "Close Long", "px": "70000", "sz": "2",
+             "startPosition": "2", "side": "A",
              "closedPnl": "-40", "fee": "0", "time": now_ms - 2 * hour},
         ]
         snapshot = self._snapshot_from_fills(fills)
-        self.assertEqual(snapshot["closedTrades30d"], 2)
+        self.assertEqual(snapshot["closedTrades30d"], 1)
         self.assertEqual(snapshot["recentWins"], 1)
-        self.assertEqual(snapshot["recentLosses"], 1)
+        self.assertEqual(snapshot["recentLosses"], 0)
 
     def test_separate_coins_never_merge(self) -> None:
-        # Runs are per coin, so two coins unwound at the same moment are two
-        # decisions however close together they fall.
+        # Episodes are per coin, so two coins unwound at the same moment are
+        # two decisions however close together they fall.
         now_ms = current_time_ms()
         hour = 60 * 60 * 1000
         fills = [
             {"coin": "BTC", "dir": "Close Long", "px": "70000", "sz": "1",
+             "startPosition": "1", "side": "A",
              "closedPnl": "100", "fee": "0", "time": now_ms - hour},
             {"coin": "ETH", "dir": "Close Long", "px": "2000", "sz": "1",
+             "startPosition": "1", "side": "A",
              "closedPnl": "-50", "fee": "0", "time": now_ms - hour},
         ]
         snapshot = self._snapshot_from_fills(fills)
@@ -3125,19 +3154,26 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(snapshot["recentWins"], 1)
         self.assertEqual(snapshot["recentLosses"], 1)
 
-    def test_a_long_quiet_gap_also_ends_a_decision(self) -> None:
-        # Secondary guard for a position dribbled out with no adds in between.
+    def test_a_long_gap_does_not_end_an_open_episode(self) -> None:
+        # The old closing-run rule ended a run after 12h of inactivity even
+        # though the position was never flat in between - a position dribbled
+        # out slowly over more than half a day read as two decisions instead
+        # of one. A position episode has no gap guard at all: it closes only
+        # when the position actually returns to flat, however long that takes.
+        # 13 hours (comfortably past the old 12h gap) separates a partial
+        # close from the close that finally reaches flat.
         now_ms = current_time_ms()
         hour = 60 * 60 * 1000
-        gap_h = server.QUALITY_CLOSING_RUN_GAP_MS // hour
         fills = [
             {"coin": "BTC", "dir": "Close Long", "px": "70000", "sz": "1",
-             "closedPnl": "100", "fee": "0", "time": now_ms - (gap_h + 6) * hour},
+             "startPosition": "2", "side": "A",
+             "closedPnl": "100", "fee": "0", "time": now_ms - 14 * hour},
             {"coin": "BTC", "dir": "Close Long", "px": "70000", "sz": "1",
+             "startPosition": "1", "side": "A",
              "closedPnl": "-40", "fee": "0", "time": now_ms - hour},
         ]
         snapshot = self._snapshot_from_fills(fills)
-        self.assertEqual(snapshot["closedTrades30d"], 2)
+        self.assertEqual(snapshot["closedTrades30d"], 1)
 
     def test_per_asset_quality_collapses_the_same_way(self) -> None:
         # assetQuality feeds the per-asset conviction multiplier, so it has to
@@ -3146,6 +3182,7 @@ class AlertSummaryTests(unittest.TestCase):
         now_ms = current_time_ms()
         fills = [
             {"coin": "SOL", "dir": "Close Long", "px": "100", "sz": "1",
+             "startPosition": str(index + 1), "side": "A",
              "closedPnl": "10", "fee": "0", "time": now_ms - 60_000 - index * 1_000}
             for index in range(30)
         ]
@@ -3162,10 +3199,12 @@ class AlertSummaryTests(unittest.TestCase):
         day = 24 * 60 * 60 * 1000
         fills = [
             {"coin": "BTC", "dir": "Close Long", "px": "70000", "sz": "1",
+             "startPosition": str(index + 1), "side": "A",
              "closedPnl": "100", "fee": "0", "time": now_ms - 2 * day - index * 1_000}
             for index in range(20)
         ] + [
             {"coin": "BTC", "dir": "Close Long", "px": "70000", "sz": "1",
+             "startPosition": str(index + 1), "side": "A",
              "closedPnl": "100", "fee": "0", "time": now_ms - 20 * day - index * 1_000}
             for index in range(20)
         ]
@@ -3174,17 +3213,19 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(snapshot["recentClosedTrades"], 1)
 
     def test_closed_trades_match_the_quality_event_count(self) -> None:
-        # Both numbers count the same 5-minute buckets, so they must agree even
-        # when a bucket straddles the 30d cutoff. Filtering the win/loss counts
-        # by bucket start while qualityClosedEvents30d counted the whole dict
-        # would silently split them apart.
+        # Both numbers count the same position episodes, so they must agree
+        # even when an episode straddles the 30d cutoff. Filtering the
+        # win/loss counts by episode start while qualityClosedEvents30d
+        # counted the whole list would silently split them apart.
         now_ms = current_time_ms()
         day = 24 * 60 * 60 * 1000
-        edge = now_ms - 30 * day + 1_000  # inside the window, bucket starts before it
+        edge = now_ms - 30 * day + 1_000  # inside the window, episode starts before it
         fills = [
             {"coin": "BTC", "dir": "Close Long", "px": "70000", "sz": "1",
+             "startPosition": "1", "side": "A",
              "closedPnl": "100", "fee": "0", "time": edge},
             {"coin": "ETH", "dir": "Close Long", "px": "2000", "sz": "1",
+             "startPosition": "1", "side": "A",
              "closedPnl": "-25", "fee": "0", "time": now_ms - day},
         ]
         snapshot = self._snapshot_from_fills(fills)
@@ -3339,10 +3380,13 @@ class AlertSummaryTests(unittest.TestCase):
         return snapshot
 
     @staticmethod
-    def _slice_at(twap_id: int, ms: int, tid: int) -> dict[str, Any]:
+    def _slice_at(
+        twap_id: int, ms: int, tid: int, *, start_position: str = "0", side: str = "A"
+    ) -> dict[str, Any]:
         return {
             "twapId": twap_id,
             "fill": {"coin": "BTC", "dir": "Close Long", "px": "70000", "sz": "1",
+                     "startPosition": start_position, "side": side,
                      "closedPnl": "100", "fee": "0", "time": ms, "tid": tid},
         }
 
@@ -3351,10 +3395,21 @@ class AlertSummaryTests(unittest.TestCase):
         # endpoint does, so a capped page is the oldest slices and the wallet's
         # newest TWAP orders are simply absent. Two of 31 tracked wallets hit
         # it; their first pages held 13 orders against 31 in the full window.
+        #
+        # Collapse takes startPosition/side from the earliest slice of each
+        # order (index 0 here, since slices ascend in time), so that slice
+        # carries the order's true starting size: 3 for the first order, 2
+        # for the second - each order then nets to flat once collapsed.
         now_ms = current_time_ms()
         day = 24 * 60 * 60 * 1000
-        first = [self._slice_at(1, now_ms - 20 * day + i * 1000, 100 + i) for i in range(3)]
-        second = [self._slice_at(2, now_ms - 10 * day + i * 1000, 200 + i) for i in range(2)]
+        first = [
+            self._slice_at(1, now_ms - 20 * day + i * 1000, 100 + i, start_position=str(3 - i))
+            for i in range(3)
+        ]
+        second = [
+            self._slice_at(2, now_ms - 10 * day + i * 1000, 200 + i, start_position=str(2 - i))
+            for i in range(2)
+        ]
         snapshot = self._twap_snapshot([first, second, []], cap=3)
         self.assertGreater(len(snapshot["_calls"]), 1)
         # Both orders survived the collapse, so both reached the aggregates.
@@ -6063,7 +6118,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn(f"quality {expected_pct:.0f}%", line)
 
     def test_build_positions_message_does_not_mark_green_at_or_below_baseline(self) -> None:
-        # Below baseline: 50% raw win rate shrinks well under 64.6%.
+        # Below baseline: 50% raw win rate shrinks well under the baseline.
         now_ms = 1_700_000_000_000
 
         def dashboard_with_win_rate(win_rate_pct: float) -> dict[str, Any]:
@@ -7482,6 +7537,117 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(added, [])
         self.assertEqual(increased, [])
         self.assertEqual(closed, [])
+
+
+class PositionEpisodeReconstructionTests(unittest.TestCase):
+    """reconstruct_position_episodes reads flat/flip directly off startPosition.
+
+    Unlike the closing-run rule it replaces, an episode is not ended by a
+    zero-closedPnl fill or by a gap - only by the position itself returning to
+    zero or flipping sign, as reported by the exchange on each fill.
+    """
+
+    def test_a_gap_past_the_old_12h_threshold_does_not_split_one_episode(self) -> None:
+        # The old closing-run rule split a run after 12h of inactivity even
+        # though the position was never flat. A partial close followed 13
+        # hours later by the close that finally reaches flat is one episode.
+        hour = 60 * 60 * 1000
+        fills = [
+            {"coin": "BTC", "dir": "Close Long", "sz": "1",
+             "startPosition": "2", "side": "A", "closedPnl": "50", "fee": "0", "time": 0},
+            {"coin": "BTC", "dir": "Close Long", "sz": "1",
+             "startPosition": "1", "side": "A", "closedPnl": "30", "fee": "0", "time": 13 * hour},
+        ]
+        episodes = reconstruct_position_episodes(fills, 0)
+        self.assertEqual(len(episodes), 1)
+        self.assertEqual(episodes[0]["fills"], 2)
+        self.assertAlmostEqual(episodes[0]["pnl"], 80.0)
+
+    def test_a_break_even_close_that_reaches_flat_closes_the_episode(self) -> None:
+        # Under the closing-run rule, closedPnl == 0 meant "the wallet added
+        # back to the position" and was read as an opening fill. A break-even
+        # close that actually brings the position to flat must still close
+        # the episode - the read has to come from startPosition, not from
+        # whether the fill happened to net to zero.
+        fills = [
+            {"coin": "ETH", "dir": "Close Long", "sz": "1",
+             "startPosition": "1", "side": "A", "closedPnl": "0", "fee": "0", "time": 0},
+        ]
+        episodes = reconstruct_position_episodes(fills, 0)
+        self.assertEqual(len(episodes), 1)
+        self.assertEqual(episodes[0]["fills"], 1)
+
+    def test_a_spot_fill_neither_opens_nor_closes_an_episode(self) -> None:
+        # Spot fills (dir Buy/Sell) carry no perp position, so startPosition
+        # is meaningless on them - they must be skipped entirely rather than
+        # read as opening or extending a position episode on the same coin.
+        fills = [
+            {"coin": "SOL", "dir": "Buy", "sz": "5",
+             "startPosition": "0", "side": "B", "closedPnl": "0", "fee": "1", "time": 0},
+            {"coin": "SOL", "dir": "Close Long", "sz": "1",
+             "startPosition": "1", "side": "A", "closedPnl": "20", "fee": "0", "time": 1000},
+        ]
+        episodes = reconstruct_position_episodes(fills, 0)
+        self.assertEqual(len(episodes), 1)
+        # If the spot fill had been read as part of the episode it would show
+        # up here, either as a second fill or in the pnl/fee totals.
+        self.assertEqual(episodes[0]["fills"], 1)
+        self.assertAlmostEqual(episodes[0]["pnl"], 20.0)
+
+    def test_a_flip_fill_closes_one_episode_and_opens_the_next(self) -> None:
+        # A single fill that carries the position through zero and out the
+        # other side closes the episode it was unwinding and opens a fresh
+        # one - it cannot do neither, and it cannot do both to the same
+        # episode. Its own closedPnl belongs to the one it closed.
+        fills = [
+            {"coin": "BTC", "dir": "Open Long", "sz": "1",
+             "startPosition": "0", "side": "B", "closedPnl": "0", "fee": "0", "time": 0},
+            {"coin": "BTC", "dir": "Close Long", "sz": "2",
+             "startPosition": "1", "side": "A", "closedPnl": "40", "fee": "0", "time": 1000},
+            {"coin": "BTC", "dir": "Close Short", "sz": "1",
+             "startPosition": "-1", "side": "B", "closedPnl": "15", "fee": "0", "time": 2000},
+        ]
+        episodes = reconstruct_position_episodes(fills, 0)
+        self.assertEqual(len(episodes), 2)
+        closed_long, closed_short = episodes
+        self.assertEqual(closed_long["fills"], 2)
+        self.assertAlmostEqual(closed_long["pnl"], 40.0)
+        self.assertEqual(closed_short["fills"], 1)
+        self.assertAlmostEqual(closed_short["pnl"], 15.0)
+
+    def test_a_position_still_open_at_scan_end_is_not_returned(self) -> None:
+        # An unfinished position is not a closed trade - the previous rule
+        # flushed still-open runs into the win/loss counts.
+        fills = [
+            {"coin": "BTC", "dir": "Open Long", "sz": "1",
+             "startPosition": "0", "side": "B", "closedPnl": "0", "fee": "0", "time": 0},
+        ]
+        episodes = reconstruct_position_episodes(fills, 0)
+        self.assertEqual(episodes, [])
+
+    def test_a_maker_rebate_increases_pnl_rather_than_reducing_it(self) -> None:
+        # fee is taken signed, not abs()'d, so a negative fee (a maker rebate)
+        # credits the episode instead of being subtracted as a cost.
+        fills = [
+            {"coin": "BTC", "dir": "Close Long", "sz": "1",
+             "startPosition": "1", "side": "A", "closedPnl": "100", "fee": "-5", "time": 0},
+        ]
+        episodes = reconstruct_position_episodes(fills, 0)
+        self.assertEqual(len(episodes), 1)
+        self.assertAlmostEqual(episodes[0]["pnl"], 105.0)
+
+    def test_an_episode_whose_first_fill_has_a_nonzero_start_position_is_unanchored(self) -> None:
+        # A nonzero startPosition on the first fill of an episode means the
+        # position predates the scan window - its realized pnl is still exact
+        # (closedPnl is computed by the exchange against the true entry
+        # price), but its opening fee is outside the window and uncharged.
+        fills = [
+            {"coin": "BTC", "dir": "Close Long", "sz": "5",
+             "startPosition": "5", "side": "A", "closedPnl": "10", "fee": "0", "time": 0},
+        ]
+        episodes = reconstruct_position_episodes(fills, 0)
+        self.assertEqual(len(episodes), 1)
+        self.assertFalse(episodes[0]["anchored"])
 
 
 class TwapSliceFillTests(unittest.TestCase):
