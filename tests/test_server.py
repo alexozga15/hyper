@@ -60,6 +60,10 @@ from server import (
     CONVICTION_WALLET_WEIGHT_MAX,
     NON_TOP_CONVICTION_WALLET_MULTIPLIER,
     TOP_CONVICTION_WALLET_MULTIPLIER,
+    TOXIC_UNREALIZED_LOSS_MIN_ABS,
+    TOXIC_UNREALIZED_LOSS_TO_ACCOUNT_PCT,
+    TOXIC_CONVICTION_WALLET_WEIGHT_MULTIPLIER,
+    wallet_quality_window_trusted,
 )
 
 
@@ -8870,3 +8874,128 @@ class LegacyOutcomeFieldTests(unittest.TestCase):
             self.service.signal_outcome_net_return_pct({"netReturnPct": 4.8, "grossReturnPct": 5.0}),
             4.8,
         )
+
+
+class OpenBookToxicityTests(unittest.TestCase):
+    """A wallet that never closes its losers must not score perfectly.
+
+    Every existing quality metric is computed from closed positions, so a
+    wallet that realizes winners promptly and leaves losers open indefinitely
+    scored perfectly on all of them at once. These tests pin the open-book
+    guard that closes that gap: unrealized loss relative to the wallet's own
+    equity, on top of the pre-existing flat -$1,000,000 guard.
+    """
+
+    def setUp(self) -> None:
+        self.service = WalletTrackerService(WalletStore(Path(ALERTS_FILE)), HyperliquidClient())
+
+    def test_unrealized_loss_past_account_value_is_toxic_and_halves_weight(self) -> None:
+        healthy = {
+            "address": "0x1111111111111111111111111111111111111111",
+            "recentWinRateRank": {"score": 65.0, "label": "Strong"},
+            "accountValue": 200_000.0,
+            "positions": [{"coin": "BTC", "unrealizedPnl": 5_000.0}],
+        }
+        underwater = {
+            **healthy,
+            "positions": [{"coin": "BTC", "unrealizedPnl": -250_000.0}],
+        }
+        self.assertFalse(self.service.is_toxic_conviction_wallet(healthy))
+        self.assertTrue(self.service.is_toxic_conviction_wallet(underwater))
+
+        healthy_weight = self.service.wallet_conviction_weight(healthy, set())
+        underwater_weight = self.service.wallet_conviction_weight(underwater, set())
+        self.assertAlmostEqual(underwater_weight, healthy_weight * TOXIC_CONVICTION_WALLET_WEIGHT_MULTIPLIER)
+
+    def test_dust_account_past_the_ratio_is_not_toxic(self) -> None:
+        # A tiny account (e.g. $100 of equity against $150 of unrealized
+        # loss) clears the 100%-of-equity ratio by 50 points, but the loss is
+        # nowhere near TOXIC_UNREALIZED_LOSS_MIN_ABS - real money terms this
+        # is noise from a dust account, not a signal.
+        dust = {
+            "address": "0x1111111111111111111111111111111111111111",
+            "accountValue": 100.0,
+            "positions": [{"coin": "BTC", "unrealizedPnl": -150.0}],
+        }
+        self.assertGreaterEqual(150.0 / 100.0 * 100.0, TOXIC_UNREALIZED_LOSS_TO_ACCOUNT_PCT)
+        self.assertLess(150.0, TOXIC_UNREALIZED_LOSS_MIN_ABS)
+        self.assertFalse(self.service.is_toxic_conviction_wallet(dust))
+
+    def test_a_large_winner_does_not_mask_a_large_loser(self) -> None:
+        wallet = {
+            "address": "0x1111111111111111111111111111111111111111",
+            "accountValue": 150_000.0,
+            "positions": [
+                {"coin": "ETH", "unrealizedPnl": 500_000.0},
+                {"coin": "BTC", "unrealizedPnl": -200_000.0},
+            ],
+        }
+        # Net across all positions is +$300,000 - healthy on a net basis - but
+        # the negative leg alone is $200,000 against $150,000 of equity, well
+        # past both the ratio and the absolute floor.
+        self.assertTrue(self.service.is_toxic_conviction_wallet(wallet))
+
+    def test_quarantine_and_toxicity_compose(self) -> None:
+        # score == ELITE_MIN_QUALITY_SCORE (65.0) gives a clean base_weight of
+        # 1.0, so the two 0.5 multipliers compose to an exact 0.25 rather than
+        # either one alone (0.5) or double-counting to something else.
+        safe_rank = {"score": 65.0, "label": "Strong", "sampleSize": 10, "pnlReturnPct": 0.0, "winRate": 100.0}
+        quarantine_rank = {**safe_rank, "pnlReturnPct": -20.0, "winRate": 10.0}
+        healthy_positions = [{"coin": "BTC", "unrealizedPnl": 0.0}]
+        toxic_positions = [{"coin": "BTC", "unrealizedPnl": -150_000.0}]
+        account_value = 100_000.0
+
+        def weight(rank: dict[str, Any], positions: list[dict[str, Any]]) -> float:
+            return self.service.wallet_conviction_weight(
+                {
+                    "address": "0x1111111111111111111111111111111111111111",
+                    "recentWinRateRank": rank,
+                    "accountValue": account_value,
+                    "positions": positions,
+                },
+                set(),
+            )
+
+        neutral = weight(safe_rank, healthy_positions)
+        quarantined_only = weight(quarantine_rank, healthy_positions)
+        toxic_only = weight(safe_rank, toxic_positions)
+        both = weight(quarantine_rank, toxic_positions)
+
+        self.assertEqual(neutral, 1.0)
+        self.assertEqual(quarantined_only, 0.5)
+        self.assertEqual(toxic_only, 0.5)
+        self.assertEqual(both, 0.25)
+
+    def test_toxicity_applies_even_when_the_quality_window_is_untrusted(self) -> None:
+        # Unlike quarantine, which refuses to judge on an untrusted 7d fill
+        # window, toxicity reads accountValue and unrealizedPnl from
+        # clearinghouseState, not fills, so a truncated fill window cannot
+        # produce a false positive here.
+        wallet = {
+            "address": "0x1111111111111111111111111111111111111111",
+            "qualityWindowTruncated": True,
+            "accountValue": 100_000.0,
+            "positions": [{"coin": "BTC", "unrealizedPnl": -150_000.0}],
+        }
+        self.assertFalse(wallet_quality_window_trusted(wallet))
+        self.assertTrue(self.service.is_toxic_conviction_wallet(wallet))
+        self.assertAlmostEqual(
+            self.service.wallet_conviction_weight(wallet, set()),
+            1.0 * TOXIC_CONVICTION_WALLET_WEIGHT_MULTIPLIER,
+        )
+
+    def test_infinite_profit_factor_fails_on_a_red_open_book(self) -> None:
+        base = {
+            "address": "0x1111111111111111111111111111111111111111",
+            "qualityClosedEvents30d": 8,
+            "qualityNetPnl30d": 20_000.0,
+            "qualityProfitFactor30d": "inf",
+            "qualityTopWinConcentrationPct": 45.0,
+            "qualityHoldout6dEvents": 0,
+            "realizedPnl30d": 20_000.0,
+            "accountValue": 200_000.0,
+        }
+        underwater = {**base, "positions": [{"coin": "BTC", "unrealizedPnl": -5_000.0}]}
+        green = {**base, "positions": [{"coin": "BTC", "unrealizedPnl": 5_000.0}]}
+        self.assertFalse(self.service.is_monthly_quality_eligible(underwater))
+        self.assertTrue(self.service.is_monthly_quality_eligible(green))
