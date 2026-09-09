@@ -788,11 +788,17 @@ TOP_CONVICTION_WALLET_COUNT = 10
 #
 # The pair is also balanced rather than merely smaller. With TOP_CONVICTION_
 # WALLET_COUNT of 10 in a 25-wallet set the mean multiplier is exactly 1.000
-# ((10 * 1.15 + 15 * 0.90) / 25), so the summed applied weight is 24.63 - the
-# same as with no multiplier at all - and this is a pure redistribution rather
-# than a change in the overall weighting level. That balance holds at 25
-# tracked wallets; a materially different set size tilts the mean and the pair
-# should be revisited.
+# ((10 * 1.15 + 15 * 0.90) / 25), so the summed applied weight is the same as
+# with no multiplier at all - a pure redistribution rather than a change in the
+# overall weighting level.
+#
+# That exact balance was a property of 25. The set is 22 as of 2026-09-09,
+# where the mean is (10 * 1.15 + 12 * 0.90) / 22 = 1.0136, so the multiplier
+# now inflates the overall level by 1.4%. Left alone at that size: the tilt
+# between cohort and non-cohort is what the pair is for, and 1.4% is well
+# inside the noise on any single wallet's weight. If the set keeps shrinking
+# the mean climbs - at 20 wallets it is 1.025, at 15 it is 1.067 - and either
+# the pair or TOP_CONVICTION_WALLET_COUNT should be revisited before it does.
 TOP_CONVICTION_WALLET_MULTIPLIER = float(
     os.environ.get("TOP_CONVICTION_WALLET_MULTIPLIER", "1.15")
 )
