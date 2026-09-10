@@ -1020,6 +1020,7 @@ def copyability_assessment(record: Any) -> dict[str, Any]:
     if not isinstance(record, dict):
         return {
             "status": "pending",
+            "score": 50.0,
             "method": COPYABILITY_METHOD,
             "independentCompletedEpisodes": 0,
             "costAdjustedNetReturnPct": None,
@@ -1038,8 +1039,16 @@ def copyability_assessment(record: Any) -> dict[str, Any]:
         status = "pass"
     else:
         status = "fail"
+    if net_return is None or lower_bound is None:
+        score = 50.0
+    else:
+        # A zero after-cost return with a zero lower bound is neutral. The
+        # lower bound receives more weight because it is the evidence that the
+        # point estimate is not just sampling noise.
+        score = clamp(50.0 + to_float(net_return) * 5.0 + to_float(lower_bound) * 10.0)
     return {
         "status": status,
+        "score": round(score, 1),
         "method": method or COPYABILITY_METHOD,
         "independentCompletedEpisodes": sample,
         "costAdjustedNetReturnPct": None if net_return is None else round(to_float(net_return), 3),
@@ -1048,7 +1057,7 @@ def copyability_assessment(record: Any) -> dict[str, Any]:
 
 
 def wallet_quality_dimensions(wallet: Any, copyability: Any = None) -> dict[str, Any]:
-    """Four independent wallet-quality dimensions; never a blended score."""
+    """Four wallet-quality dimensions and their single 0-100 Wallet Rank."""
     if not isinstance(wallet, dict):
         wallet = {}
     profit_factor_raw = wallet.get("qualityProfitFactor30d")
@@ -1061,12 +1070,23 @@ def wallet_quality_dimensions(wallet: Any, copyability: Any = None) -> dict[str,
         and to_float(wallet.get("qualityNetPnl30d")) > 0
         and profit_factor > MONTHLY_QUALITY_MIN_PROFIT_FACTOR
     )
+    pnl_return_pct = (
+        to_float(wallet.get("qualityNetPnl30d")) / to_float(wallet.get("accountValue")) * 100.0
+        if to_float(wallet.get("accountValue")) > 0 and "qualityNetPnl30d" in wallet
+        else 0.0
+    )
+    performance_score = (
+        0.6 * return_score(pnl_return_pct) + 0.4 * profit_factor_score(profit_factor)
+        if has_performance else 50.0
+    )
     performance = {
         "status": "pass" if performance_pass else "fail" if has_performance else "unknown",
+        "score": round(clamp(performance_score), 1),
         "netPnl30d": round(to_float(wallet.get("qualityNetPnl30d")), 2)
         if "qualityNetPnl30d" in wallet else None,
         "profitFactor30d": "inf" if profit_factor == float("inf") else round(profit_factor, 3)
         if "qualityProfitFactor30d" in wallet else None,
+        "returnOnEquity30dPct": round(pnl_return_pct, 3) if has_performance else None,
     }
 
     trusted = wallet_quality_window_trusted(wallet)
@@ -1082,8 +1102,22 @@ def wallet_quality_dimensions(wallet: Any, copyability: Any = None) -> dict[str,
         and to_float(wallet.get("qualityTopWinConcentrationPct", 100.0))
         < MONTHLY_QUALITY_MAX_WIN_CONCENTRATION_PCT
     )
+    sample_score = clamp(to_float(wallet.get("closedTrades90d")) / 50.0 * 100.0)
+    coverage_score = (
+        clamp(to_float(wallet.get("qualityWindowCoverageMs")) / (30 * 86_400_000) * 100.0)
+        if wallet.get("qualityWindowCoverageMs") is not None
+        else 100.0 if trusted else 0.0
+    )
+    concentration_score = clamp(
+        (100.0 - to_float(wallet.get("qualityTopWinConcentrationPct", 100.0))) * 1.25
+    )
+    evidence_score = (
+        0.5 * sample_score + 0.25 * coverage_score + 0.25 * concentration_score
+        if has_evidence else 50.0
+    )
     evidence = {
         "status": "pass" if evidence_pass else "fail" if has_evidence else "unknown",
+        "score": round(clamp(evidence_score), 1),
         "closedEpisodes90d": int(to_float(wallet.get("closedTrades90d"))),
         "closedEpisodes30d": int(to_float(wallet.get("qualityClosedEvents30d"))),
         "windowTrusted": bool(trusted),
@@ -1098,21 +1132,43 @@ def wallet_quality_dimensions(wallet: Any, copyability: Any = None) -> dict[str,
     open_loss = wallet_open_loss(wallet)
     risk_known = account_value > 0
     risk_pass = risk_known and not wallet_is_toxic(wallet)
+    exposure_ratio = total_notional / account_value if risk_known else 0.0
+    open_loss_pct = open_loss / account_value * 100.0 if risk_known else 0.0
+    exposure_score = clamp(100.0 - max(0.0, exposure_ratio - 1.0) * 15.0)
+    open_loss_score = clamp(100.0 - open_loss_pct)
+    risk_score = 0.0 if risk_known and wallet_is_toxic(wallet) else (
+        0.4 * exposure_score + 0.6 * open_loss_score if risk_known else 50.0
+    )
     risk = {
         "status": "pass" if risk_pass else "fail" if risk_known else "unknown",
+        "score": round(clamp(risk_score), 1),
         "accountValue": round(account_value, 2) if risk_known else None,
-        "notionalToEquity": round(total_notional / account_value, 3) if risk_known else None,
-        "openLossToEquityPct": round(open_loss / account_value * 100.0, 2) if risk_known else None,
+        "notionalToEquity": round(exposure_ratio, 3) if risk_known else None,
+        "openLossToEquityPct": round(open_loss_pct, 2) if risk_known else None,
         "toxic": wallet_is_toxic(wallet) if risk_known else None,
     }
 
     copy = copyability_assessment(copyability)
     statuses = [performance["status"], evidence["status"], risk["status"], copy["status"]]
+    component_scores = {
+        "performance": to_float(performance["score"]),
+        "evidence": to_float(evidence["score"]),
+        "risk": to_float(risk["score"]),
+        "copyability": to_float(copy["score"]),
+    }
+    rank = (
+        component_scores["performance"] * 0.30
+        + component_scores["evidence"] * 0.20
+        + component_scores["risk"] * 0.20
+        + component_scores["copyability"] * 0.30
+    )
     return {
         "performance": performance,
         "evidence": evidence,
         "risk": risk,
         "copyability": copy,
+        "rank": round(clamp(rank), 1),
+        "rankWeights": {"performance": 0.30, "evidence": 0.20, "risk": 0.20, "copyability": 0.30},
         "tradeEligible": all(status == "pass" for status in statuses),
     }
 
@@ -1664,7 +1720,7 @@ def is_actionable_distance_pct(distance_pct: float) -> bool:
 
 
 def position_quality_note(item: Any) -> str:
-    """The wallet's shrunk 90d win-rate estimate as a diagnostic suffix.
+    """The single wallet/position rank as an alert suffix, or nothing.
 
     Absent on closed positions by design: the estimate answers how likely the
     position is to close in profit, and for one that already closed the answer
@@ -1673,10 +1729,10 @@ def position_quality_note(item: Any) -> str:
     """
     if not isinstance(item, dict):
         return ""
-    pct = item.get("qualityWinRatePct")
-    if pct is None:
+    rank = item.get("positionRank", item.get("walletRank"))
+    if rank is None:
         return ""
-    return f" | WR90 est. {to_float(pct):.0f}%"
+    return f" | Rank {to_float(rank):.0f}/100"
 
 
 def is_within_actionable_distance(reference_price: float, mark_price: float) -> bool:
@@ -5436,9 +5492,15 @@ class WalletTrackerService:
         # silently missed this one.
         threshold = large_position_tracking_min_value() if min_value is None else min_value
         positions: dict[str, dict[str, Any]] = {}
+        copyability_by_address = load_wallet_copyability()
         for wallet in dashboard.get("wallets", []):
             address = str(wallet.get("address") or "")
             alias = str(wallet.get("alias") or "")
+            wallet_rank = to_float(
+                wallet_quality_dimensions(
+                    wallet, copyability_by_address.get(address.lower())
+                ).get("rank")
+            )
             for position in wallet.get("positions", []):
                 side = str(position.get("side") or "Flat").lower()
                 if side not in {"long", "short"}:
@@ -5470,6 +5532,7 @@ class WalletTrackerService:
                         # directly instead of inferring it from the threshold,
                         # where the 0.0 sentinel means the opposite of small.
                         "convictionWeight": round(weight, 3),
+                        "walletRank": round(wallet_rank, 1),
                         # The wallet's own P(this position closes in profit),
                         # stamped here for the same reason as the weight above:
                         # the alert builder sees only the position item, never
@@ -6393,17 +6456,15 @@ class WalletTrackerService:
             for item in actionable_entries:
                 coin = telegram_html_escape(str(item.get("coin", "")))
                 side = telegram_html_escape(str(item.get("side") or "").upper())
-                quality = ""
-                if item.get("qualityWinRatePct") is not None:
-                    quality = f' | WR90 est. {to_float(item.get("qualityWinRatePct")):.0f}%'
-                    if item.get("qualityBestWinRatePct") is not None:
-                        quality += f' (best {to_float(item.get("qualityBestWinRatePct")):.0f}%)'
+                rank_note = ""
+                if item.get("positionRank") is not None:
+                    rank_note = f' | Rank {to_float(item.get("positionRank")):.0f}/100'
                 lines.append(
                     f'- {coin} {side}: {int(to_float(item.get("walletCount")))} wallets | '
                     f'{format_money_compact(to_float(item.get("totalValue")))} open | '
                     f'ref ${format_price(to_float(item.get("referencePrice")))} -> '
                     f'${format_price(to_float(item.get("markPrice")))} '
-                    f'({to_float(item.get("distancePct")):+.1f}%){quality}'
+                    f'({to_float(item.get("distancePct")):+.1f}%){rank_note}'
                 )
 
         clustered_rendered = changes.get("clusteredOpenPositions", [])[:10]
@@ -6816,6 +6877,17 @@ class WalletTrackerService:
                 else 0.0
             )
             member_dimensions = item["walletQualityDimensions"]
+            member_ranks = [to_float(dimensions.get("rank")) for dimensions in member_dimensions.values()]
+            position_rank = sum(member_ranks) / len(member_ranks) if member_ranks else 50.0
+            position_rank_components = {
+                dimension: round(
+                    sum(to_float((dimensions.get(dimension) or {}).get("score")) for dimensions in member_dimensions.values())
+                    / len(member_dimensions),
+                    1,
+                )
+                if member_dimensions else 50.0
+                for dimension in ("performance", "evidence", "risk", "copyability")
+            }
             eligible_addresses = sorted(
                 address
                 for address, dimensions in member_dimensions.items()
@@ -6850,6 +6922,8 @@ class WalletTrackerService:
                     else None,
                     "qualityBestWinRatePct": round(100.0 * max(item["qualityRates"]), 1) if item["qualityRates"] else None,
                     "qualityScoredWallets": len(item["qualityRates"]),
+                    "positionRank": round(position_rank, 1),
+                    "positionRankComponents": position_rank_components,
                     "walletAddresses": sorted(str(address).lower() for address in item["walletAddresses"]),
                     "eligibleWalletAddresses": eligible_addresses,
                     "qualityDimensions": dimension_status_counts,
@@ -9421,6 +9495,8 @@ class WalletTrackerService:
                     "totalValue": round(to_float(alert.get("totalValue")), 2),
                     "qualityWinRatePct": alert.get("qualityWinRatePct"),
                     "qualityBestWinRatePct": alert.get("qualityBestWinRatePct"),
+                    "positionRank": alert.get("positionRank"),
+                    "positionRankComponents": alert.get("positionRankComponents") or {},
                     "walletAddresses": list(alert.get("walletAddresses") or []),
                     "eligibleWalletAddresses": list(alert.get("eligibleWalletAddresses") or []),
                     "qualityDimensions": alert.get("qualityDimensions") or {},
@@ -9511,6 +9587,8 @@ class WalletTrackerService:
                     "distancePct": round(distance_pct, 2),
                     "qualityWinRatePct": item.get("qualityWinRatePct"),
                     "qualityBestWinRatePct": item.get("qualityBestWinRatePct"),
+                    "positionRank": item.get("positionRank"),
+                    "positionRankComponents": item.get("positionRankComponents") or {},
                     "walletAddresses": list(item.get("walletAddresses") or []),
                     "eligibleWalletAddresses": list(item.get("eligibleWalletAddresses") or []),
                     "qualityDimensions": item.get("qualityDimensions") or {},
@@ -9529,6 +9607,7 @@ class WalletTrackerService:
         candidates.sort(
             key=lambda item: (
                 -int(to_float((item[1].get("tradeAdmission") or {}).get("eligibleWalletCount"))),
+                -to_float(item[1].get("positionRank")),
                 -to_float(item[1].get("totalValue")),
             )
         )
@@ -9552,10 +9631,9 @@ class WalletTrackerService:
         # exactly once and the only markup in the output is the markup added
         # here.
         actionable_lines: set[int] = set()
-        # Subset of actionable_lines: rows that are also within reach AND
-        # carry a displayed quality estimate strictly above the tracked-set
-        # baseline. A row only goes green when the figure justifying it is
-        # visible on that same row, so the marker is never unexplained.
+        # Subset of actionable_lines whose wallets cleared the full admission
+        # gate. Rank is displayed on every row; green remains the stricter
+        # statement that measured copyability is ready and positive.
         high_quality_actionable_lines: set[int] = set()
         position_groups = self.build_position_groups(
             dashboard,
@@ -9633,26 +9711,14 @@ class WalletTrackerService:
                         is_actionable = is_within_actionable_distance(reference_price, mark_price)
                         if is_actionable:
                             actionable_lines.add(row_index)
-                        # Shown only when at least half the members carry an
-                        # estimate. Below that the mean describes a minority of
-                        # the group while looking like it describes the group,
-                        # which is worse than saying nothing.
-                        quality_note = ""
-                        scored = int(to_float(item.get("qualityScoredWallets")))
-                        mean_pct = item.get("qualityWinRatePct")
-                        best_pct = item.get("qualityBestWinRatePct")
-                        quality_note_shown = mean_pct is not None and scored * 2 >= int(item["walletCount"])
-                        if quality_note_shown:
-                            quality_note = f' | WR90 est. {to_float(mean_pct):.0f}%'
-                            if best_pct is not None:
-                                quality_note += f' (best {to_float(best_pct):.0f}%)'
+                        rank_note = f' | Rank {to_float(item.get("positionRank", 50.0)):.0f}/100'
                         if is_actionable and group_trade_admission(item):
                             high_quality_actionable_lines.add(row_index)
                         lines.append(
                             f'- {item["coin"]} {str(item.get("side") or "").upper()}: '
                             f'{item["walletCount"]} wallets{net_note(item)} | '
                             f'{format_money_compact(to_float(item.get("totalValue")))} open'
-                            f'{entry_note}{recent_add_note}{quality_note}'
+                            f'{entry_note}{recent_add_note}{rank_note}'
                         )
                 else:
                     lines.append("- None")

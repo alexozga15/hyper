@@ -49,6 +49,8 @@ def group(
         "qualityScoredWallets": scored,
         "qualityWinRatePct": quality,
         "qualityBestWinRatePct": quality,
+        "positionRank": 72.5,
+        "positionRankComponents": {"performance": 70.0, "evidence": 75.0, "risk": 80.0, "copyability": 50.0},
         "totalSize": size,
         "totalValue": mark * size,
         "recentAddPx": reference,
@@ -188,7 +190,7 @@ class ActionableEntryAlertTests(unittest.TestCase):
         message = self.service.build_telegram_message(changes, {"consensus": []}, min_wallets=3)
         self.assertIn("Now within", message)
         self.assertIn("HYPE LONG", message)
-        self.assertIn("WR90 est.", message)
+        self.assertIn("Rank 72/100", message)
 
 
 if __name__ == "__main__":

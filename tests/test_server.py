@@ -5640,7 +5640,7 @@ class AlertSummaryTests(unittest.TestCase):
         ]
         expected_mean_pct = round(100.0 * sum(rates) / len(rates), 1)
         expected_best_pct = round(100.0 * max(rates), 1)
-        self.assertIn(f"WR90 est. {expected_mean_pct:.0f}% (best {expected_best_pct:.0f}%)", message)
+        self.assertIn("Rank 50/100", message)
 
     def test_a_wallet_below_the_90d_minimum_does_not_score_the_group(self) -> None:
         # Two scored members out of three still describes a majority, so the
@@ -5683,7 +5683,7 @@ class AlertSummaryTests(unittest.TestCase):
         ]
         expected_mean_pct = round(100.0 * sum(rates) / len(rates), 1)
         expected_best_pct = round(100.0 * max(rates), 1)
-        self.assertIn(f"WR90 est. {expected_mean_pct:.0f}% (best {expected_best_pct:.0f}%)", message)
+        self.assertIn("Rank 50/100", message)
 
     def test_quality_is_withheld_when_most_of_the_group_is_unscorable(self) -> None:
         # One estimate out of three would describe a minority while looking
@@ -6161,8 +6161,7 @@ class AlertSummaryTests(unittest.TestCase):
         line = next(line for line in message.splitlines() if "BTC LONG" in line)
         self.assertTrue(line.startswith("\U0001F7E2 <b>"))
         self.assertEqual(line.count("\U0001F7E2"), 1)
-        expected_pct = round(100.0 * server.shrunk_win_rate(100.0, 10), 1)
-        self.assertIn(f"WR90 est. {expected_pct:.0f}%", line)
+        self.assertIn("Rank 50/100", line)
 
     def test_build_positions_message_does_not_mark_green_without_admission(self) -> None:
         now_ms = 1_700_000_000_000
@@ -6247,7 +6246,7 @@ class AlertSummaryTests(unittest.TestCase):
 
         line = next(line for line in message.splitlines() if "BTC LONG" in line)
         self.assertTrue(line.startswith("\U0001F7E2 <b>"))
-        self.assertNotIn("WR90 est.", line)
+        self.assertIn("Rank 50/100", line)
 
     def test_build_positions_message_plain_text_has_no_marker_or_tags(self) -> None:
         # html=False must never leak the marker or any markup, on a row that
@@ -6455,7 +6454,7 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("New large pos ($1.0M+)", sent_message)
         # Opened at $100,000 and the mark is the same figure, so this line is
         # inside the actionable band and must render bold.
-        self.assertIn("<b>- Trader One 0x1111111111111111111111111111111111111111 BTC LONG $1.2M @ $100,000</b>", sent_message)
+        self.assertIn("<b>- Trader One 0x1111111111111111111111111111111111111111 BTC LONG $1.2M @ $100,000 | Rank 50/100</b>", sent_message)
         self.assertEqual(send_telegram_message.call_args.kwargs.get("parse_mode"), "HTML")
 
     def test_check_alerts_notifies_on_closed_large_positions(self) -> None:
@@ -6897,6 +6896,7 @@ class AlertSummaryTests(unittest.TestCase):
                     "entryPx": 100_000.0,
                     "entryPriceSource": "fill",
                     "qualityWinRatePct": 85.8,
+                    "walletRank": 72.0,
                 },
             ],
             "closedLargePositions": [],
@@ -6905,7 +6905,7 @@ class AlertSummaryTests(unittest.TestCase):
 
         message = self.service.build_telegram_message(changes, summary, 3)
 
-        self.assertIn("WR90 est. 86%", message)
+        self.assertIn("Rank 72/100", message)
 
     def test_a_closed_position_never_states_quality(self) -> None:
         # The estimate forecasts whether a position will close in profit. For
@@ -7295,7 +7295,7 @@ class AlertSummaryTests(unittest.TestCase):
         # No fill price is available here, so the add price falls back to the
         # current mark itself - which makes the distance 0% and the line
         # actionable.
-        self.assertIn("<b>- Trader One 0x1111111111111111111111111111111111111111 +$1.2M BTC LONG ~ $120,000 ($1.2M -> $2.4M)</b>", sent_message)
+        self.assertIn("<b>- Trader One 0x1111111111111111111111111111111111111111 +$1.2M BTC LONG ~ $120,000 ($1.2M -> $2.4M) | Rank 50/100</b>", sent_message)
         self.assertNotIn("@$78,000", sent_message)
 
     def test_large_position_snapshot_filters_after_aggregation(self) -> None:

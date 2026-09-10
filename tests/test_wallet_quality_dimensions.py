@@ -48,6 +48,9 @@ class WalletQualityDimensionTests(unittest.TestCase):
         self.assertEqual(dimensions["evidence"]["status"], "pass")
         self.assertEqual(dimensions["risk"]["status"], "pass")
         self.assertEqual(dimensions["copyability"]["status"], "pending")
+        self.assertEqual(dimensions["copyability"]["score"], 50.0)
+        self.assertGreaterEqual(dimensions["rank"], 0.0)
+        self.assertLessEqual(dimensions["rank"], 100.0)
         self.assertIs(dimensions["tradeEligible"], False)
 
     def test_copyability_needs_sample_and_positive_lower_bound(self) -> None:
@@ -61,6 +64,11 @@ class WalletQualityDimensionTests(unittest.TestCase):
 
         passed = server.wallet_quality_dimensions(healthy_wallet(), validated_copyability())
         self.assertEqual(passed["copyability"]["status"], "pass")
+        expected = sum(
+            passed[name]["score"] * passed["rankWeights"][name]
+            for name in ("performance", "evidence", "risk", "copyability")
+        )
+        self.assertAlmostEqual(passed["rank"], expected, places=1)
         self.assertIs(passed["tradeEligible"], True)
 
     def test_open_loss_is_a_separate_risk_veto(self) -> None:
@@ -95,6 +103,8 @@ class WalletQualityDimensionTests(unittest.TestCase):
         self.assertEqual(group["walletAddresses"], sorted(registry))
         self.assertEqual(group["eligibleWalletAddresses"], sorted(registry))
         self.assertEqual(group["tradeAdmission"]["status"], "eligible")
+        self.assertIn("positionRank", group)
+        self.assertEqual(set(group["positionRankComponents"]), {"performance", "evidence", "risk", "copyability"})
         self.assertTrue(server.group_trade_admission(group))
 
 
