@@ -2738,6 +2738,55 @@ class AlertSummaryTests(unittest.TestCase):
         with patch("server.current_time_ms", return_value=now_ms):
             self.assertTrue(self.service.has_verified_recent_activity(wallet, position, lifecycle, now_ms=now_ms))
 
+    def test_position_lifecycle_records_confirmed_flat_exit(self) -> None:
+        now_ms = 1_700_000_000_000
+        address = "0x1111111111111111111111111111111111111111"
+        key = self.service.position_lifecycle_key(address, "BTC", "long")
+        previous = {key: {"address": address, "coin": "BTC", "side": "long", "status": "open", "openedAt": now_ms - 1_000}}
+        dashboard = {"wallets": [{"address": address, "positions": [], "recentFills": [], "dataQuality": {"stateOk": True}}]}
+        with patch("server.current_time_ms", return_value=now_ms):
+            lifecycle = self.service.build_position_lifecycle(dashboard, previous)
+        self.assertEqual(lifecycle[key]["status"], "closed")
+        self.assertEqual(lifecycle[key]["closedAt"], now_ms)
+        self.assertEqual(lifecycle[key]["exitReason"], "flat")
+
+    def test_position_lifecycle_records_flip_and_does_not_infer_failed_fetch(self) -> None:
+        now_ms = 1_700_000_000_000
+        address = "0x1111111111111111111111111111111111111111"
+        long_key = self.service.position_lifecycle_key(address, "BTC", "long")
+        previous = {long_key: {"address": address, "coin": "BTC", "side": "long", "status": "open"}}
+        failed = {"wallets": [{"address": address, "positions": [], "recentFills": [], "dataQuality": {"stateOk": False}}]}
+        with patch("server.current_time_ms", return_value=now_ms):
+            unknown = self.service.build_position_lifecycle(failed, previous)
+        self.assertEqual(unknown[long_key]["status"], "open")
+        self.assertNotIn("closedAt", unknown[long_key])
+
+        flipped = {"wallets": [{"address": address, "positions": [{"coin": "BTC", "side": "Short"}], "recentFills": [], "dataQuality": {"stateOk": True}}]}
+        with patch("server.current_time_ms", return_value=now_ms):
+            lifecycle = self.service.build_position_lifecycle(flipped, previous)
+        self.assertEqual(lifecycle[long_key]["exitReason"], "flipped")
+
+    def test_position_lifecycle_expires_old_closed_markers(self) -> None:
+        now_ms = 1_700_000_000_000
+        address = "0x1111111111111111111111111111111111111111"
+        key = self.service.position_lifecycle_key(address, "BTC", "long")
+        previous = {key: {"address": address, "status": "closed", "closedAt": now_ms - server.POSITION_LIFECYCLE_CLOSED_RETENTION_MS - 1}}
+        with patch("server.current_time_ms", return_value=now_ms):
+            lifecycle = self.service.build_position_lifecycle({"wallets": []}, previous)
+        self.assertNotIn(key, lifecycle)
+
+    def test_position_lifecycle_reopen_starts_a_new_episode(self) -> None:
+        now_ms = 1_700_000_000_000
+        address = "0x1111111111111111111111111111111111111111"
+        key = self.service.position_lifecycle_key(address, "BTC", "long")
+        previous = {key: {"address": address, "status": "closed", "openedAt": now_ms - 50_000, "closedAt": now_ms - 10_000}}
+        dashboard = {"wallets": [{"address": address, "positions": [{"coin": "BTC", "side": "Long"}], "recentFills": [], "dataQuality": {"stateOk": True}}]}
+        with patch("server.current_time_ms", return_value=now_ms):
+            lifecycle = self.service.build_position_lifecycle(dashboard, previous)
+        self.assertEqual(lifecycle[key]["status"], "open")
+        self.assertEqual(lifecycle[key]["openedAt"], now_ms)
+        self.assertIsNone(lifecycle[key]["closedAt"])
+
     def test_asset_quality_adjusts_wallet_weight(self) -> None:
         wallet = {
             "address": "0x1111111111111111111111111111111111111111",

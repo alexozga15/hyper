@@ -2,11 +2,18 @@
 import datetime as dt
 import fcntl
 import json
+import os
 import pathlib
 import subprocess
+import sys
 import time
 
-ROOT = pathlib.Path(__file__).resolve().parent
+SCRIPT_ROOT = pathlib.Path(__file__).resolve().parent
+ROOT = pathlib.Path(os.environ.get('PAPER_EXPERIMENT_DIR', str(SCRIPT_ROOT))).resolve()
+VERSION = os.environ.get('PAPER_EXPERIMENT_VERSION', 'v2')
+ROOT.mkdir(parents=True,exist_ok=True)
+sys.path.insert(0, str(SCRIPT_ROOT.parent))
+from copyability_registry import build_wallet_copyability_registry
 DAY = 86400000
 MAX_AGE = 1800000
 THRESHOLD = 3
@@ -140,24 +147,23 @@ def main():
     with (ROOT/'collector.lock').open('w') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         path=ROOT/'state.json'; s=json.loads(path.read_text()) if path.exists() else None
+        if s is not None and s.get('version')!=VERSION:
+            raise ValueError(f"Experiment version mismatch: state={s.get('version')} requested={VERSION}")
         targets=sorted({a for row in (s or {}).get('trades',[]) if row['status']=='open' for a in row['initialWallets']})
         remote='TARGETS='+repr(targets)+'\n'+REMOTE
         raw=subprocess.check_output(['ssh','-o','BatchMode=yes','-o','ConnectTimeout=10','-i','/Users/alexozga/Downloads/openclaw.pem','ubuntu@13.63.166.252','python3 -'],input=remote,text=True,timeout=240)
         snap=json.loads(raw); now=snap['observedAt']
         if abs(int(time.time()*1000)-now)>120000: raise ValueError('Remote clock or snapshot stale')
         if s is None:
-            s={'version':'v2','startAt':now,'endAt':now+25*DAY,'hashes':snap['hashes'],'baselineCommit':snap['commit'],'universe':sorted(snap['marks']),'seen':list(snap['records']),'baselineExcluded':len(snap['records']),'trades':[],'skipped':[],'paused':False}
+            s={'version':VERSION,'startAt':now,'endAt':now+25*DAY,'hashes':snap['hashes'],'baselineCommit':snap['commit'],'universe':sorted(snap['marks']),'seen':list(snap['records']),'baselineExcluded':len(snap['records']),'trades':[],'skipped':[],'paused':False}
             save(ROOT/'baseline.json',snap)
         (ROOT/'observations').mkdir(exist_ok=True); save(ROOT/'observations'/f'{now}.json',snap)
         s=advance(s,snap); save(path,s)
         closed=[x for x in s['trades'] if x['status']=='closed']; controls=[x['control24h'] for x in s['trades'] if x.get('control24h')]
-        wallet_results={}
-        for trade in s['trades']:
-            for departure in trade.get('departures',[]):
-                if departure.get('netPct') is None: continue
-                wallet_results.setdefault(departure['address'],[]).append(departure)
-        wallet_copyability={address:{'method':'enter_after_detection_exit_with_wallet','completedEpisodes':len(results),'meanCostAdjustedNetReturnPct':sum(x['netPct'] for x in results)/len(results),'meanExcessPct':sum(x['excessPct'] for x in results)/len(results)} for address,results in sorted(wallet_results.items())}
-        report={'version':'v2','startUTC':dt.datetime.fromtimestamp(s['startAt']/1000,dt.timezone.utc).isoformat(),'enrollmentEndUTC':dt.datetime.fromtimestamp(s['endAt']/1000,dt.timezone.utc).isoformat(),'paused':s['paused'],'open':len(s['trades'])-len(closed),'closed':len(closed),'degraded':sum(x['degraded'] for x in closed),'skipped':len(s['skipped']),'meanNetPct':sum(x['netPct'] for x in closed)/len(closed) if closed else None,'meanExcessPct':sum(x['excessPct'] for x in closed)/len(closed) if closed else None,'paperPnlUsd':sum(x['pnlUsd'] for x in closed),'control24hCount':len(controls),'control24hMeanNetPct':sum(x['netPct'] for x in controls)/len(controls) if controls else None,'walletCopyability':wallet_copyability,'walletFetchErrors':sum(not x.get('ok') for x in snap['live'].values()),'lastObservedAt':now,'complete':now>=s['endAt'] and len(closed)==len(s['trades']) and len(controls)==len(s['trades'])}
+        complete=now>=s['endAt'] and len(closed)==len(s['trades']) and len(controls)==len(s['trades'])
+        registry=build_wallet_copyability_registry(s,observation_complete=complete,generated_at_ms=now)
+        report={'version':s['version'],'startUTC':dt.datetime.fromtimestamp(s['startAt']/1000,dt.timezone.utc).isoformat(),'enrollmentEndUTC':dt.datetime.fromtimestamp(s['endAt']/1000,dt.timezone.utc).isoformat(),'paused':s['paused'],'open':len(s['trades'])-len(closed),'closed':len(closed),'degraded':sum(x['degraded'] for x in closed),'skipped':len(s['skipped']),'meanNetPct':sum(x['netPct'] for x in closed)/len(closed) if closed else None,'meanExcessPct':sum(x['excessPct'] for x in closed)/len(closed) if closed else None,'paperPnlUsd':sum(x['pnlUsd'] for x in closed),'control24hCount':len(controls),'control24hMeanNetPct':sum(x['netPct'] for x in controls)/len(controls) if controls else None,'walletCopyability':registry['wallets'],'walletFetchErrors':sum(not x.get('ok') for x in snap['live'].values()),'lastObservedAt':now,'complete':complete}
+        save(ROOT/'wallet_copyability.json',registry)
         save(ROOT/'report.json',report); print(json.dumps(report,ensure_ascii=False))
 
 if __name__=='__main__': main()

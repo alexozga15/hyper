@@ -85,6 +85,7 @@ SIGNAL_CONVICTION_ALERT_MIN_DELTA = 15.0
 SIGNAL_RE_ALERT_VWAP_DELTA_PCT = 1.0
 SIGNAL_LIFETIME_MS = 2 * 60 * 60 * 1000
 SIGNAL_OUTCOME_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
+POSITION_LIFECYCLE_CLOSED_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 SIGNAL_OUTCOME_HORIZONS_MS = {
     "15m": 15 * 60 * 1000,
     "1h": 60 * 60 * 1000,
@@ -3051,6 +3052,7 @@ class WalletTrackerService:
                         "withdrawable": "0",
                         "assetPositions": [],
                         "time": None,
+                        "_fetchOk": False,
                     },
                 ),
             }
@@ -3092,6 +3094,7 @@ class WalletTrackerService:
                 )
 
         state = futures["state"].result()
+        state_fetch_ok = state.get("_fetchOk") is not False
         # A skipped fetch is not a failed one. It reports ok=False so the merge
         # below falls through to the recent-fill cache exactly as it does after
         # a real failure, but it carries no error string and is excluded from
@@ -3508,6 +3511,7 @@ class WalletTrackerService:
             "recentWinRateRank": recent_win_rate_rank,
             "assetQuality": asset_quality,
             "dataQuality": {
+                "stateOk": state_fetch_ok,
                 # Every flag in this block describes a request issued during the
                 # current cycle. Anything reused from the quality cache lives
                 # under "cachedQuality" so it can never be read as a live result.
@@ -4761,9 +4765,12 @@ class WalletTrackerService:
         previous: dict[str, Any] | None,
     ) -> dict[str, dict[str, Any]]:
         prior = previous if isinstance(previous, dict) else {}
+        now_ms = current_time_ms()
         lifecycle: dict[str, dict[str, Any]] = {}
+        observed_wallets: dict[str, dict[str, Any]] = {}
         for wallet in dashboard.get("wallets", []):
-            address = str(wallet.get("address") or "")
+            address = str(wallet.get("address") or "").lower()
+            observed_wallets[address] = wallet
             for position in wallet.get("positions", []):
                 side = str(position.get("side") or "").lower()
                 if side not in {"long", "short"}:
@@ -4771,7 +4778,9 @@ class WalletTrackerService:
                 coin = normalize_position_coin(position.get("coin"))
                 key = self.position_lifecycle_key(address, coin, side)
                 previous_item = prior.get(key, {}) if isinstance(prior.get(key), dict) else {}
-                opened_at = int(to_float(previous_item.get("openedAt"))) or current_time_ms()
+                if str(previous_item.get("status") or "open") == "closed":
+                    previous_item = {}
+                opened_at = int(to_float(previous_item.get("openedAt"))) or now_ms
                 last_add_at = int(to_float(previous_item.get("lastAddAt")))
                 last_add_price = to_float(previous_item.get("lastAddPrice"))
                 for fill in wallet.get("recentFills", []):
@@ -4787,11 +4796,53 @@ class WalletTrackerService:
                         last_add_price = to_float(fill.get("price"))
                         opened_at = min(opened_at, fill_time) if previous_item else fill_time
                 lifecycle[key] = {
+                    "address": address,
+                    "coin": coin,
+                    "side": side,
+                    "status": "open",
                     "openedAt": opened_at,
                     "lastAddAt": last_add_at,
                     "lastAddPrice": round(last_add_price, 8),
-                    "updatedAt": current_time_ms(),
+                    "lastSeenAt": now_ms,
+                    "closedAt": None,
+                    "exitReason": None,
+                    "updatedAt": now_ms,
                 }
+        current_keys = set(lifecycle)
+        for key, previous_item in prior.items():
+            if key in current_keys or not isinstance(previous_item, dict):
+                continue
+            address = str(previous_item.get("address") or key.split(":", 1)[0]).lower()
+            closed_at = int(to_float(previous_item.get("closedAt")))
+            if str(previous_item.get("status") or "open") == "closed":
+                if closed_at and now_ms - closed_at <= POSITION_LIFECYCLE_CLOSED_RETENTION_MS:
+                    lifecycle[key] = dict(previous_item)
+                continue
+            wallet = observed_wallets.get(address)
+            quality = wallet.get("dataQuality", {}) if isinstance(wallet, dict) else {}
+            # New snapshots state this explicitly. Older successful snapshots
+            # predate the flag, so absence remains usable for compatibility.
+            state_ok = isinstance(wallet, dict) and (
+                not isinstance(quality, dict) or quality.get("stateOk", True) is not False
+            )
+            if not state_ok:
+                lifecycle[key] = {**previous_item, "observationUnknownAt": now_ms}
+                continue
+            parts = key.split(":")
+            coin = str(previous_item.get("coin") or (parts[-2] if len(parts) >= 3 else ""))
+            side = str(previous_item.get("side") or (parts[-1] if len(parts) >= 3 else ""))
+            opposite = "short" if side == "long" else "long"
+            flipped = self.position_lifecycle_key(address, coin, opposite) in current_keys
+            lifecycle[key] = {
+                **previous_item,
+                "address": address,
+                "coin": coin,
+                "side": side,
+                "status": "closed",
+                "closedAt": now_ms,
+                "exitReason": "flipped" if flipped else "flat",
+                "updatedAt": now_ms,
+            }
         return lifecycle
 
     def has_verified_recent_activity(
