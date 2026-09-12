@@ -4778,7 +4778,7 @@ class WalletTrackerService:
                 coin = normalize_position_coin(position.get("coin"))
                 key = self.position_lifecycle_key(address, coin, side)
                 previous_item = prior.get(key, {}) if isinstance(prior.get(key), dict) else {}
-                if str(previous_item.get("status") or "open") == "closed":
+                if str(previous_item.get("status") or "open") in {"closed", "untracked"}:
                     previous_item = {}
                 opened_at = int(to_float(previous_item.get("openedAt"))) or now_ms
                 last_add_at = int(to_float(previous_item.get("lastAddAt")))
@@ -4813,18 +4813,25 @@ class WalletTrackerService:
             if key in current_keys or not isinstance(previous_item, dict):
                 continue
             address = str(previous_item.get("address") or key.split(":", 1)[0]).lower()
-            closed_at = int(to_float(previous_item.get("closedAt")))
-            if str(previous_item.get("status") or "open") == "closed":
-                if closed_at and now_ms - closed_at <= POSITION_LIFECYCLE_CLOSED_RETENTION_MS:
+            terminal_at = int(to_float(previous_item.get("closedAt") or previous_item.get("trackingEndedAt")))
+            if str(previous_item.get("status") or "open") in {"closed", "untracked"}:
+                if terminal_at and now_ms - terminal_at <= POSITION_LIFECYCLE_CLOSED_RETENTION_MS:
                     lifecycle[key] = dict(previous_item)
                 continue
             wallet = observed_wallets.get(address)
+            if wallet is None:
+                lifecycle[key] = {
+                    **previous_item,
+                    "address": address,
+                    "status": "untracked",
+                    "trackingEndedAt": now_ms,
+                    "updatedAt": now_ms,
+                }
+                continue
             quality = wallet.get("dataQuality", {}) if isinstance(wallet, dict) else {}
             # New snapshots state this explicitly. Older successful snapshots
             # predate the flag, so absence remains usable for compatibility.
-            state_ok = isinstance(wallet, dict) and (
-                not isinstance(quality, dict) or quality.get("stateOk", True) is not False
-            )
+            state_ok = not isinstance(quality, dict) or quality.get("stateOk", True) is not False
             if not state_ok:
                 lifecycle[key] = {**previous_item, "observationUnknownAt": now_ms}
                 continue

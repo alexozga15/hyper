@@ -2787,6 +2787,18 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(lifecycle[key]["openedAt"], now_ms)
         self.assertIsNone(lifecycle[key]["closedAt"])
 
+    def test_position_lifecycle_marks_removed_wallet_untracked_without_faking_exit(self) -> None:
+        now_ms = 1_700_000_000_000
+        address = "0x1111111111111111111111111111111111111111"
+        key = self.service.position_lifecycle_key(address, "BTC", "long")
+        previous = {key: {"address": address, "coin": "BTC", "side": "long", "status": "open"}}
+        with patch("server.current_time_ms", return_value=now_ms):
+            lifecycle = self.service.build_position_lifecycle({"wallets": []}, previous)
+        self.assertEqual(lifecycle[key]["status"], "untracked")
+        self.assertEqual(lifecycle[key]["trackingEndedAt"], now_ms)
+        self.assertNotIn("closedAt", lifecycle[key])
+        self.assertNotIn("exitReason", lifecycle[key])
+
     def test_asset_quality_adjusts_wallet_weight(self) -> None:
         wallet = {
             "address": "0x1111111111111111111111111111111111111111",
