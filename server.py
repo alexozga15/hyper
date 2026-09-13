@@ -629,8 +629,20 @@ WALLET_CACHED_QUALITY_FIELDS = (
     "grossLoss30d",
     "pnl180d",
     "sortino180d",
-    "sortinoTrades180d",
-    "maxDrawdown30dPct",
+    "calmar180d",
+    "cagr180dPct",
+    "adjustedProfitFactor180d",
+    "episodes180d",
+    "losses180d",
+    "dailyReturns180d",
+    "downsideDays180d",
+    "missingDailyReturns180d",
+    "maxDrawdown180dPct",
+    "largestLoserPct",
+    "largestLoserMeasuredEpisodes",
+    "largestLoserMissingCapitalEpisodes",
+    "currentOpenLossPct",
+    "maxObservedPositionDrawdownPct",
     "winRate90d",
     "closedTrades90d",
     "qualityClosedEvents30d",
@@ -664,6 +676,13 @@ QUALITY_WINDOW_MIN_COVERAGE_MS = int(
 RISK_SCORE_MIN_COVERAGE_MS = int(
     float(os.environ.get("RISK_SCORE_MIN_COVERAGE_MS", 150 * 24 * 60 * 60 * 1000))
 )
+RISK_SCORE_MIN_DAILY_RETURNS = int(os.environ.get("RISK_SCORE_MIN_DAILY_RETURNS", 150))
+ELITE_MIN_180D_EPISODES = int(os.environ.get("ELITE_MIN_180D_EPISODES", 40))
+ELITE_MIN_180D_LOSSES = int(os.environ.get("ELITE_MIN_180D_LOSSES", 10))
+ELITE_MAX_180D_DRAWDOWN_PCT = float(os.environ.get("ELITE_MAX_180D_DRAWDOWN_PCT", 30.0))
+SHADOW_MIN_180D_DRAWDOWN_PCT = float(os.environ.get("SHADOW_MIN_180D_DRAWDOWN_PCT", 50.0))
+ELITE_MAX_LARGEST_LOSER_PCT = float(os.environ.get("ELITE_MAX_LARGEST_LOSER_PCT", 7.0))
+SHADOW_MIN_LARGEST_LOSER_PCT = float(os.environ.get("SHADOW_MIN_LARGEST_LOSER_PCT", 20.0))
 LORACLE_WALLET_ADDRESS = "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae"
 EXCLUDED_COUNTED_POSITIONS = {
     (LORACLE_WALLET_ADDRESS, "HYPE"),
@@ -1934,7 +1953,7 @@ def refreshed_quality_rank(
     """
     if not isinstance(rank, dict):
         return rank
-    if rank.get("metric") == "risk_sortino_trend_180d":
+    if rank.get("metric") in {"risk_sortino_trend_180d", "calmar_sortino_adjusted_pf_trend_180d_v1"}:
         return rank
     shrunk = shrunk_win_rate(hit_rate_90d, closed_trade_count_90d)
     if shrunk is None:
@@ -2015,22 +2034,47 @@ def build_risk_trend_quality_rank(
     pnl_30d: float,
     pnl_180d: float,
     pnl_all_time: float,
-    sortino_180d: float,
-    sortino_trade_count_180d: int,
-    sortino_loss_count_180d: int,
+    sortino_180d: float | None,
+    calmar_180d: float | None,
+    adjusted_profit_factor_180d: float | None,
+    episode_count_180d: int,
+    loss_count_180d: int,
+    daily_return_count_180d: int,
+    downside_day_count_180d: int,
     max_drawdown_pct: float,
     window_trusted: bool,
+    equity_curve_complete: bool,
+    equity_curve_verified: bool = False,
+    largest_loser_pct: float | None = None,
+    largest_loser_complete: bool = False,
+    current_open_loss_pct: float = 0.0,
+    max_observed_position_drawdown_pct: float | None = None,
     risk_window_trusted: bool | None = None,
     drawdown_invalid_days: int = 0,
 ) -> dict[str, Any]:
-    """Wallet score: 50% drawdown, 25% 180d Sortino, 25% PnL trend."""
+    """V1 wallet score: Calmar/Sortino/adjusted-PF/trend = 35/25/20/20.
+
+    Sample and drawdown gates are deliberately evaluated after the numeric
+    score.  A high point estimate cannot override missing observations or a
+    measured risk failure.
+    """
     drawdown = max(0.0, to_float(max_drawdown_pct))
-    # A discontinuous account-mode day makes the drawdown denominator
-    # unverifiable. Because drawdown is half of the score, unknown risk must
-    # not receive the same credit as zero risk.
-    drawdown_score = 0.0 if drawdown_invalid_days else clamp((1.0 - drawdown / 30.0) * 100.0)
-    sortino = to_float(sortino_180d)
-    sortino_score = 100.0 if sortino == float("inf") else clamp((sortino / 5.0) * 100.0)
+    calmar = None if calmar_180d is None else to_float(calmar_180d)
+    sortino = None if sortino_180d is None else to_float(sortino_180d)
+    adjusted_pf = None if adjusted_profit_factor_180d is None else to_float(adjusted_profit_factor_180d)
+    curve_usable = bool(equity_curve_complete and not drawdown_invalid_days)
+    verified_curve_usable = bool(curve_usable and equity_curve_verified)
+    calmar_score = 0.0 if calmar is None else (
+        (100.0 if verified_curve_usable else 0.0)
+        if calmar == float("inf") else clamp((calmar / 3.0) * 100.0)
+    )
+    sortino_score = 0.0 if sortino is None else (
+        (100.0 if verified_curve_usable else 0.0)
+        if sortino == float("inf") else clamp((sortino / 2.0) * 100.0)
+    )
+    profit_factor_score_180d = 0.0 if adjusted_pf is None else (
+        100.0 if adjusted_pf == float("inf") else clamp(((adjusted_pf - 1.0) / 1.5) * 100.0)
+    )
     pnl_7d_value = to_float(pnl_7d)
     pnl_30d_value = to_float(pnl_30d)
     pnl_180d_value = to_float(pnl_180d)
@@ -2040,28 +2084,54 @@ def build_risk_trend_quality_rank(
         "pnl180dAbove30d": pnl_180d_value > pnl_30d_value,
     }
     trend_points = (
-        (8.0 if trend_checks["pnl7dPositive"] else 0.0)
+        (4.0 if trend_checks["pnl7dPositive"] else 0.0)
         + (8.0 if trend_checks["pnl30dAbove7d"] else 0.0)
-        + (9.0 if trend_checks["pnl180dAbove30d"] else 0.0)
+        + (8.0 if trend_checks["pnl180dAbove30d"] else 0.0)
     )
-    score = drawdown_score * 0.50 + sortino_score * 0.25 + trend_points
-    sample_size = max(0, int(to_float(sortino_trade_count_180d)))
-    loss_count = max(0, int(to_float(sortino_loss_count_180d)))
-    confidence = "High" if sample_size >= 100 and loss_count >= 20 else (
-        "Medium" if sample_size >= 40 and loss_count >= 10 else "Low"
+    score = (
+        calmar_score * 0.35
+        + sortino_score * 0.25
+        + profit_factor_score_180d * 0.20
+        + trend_points
+    )
+    sample_size = max(0, int(to_float(episode_count_180d)))
+    loss_count = max(0, int(to_float(loss_count_180d)))
+    daily_return_count = max(0, int(to_float(daily_return_count_180d)))
+    downside_day_count = max(0, int(to_float(downside_day_count_180d)))
+    sample_gate_passed = sample_size >= ELITE_MIN_180D_EPISODES and loss_count >= ELITE_MIN_180D_LOSSES
+    confidence = "High" if curve_usable and sample_size >= 100 and loss_count >= 20 else (
+        "Medium" if curve_usable and sample_gate_passed else "Low"
     )
     full_positive_trend = all(trend_checks.values())
     all_time_control = to_float(pnl_all_time) > pnl_180d_value
     risk_trusted = bool(window_trusted if risk_window_trusted is None else risk_window_trusted)
-    elite_eligible = (
-        risk_trusted
-        and drawdown_invalid_days == 0
-        and drawdown < 30.0
-        and sortino > 0
-        and full_positive_trend
-        and all_time_control
+    largest_loser_known = largest_loser_pct is not None
+    largest_loser = max(0.0, to_float(largest_loser_pct)) if largest_loser_known else None
+    data_complete = bool(
+        curve_usable and equity_curve_verified and risk_trusted and window_trusted
+        and largest_loser_known and largest_loser_complete
     )
-    if score >= 85 and elite_eligible:
+    shadow_reasons: list[str] = []
+    if drawdown >= SHADOW_MIN_180D_DRAWDOWN_PCT:
+        shadow_reasons.append("drawdown")
+    if largest_loser is not None and largest_loser >= SHADOW_MIN_LARGEST_LOSER_PCT:
+        shadow_reasons.append("largest_loser")
+    elite_eligible = (
+        data_complete
+        and sample_gate_passed
+        and drawdown < ELITE_MAX_180D_DRAWDOWN_PCT
+        and largest_loser is not None
+        and largest_loser < ELITE_MAX_LARGEST_LOSER_PCT
+        and sortino is not None
+        and sortino > 0
+        and calmar is not None
+        and calmar > 0
+        and full_positive_trend
+        and not shadow_reasons
+    )
+    if shadow_reasons:
+        label = "Shadow"
+    elif score >= 85 and elite_eligible:
         label = "Elite"
     elif score >= 70:
         label = "Strong"
@@ -2079,22 +2149,43 @@ def build_risk_trend_quality_rank(
         "pnl30d": round(pnl_30d_value, 2),
         "pnl180d": round(pnl_180d_value, 2),
         "pnlAllTime": round(to_float(pnl_all_time), 2),
-        "sortino180d": "inf" if sortino == float("inf") else round(sortino, 3),
-        "sortinoTrades180d": sample_size,
-        "sortinoLosses180d": loss_count,
+        "sortino180d": None if sortino is None else ("inf" if sortino == float("inf") else round(sortino, 3)),
+        "calmar180d": None if calmar is None else ("inf" if calmar == float("inf") else round(calmar, 3)),
+        "adjustedProfitFactor180d": None if adjusted_pf is None else (
+            "inf" if adjusted_pf == float("inf") else round(adjusted_pf, 3)
+        ),
+        "episodes180d": sample_size,
+        "losses180d": loss_count,
+        "dailyReturns180d": daily_return_count,
+        "downsideDays180d": downside_day_count,
         "sortinoConfidence": confidence,
         "sortinoScore": round(sortino_score, 1),
+        "calmarScore": round(calmar_score, 1),
+        "adjustedProfitFactorScore": round(profit_factor_score_180d, 1),
         "maxDrawdownPct": round(drawdown, 2),
-        "drawdownScore": round(drawdown_score, 1),
         "drawdownInvalidDays": int(drawdown_invalid_days),
         "trendScore": trend_points,
         "trendChecks": trend_checks,
         "positiveTrend": full_positive_trend,
+        "trendIncludesOpenPnl": True,
+        "trendSource": "hyperliquid_perp_portfolio_pnl",
         "allTimeControl": all_time_control,
         "eliteEligible": elite_eligible,
+        "sampleGatePassed": sample_gate_passed,
+        "assessmentStatus": "Verified" if data_complete and sample_gate_passed else "Preliminary",
+        "equityCurveComplete": bool(equity_curve_complete),
+        "equityCurveVerified": bool(equity_curve_verified),
+        "largestLoserPct": None if largest_loser is None else round(largest_loser, 2),
+        "largestLoserComplete": bool(largest_loser_complete),
+        "currentOpenLossPct": round(max(0.0, to_float(current_open_loss_pct)), 2),
+        "maxObservedPositionDrawdownPct": (
+            None if max_observed_position_drawdown_pct is None
+            else round(max(0.0, to_float(max_observed_position_drawdown_pct)), 2)
+        ),
+        "shadowReasons": shadow_reasons,
         "windowTrusted": bool(window_trusted),
         "riskWindowTrusted": risk_trusted,
-        "metric": "risk_sortino_trend_180d",
+        "metric": "calmar_sortino_adjusted_pf_trend_180d_v1",
     }
 
 
@@ -2118,22 +2209,42 @@ def build_wallet_quality_rank(
     pnl_180d: float | None = None,
     pnl_all_time: float | None = None,
     sortino_180d: float | None = None,
-    sortino_trade_count_180d: int = 0,
-    sortino_loss_count_180d: int = 0,
+    calmar_180d: float | None = None,
+    adjusted_profit_factor_180d: float | None = None,
+    episode_count_180d: int = 0,
+    loss_count_180d: int = 0,
+    daily_return_count_180d: int = 0,
+    downside_day_count_180d: int = 0,
+    equity_curve_complete: bool = False,
+    equity_curve_verified: bool = False,
+    largest_loser_pct: float | None = None,
+    largest_loser_complete: bool = False,
+    current_open_loss_pct: float = 0.0,
+    max_observed_position_drawdown_pct: float | None = None,
     drawdown_invalid_days: int = 0,
     risk_window_trusted: bool | None = None,
 ) -> dict[str, Any]:
-    if pnl_180d is not None and pnl_all_time is not None and sortino_180d is not None:
+    if pnl_180d is not None and pnl_all_time is not None:
         return build_risk_trend_quality_rank(
             pnl_7d=pnl_7d,
             pnl_30d=to_float(pnl_30d),
             pnl_180d=pnl_180d,
             pnl_all_time=pnl_all_time,
             sortino_180d=sortino_180d,
-            sortino_trade_count_180d=sortino_trade_count_180d,
-            sortino_loss_count_180d=sortino_loss_count_180d,
+            calmar_180d=calmar_180d,
+            adjusted_profit_factor_180d=adjusted_profit_factor_180d,
+            episode_count_180d=episode_count_180d,
+            loss_count_180d=loss_count_180d,
+            daily_return_count_180d=daily_return_count_180d,
+            downside_day_count_180d=downside_day_count_180d,
             max_drawdown_pct=max_drawdown_pct,
             window_trusted=window_trusted,
+            equity_curve_complete=equity_curve_complete,
+            equity_curve_verified=equity_curve_verified,
+            largest_loser_pct=largest_loser_pct,
+            largest_loser_complete=largest_loser_complete,
+            current_open_loss_pct=current_open_loss_pct,
+            max_observed_position_drawdown_pct=max_observed_position_drawdown_pct,
             risk_window_trusted=risk_window_trusted,
             drawdown_invalid_days=drawdown_invalid_days,
         )
@@ -2396,6 +2507,143 @@ def cashflow_neutral_drawdown_pct(pnl_points: list[Any], account_points: list[An
         peak = max(peak, equity_index)
         worst = max(worst, (peak - equity_index) / peak)
     return round(worst * 100.0, 2), invalid_days
+
+
+def daily_equity_metrics_180d(
+    pnl_points: list[Any],
+    account_points: list[Any],
+    cutoff_ms: int,
+    end_ms: int,
+) -> dict[str, Any]:
+    """Return 180d metrics from one cash-flow-neutral daily return series.
+
+    Hyperliquid's portfolio PnL series is mark-to-market and adjusted for
+    deposits and withdrawals.  Dividing each consecutive daily PnL change by
+    the preceding account value therefore preserves trading returns while an
+    external cash flow changes only the next day's denominator.
+
+    Sparse days are not interpolated.  Inventing intermediate daily returns
+    would make Sortino look more stable than the observations support.
+    """
+    day_ms = 24 * 60 * 60 * 1000
+    cutoff_day = int(cutoff_ms) // day_ms
+    end_day = int(end_ms) // day_ms
+
+    def daily_last(points: list[Any]) -> dict[int, tuple[int, float]]:
+        values: dict[int, tuple[int, float]] = {}
+        for point in points or []:
+            if not (isinstance(point, (list, tuple)) and len(point) > 1):
+                continue
+            timestamp = int(to_float(point[0]))
+            day = timestamp // day_ms
+            if day < cutoff_day or day > end_day:
+                continue
+            if day not in values or timestamp >= values[day][0]:
+                values[day] = (timestamp, to_float(point[1]))
+        return values
+
+    pnl_by_day = daily_last(pnl_points)
+    account_by_day = daily_last(account_points)
+    days = sorted(set(pnl_by_day).intersection(account_by_day))
+    returns: list[float] = []
+    invalid_days = 0
+    missing_days = 0
+    equity_index = 1.0
+    peak = 1.0
+    worst_drawdown = 0.0
+    for previous_day, day in zip(days, days[1:]):
+        gap = day - previous_day
+        if gap != 1:
+            missing_days += max(0, gap - 1)
+            continue
+        starting_equity = account_by_day[previous_day][1]
+        if starting_equity <= 0:
+            invalid_days += 1
+            continue
+        daily_return = (pnl_by_day[day][1] - pnl_by_day[previous_day][1]) / starting_equity
+        if not math.isfinite(daily_return) or daily_return <= -1.0:
+            invalid_days += 1
+            continue
+        returns.append(daily_return)
+        equity_index *= 1.0 + daily_return
+        peak = max(peak, equity_index)
+        worst_drawdown = max(worst_drawdown, (peak - equity_index) / peak)
+
+    observed_days = len(returns)
+    downside_days = sum(1 for value in returns if value < 0)
+    complete = bool(
+        observed_days >= RISK_SCORE_MIN_DAILY_RETURNS
+        and invalid_days == 0
+        and missing_days == 0
+        and days
+        and days[0] <= cutoff_day + 1
+        and days[-1] >= end_day - 1
+    )
+    sortino: float | None = None
+    cagr_pct: float | None = None
+    calmar: float | None = None
+    if returns:
+        mean_return = sum(returns) / observed_days
+        downside_deviation = math.sqrt(
+            sum(min(value, 0.0) ** 2 for value in returns) / observed_days
+        )
+        if downside_deviation > 0:
+            sortino = mean_return / downside_deviation
+        elif complete:
+            sortino = float("inf") if mean_return > 0 else 0.0
+        elapsed_days = max(1, days[-1] - days[0]) if len(days) > 1 else 1
+        # With an internal gap, omitted sub-period returns make CAGR and
+        # Calmar mathematically undefined. Preserve the partial Sortino
+        # estimate, but do not manufacture a growth rate across the gap.
+        if equity_index > 0 and missing_days == 0:
+            cagr_pct = (equity_index ** (365.0 / elapsed_days) - 1.0) * 100.0
+            drawdown_pct = worst_drawdown * 100.0
+            if drawdown_pct > 0:
+                calmar = cagr_pct / drawdown_pct
+            elif complete:
+                calmar = float("inf") if cagr_pct > 0 else 0.0
+
+    return {
+        "sortino": sortino,
+        "cagrPct": cagr_pct,
+        "calmar": calmar,
+        "maxDrawdownPct": worst_drawdown * 100.0,
+        "dailyReturnCount": observed_days,
+        "downsideDayCount": downside_days,
+        "invalidDayCount": invalid_days,
+        "missingDayCount": missing_days,
+        "equityCurveComplete": complete,
+    }
+
+
+def episode_loss_metrics(
+    episodes: list[dict[str, Any]], account_points: list[Any]
+) -> dict[str, Any]:
+    """Largest closed loser as % of capital immediately before its episode."""
+    valid_accounts = sorted(
+        (int(to_float(point[0])), to_float(point[1]))
+        for point in account_points or []
+        if isinstance(point, (list, tuple)) and len(point) > 1 and to_float(point[1]) > 0
+    )
+    losses = [episode for episode in episodes if to_float(episode.get("pnl")) < 0]
+    loss_pcts: list[float] = []
+    missing_capital = 0
+    max_age_ms = 2 * 24 * 60 * 60 * 1000
+    for episode in losses:
+        start_ms = int(to_float(episode.get("startMs")))
+        prior = next(
+            ((timestamp, value) for timestamp, value in reversed(valid_accounts) if timestamp <= start_ms),
+            None,
+        )
+        if prior is None or start_ms - prior[0] > max_age_ms:
+            missing_capital += 1
+            continue
+        loss_pcts.append(abs(to_float(episode.get("pnl"))) / prior[1] * 100.0)
+    return {
+        "largestLoserPct": max(loss_pcts) if loss_pcts else (0.0 if not losses else None),
+        "largestLoserMeasuredEpisodes": len(loss_pcts),
+        "largestLoserMissingCapitalEpisodes": missing_capital,
+    }
 
 
 def trade_sortino_ratio(trade_returns: list[float], window_days: int = 180) -> float | None:
@@ -3572,13 +3820,13 @@ class WalletTrackerService:
         closed_trade_count_90d = win_count_90d + loss_count_90d
         win_rate_90d = (win_count_90d / max(closed_trade_count_90d, 1)) * 100
         closed_runs_180d = reconstruct_position_episodes(fills, cutoff_180d_ms)
-        sortino_returns_180d = [
-            to_float(run["pnl"]) / to_float(run["notional"])
-            for run in closed_runs_180d
-            if run.get("anchored") and to_float(run.get("notional")) > 0
-        ]
-        sortino_180d = trade_sortino_ratio(sortino_returns_180d, SORTINO_WINDOW_DAYS)
-        sortino_loss_count_180d = sum(1 for value in sortino_returns_180d if value < 0)
+        loss_count_180d = sum(1 for run in closed_runs_180d if to_float(run.get("pnl")) < 0)
+        gross_profit_180d = sum(
+            to_float(run.get("pnl")) for run in closed_runs_180d if to_float(run.get("pnl")) > 0
+        )
+        gross_loss_180d = sum(
+            abs(to_float(run.get("pnl"))) for run in closed_runs_180d if to_float(run.get("pnl")) < 0
+        )
         # Per-asset quality is the same metric one level down. Runs are already
         # per coin, so they group directly; pnl stays a raw sum as above.
         asset_trade_stats: dict[str, dict[str, float]] = {}
@@ -3605,8 +3853,14 @@ class WalletTrackerService:
         pnl_180d_official = interpolated_window_pnl(
             perp_all_time.get("pnlHistory", []), cutoff_180d_ms
         )
-        drawdown_30d_pct, drawdown_invalid_days = cashflow_neutral_drawdown_pct(
-            perp_month.get("pnlHistory", []), perp_month.get("accountValueHistory", [])
+        equity_metrics_180d = daily_equity_metrics_180d(
+            perp_all_time.get("pnlHistory", []),
+            perp_all_time.get("accountValueHistory", []),
+            cutoff_180d_ms,
+            now_ms,
+        )
+        loss_metrics_180d = episode_loss_metrics(
+            closed_runs_180d, perp_all_time.get("accountValueHistory", [])
         )
         recent_closed_trade_count = win_count + loss_count
         hit_rate = (win_count / max(recent_closed_trade_count, 1)) * 100
@@ -3633,6 +3887,17 @@ class WalletTrackerService:
         total_notional = to_float(margin_summary.get("totalNtlPos"))
         margin_used = to_float(margin_summary.get("totalMarginUsed"))
         withdrawable = to_float(state.get("withdrawable"))
+        current_open_loss = sum(
+            abs(to_float(position.get("unrealizedPnl")))
+            for position in positions
+            if to_float(position.get("unrealizedPnl")) < 0
+        )
+        current_open_loss_pct = current_open_loss / account_value * 100.0 if account_value > 0 else 0.0
+        adjusted_profit_factor_180d = (
+            gross_profit_180d / (gross_loss_180d + current_open_loss)
+            if gross_loss_180d + current_open_loss > 0
+            else (float("inf") if gross_profit_180d > 0 else 0.0)
+        )
         margin_usage_pct = (margin_used / account_value) * 100 if account_value > 0 else 0.0
         holding_only_30d = bool(positions) and fills_ok and fills_30d_count == 0 and len(open_orders) == 0
         days_since_last_fill = None
@@ -3655,7 +3920,7 @@ class WalletTrackerService:
             gross_loss_30d=gross_loss_30d,
             hit_rate_90d=win_rate_90d,
             closed_trade_count_90d=closed_trade_count_90d,
-            max_drawdown_pct=drawdown_30d_pct,
+            max_drawdown_pct=to_float(equity_metrics_180d.get("maxDrawdownPct")),
             margin_usage_pct=margin_usage_pct,
             unrealized_pnl=unrealized_pnl,
             window_trusted=wallet_quality_window_trusted(
@@ -3667,18 +3932,32 @@ class WalletTrackerService:
             risk_window_trusted=risk_score_window_trusted,
             pnl_180d=pnl_180d_official,
             pnl_all_time=pnl_all_time_official,
-            sortino_180d=sortino_180d if sortino_180d is not None else 0.0,
-            sortino_trade_count_180d=len(sortino_returns_180d),
-            sortino_loss_count_180d=sortino_loss_count_180d,
-            drawdown_invalid_days=drawdown_invalid_days,
+            sortino_180d=equity_metrics_180d.get("sortino"),
+            calmar_180d=equity_metrics_180d.get("calmar"),
+            adjusted_profit_factor_180d=adjusted_profit_factor_180d,
+            episode_count_180d=len(closed_runs_180d),
+            loss_count_180d=loss_count_180d,
+            daily_return_count_180d=int(to_float(equity_metrics_180d.get("dailyReturnCount"))),
+            downside_day_count_180d=int(to_float(equity_metrics_180d.get("downsideDayCount"))),
+            equity_curve_complete=bool(equity_metrics_180d.get("equityCurveComplete")),
+            largest_loser_pct=loss_metrics_180d.get("largestLoserPct"),
+            largest_loser_complete=int(to_float(loss_metrics_180d.get("largestLoserMissingCapitalEpisodes"))) == 0,
+            current_open_loss_pct=current_open_loss_pct,
+            # The current API has no historical per-position mark series. Keep
+            # this distinct and unknown rather than relabelling current uPnL.
+            max_observed_position_drawdown_pct=None,
+            drawdown_invalid_days=int(to_float(equity_metrics_180d.get("invalidDayCount"))),
         )
         if wallet.address.lower() in ELITE_WALLET_OVERRIDES:
+            # Overrides may break ties inside the eligible cohort, never bypass
+            # sample, completeness, largest-loser, or drawdown gates.
             recent_win_rate_rank = {
                 **recent_win_rate_rank,
-                "label": "Elite",
-                "eliteOverride": True,
-                "eliteEligible": True,
+                "eliteOverrideConfigured": True,
+                "eliteOverrideApplied": bool(recent_win_rate_rank.get("eliteEligible")),
             }
+            if recent_win_rate_rank.get("eliteEligible"):
+                recent_win_rate_rank["label"] = "Elite"
 
         asset_quality = {
             coin: {
@@ -3711,9 +3990,24 @@ class WalletTrackerService:
             "grossProfit30d": gross_profit_30d,
             "grossLoss30d": gross_loss_30d,
             "pnl180d": round(pnl_180d_official, 2),
-            "sortino180d": "inf" if sortino_180d == float("inf") else round(to_float(sortino_180d), 3),
-            "sortinoTrades180d": len(sortino_returns_180d),
-            "maxDrawdown30dPct": drawdown_30d_pct,
+            "sortino180d": recent_win_rate_rank.get("sortino180d"),
+            "calmar180d": recent_win_rate_rank.get("calmar180d"),
+            "cagr180dPct": (
+                None if equity_metrics_180d.get("cagrPct") is None
+                else round(to_float(equity_metrics_180d.get("cagrPct")), 2)
+            ),
+            "adjustedProfitFactor180d": recent_win_rate_rank.get("adjustedProfitFactor180d"),
+            "episodes180d": len(closed_runs_180d),
+            "losses180d": loss_count_180d,
+            "dailyReturns180d": int(to_float(equity_metrics_180d.get("dailyReturnCount"))),
+            "downsideDays180d": int(to_float(equity_metrics_180d.get("downsideDayCount"))),
+            "missingDailyReturns180d": int(to_float(equity_metrics_180d.get("missingDayCount"))),
+            "maxDrawdown180dPct": round(to_float(equity_metrics_180d.get("maxDrawdownPct")), 2),
+            "largestLoserPct": loss_metrics_180d.get("largestLoserPct"),
+            "largestLoserMeasuredEpisodes": loss_metrics_180d.get("largestLoserMeasuredEpisodes"),
+            "largestLoserMissingCapitalEpisodes": loss_metrics_180d.get("largestLoserMissingCapitalEpisodes"),
+            "currentOpenLossPct": round(current_open_loss_pct, 2),
+            "maxObservedPositionDrawdownPct": None,
             # Same position-episode reconstruction as closedTrades30d, over the
             # Legacy 90d diagnostic, rebuilt from the wider 180d fill page.
             "winRate90d": round(win_rate_90d, 1),

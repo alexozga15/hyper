@@ -432,9 +432,13 @@ function renderWalletDetails() {
     <div class="wallet-metrics">
       <div><span>Wallet Size</span><strong>${wallet.cohorts.walletSize}</strong></div>
       <div><span>Profitability</span><strong>${wallet.cohorts.profitability}</strong></div>
-      <div><span>Quality Rank</span><strong>${wallet.recentWinRateRank?.label || "Unranked"} (${percentFormatter.format(wallet.recentWinRateRank?.score || 0)})</strong></div>
-      <div><span>180D Sortino</span><strong>${wallet.sortino180d === "inf" ? "∞" : Number(wallet.sortino180d || 0).toFixed(2)} / ${wallet.sortinoTrades180d || 0} trades</strong></div>
-      <div><span>30D Drawdown</span><strong>${Number(wallet.maxDrawdown30dPct || 0).toFixed(2)}%</strong></div>
+      <div><span>Quality Rank</span><strong>${wallet.recentWinRateRank?.label || "Unranked"} (${percentFormatter.format(wallet.recentWinRateRank?.score || 0)}) · ${wallet.recentWinRateRank?.assessmentStatus || "Legacy"}</strong></div>
+      <div><span>180D Sortino</span><strong>${wallet.sortino180d == null ? "n/a" : (wallet.sortino180d === "inf" ? "∞" : Number(wallet.sortino180d).toFixed(2))} / ${wallet.dailyReturns180d || 0} daily returns</strong></div>
+      <div><span>180D Calmar</span><strong>${wallet.calmar180d == null ? "n/a" : (wallet.calmar180d === "inf" ? "∞" : Number(wallet.calmar180d).toFixed(2))}</strong></div>
+      <div><span>180D Adjusted PF</span><strong>${wallet.adjustedProfitFactor180d == null ? "n/a" : (wallet.adjustedProfitFactor180d === "inf" ? "∞" : Number(wallet.adjustedProfitFactor180d).toFixed(2))}</strong></div>
+      <div><span>180D Drawdown</span><strong>${Number(wallet.maxDrawdown180dPct || 0).toFixed(2)}%</strong></div>
+      <div><span>Largest loser</span><strong>${wallet.largestLoserPct == null ? "n/a" : `${Number(wallet.largestLoserPct).toFixed(2)}%`}</strong></div>
+      <div><span>Current open loss</span><strong>${Number(wallet.currentOpenLossPct || 0).toFixed(2)}%</strong></div>
       <div><span>Positive Trend</span><strong>${wallet.recentWinRateRank?.positiveTrend ? "Yes" : "No"}</strong></div>
       <div><span>7D Hit Rate</span><strong>${percentFormatter.format(wallet.hitRate)}% / ${wallet.recentClosedTrades || 0} closes</strong></div>
       <div><span>30D PnL</span><strong class="${(wallet.recentWinRateRank?.pnl30d || 0) >= 0 ? "positive" : "negative"}">${formatMoney(wallet.recentWinRateRank?.pnl30d || 0)}</strong></div>

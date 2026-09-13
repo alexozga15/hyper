@@ -46,6 +46,8 @@ from server import (
     build_wallet_quality_rank,
     build_risk_trend_quality_rank,
     cashflow_neutral_drawdown_pct,
+    daily_equity_metrics_180d,
+    episode_loss_metrics,
     collapse_twap_slice_fills,
     current_time_ms,
     classify_profitability,
@@ -81,51 +83,122 @@ class SegmentTests(unittest.TestCase):
         self.assertEqual(classify_profitability(50_000), "Profitable")
         self.assertEqual(classify_profitability(-250_000), "Very Unprofitable")
 
-    def test_new_quality_score_prioritizes_drawdown_sortino_and_trend(self) -> None:
+    def test_new_quality_score_uses_35_25_20_20_components_and_hard_gates(self) -> None:
         strong = build_risk_trend_quality_rank(
             pnl_7d=10,
             pnl_30d=30,
             pnl_180d=100,
             pnl_all_time=150,
-            sortino_180d=5,
-            sortino_trade_count_180d=120,
-            sortino_loss_count_180d=25,
+            sortino_180d=2,
+            calmar_180d=3,
+            adjusted_profit_factor_180d=2.5,
+            episode_count_180d=120,
+            loss_count_180d=25,
+            daily_return_count_180d=179,
+            downside_day_count_180d=25,
             max_drawdown_pct=6,
             window_trusted=True,
+            equity_curve_complete=True,
+            equity_curve_verified=True,
+            largest_loser_pct=3,
+            largest_loser_complete=True,
         )
-        self.assertEqual(strong["score"], 90.0)
+        self.assertEqual(strong["score"], 100.0)
         self.assertEqual(strong["label"], "Elite")
         self.assertTrue(strong["positiveTrend"])
         self.assertEqual(strong["sortinoConfidence"], "High")
 
-        unstable = build_risk_trend_quality_rank(
+        thin_sample = build_risk_trend_quality_rank(
             pnl_7d=-10,
             pnl_30d=30,
-            pnl_180d=20,
+            pnl_180d=100,
             pnl_all_time=150,
-            sortino_180d=5,
-            sortino_trade_count_180d=120,
-            sortino_loss_count_180d=25,
-            max_drawdown_pct=30,
+            sortino_180d=2,
+            calmar_180d=3,
+            adjusted_profit_factor_180d=2.5,
+            episode_count_180d=39,
+            loss_count_180d=9,
+            daily_return_count_180d=179,
+            downside_day_count_180d=25,
+            max_drawdown_pct=6,
             window_trusted=True,
+            equity_curve_complete=True,
+            equity_curve_verified=True,
+            largest_loser_pct=3,
+            largest_loser_complete=True,
         )
-        self.assertEqual(unstable["score"], 33.0)
-        self.assertEqual(unstable["label"], "Cold")
+        self.assertNotEqual(thin_sample["label"], "Elite")
+        self.assertFalse(thin_sample["sampleGatePassed"])
+        self.assertEqual(thin_sample["assessmentStatus"], "Preliminary")
 
-        unverifiable_drawdown = build_risk_trend_quality_rank(
+        shadow = build_risk_trend_quality_rank(
             pnl_7d=10,
             pnl_30d=30,
             pnl_180d=100,
             pnl_all_time=150,
-            sortino_180d=5,
-            sortino_trade_count_180d=120,
-            sortino_loss_count_180d=25,
-            max_drawdown_pct=0,
+            sortino_180d=2,
+            calmar_180d=3,
+            adjusted_profit_factor_180d=2.5,
+            episode_count_180d=120,
+            loss_count_180d=25,
+            daily_return_count_180d=179,
+            downside_day_count_180d=25,
+            max_drawdown_pct=51,
             window_trusted=True,
-            drawdown_invalid_days=1,
+            equity_curve_complete=True,
+            equity_curve_verified=True,
+            largest_loser_pct=3,
+            largest_loser_complete=True,
         )
-        self.assertEqual(unverifiable_drawdown["drawdownScore"], 0.0)
-        self.assertEqual(unverifiable_drawdown["score"], 50.0)
+        self.assertEqual(shadow["label"], "Shadow")
+        self.assertIn("drawdown", shadow["shadowReasons"])
+
+    def test_unverified_official_curve_is_preliminary_and_cannot_be_elite(self) -> None:
+        rank = build_risk_trend_quality_rank(
+            pnl_7d=10, pnl_30d=30, pnl_180d=100, pnl_all_time=150,
+            sortino_180d=2, calmar_180d=3, adjusted_profit_factor_180d=2.5,
+            episode_count_180d=120, loss_count_180d=25,
+            daily_return_count_180d=179, downside_day_count_180d=25,
+            max_drawdown_pct=6, window_trusted=True,
+            equity_curve_complete=True, equity_curve_verified=False,
+            largest_loser_pct=3, largest_loser_complete=True,
+        )
+        self.assertEqual(rank["score"], 100.0)
+        self.assertEqual(rank["label"], "Strong")
+        self.assertEqual(rank["assessmentStatus"], "Preliminary")
+        self.assertFalse(rank["eliteEligible"])
+
+    def test_unverified_zero_downside_or_drawdown_does_not_get_maximum_component_scores(self) -> None:
+        rank = build_risk_trend_quality_rank(
+            pnl_7d=10, pnl_30d=30, pnl_180d=100, pnl_all_time=150,
+            sortino_180d=float("inf"), calmar_180d=float("inf"),
+            adjusted_profit_factor_180d=2.5,
+            episode_count_180d=120, loss_count_180d=25,
+            daily_return_count_180d=179, downside_day_count_180d=0,
+            max_drawdown_pct=0, window_trusted=True,
+            equity_curve_complete=True, equity_curve_verified=False,
+            largest_loser_pct=0, largest_loser_complete=True,
+        )
+        self.assertEqual(rank["sortinoScore"], 0.0)
+        self.assertEqual(rank["calmarScore"], 0.0)
+        self.assertEqual(rank["assessmentStatus"], "Preliminary")
+
+    def test_largest_loser_gates_have_priority_over_score(self) -> None:
+        common = dict(
+            pnl_7d=10, pnl_30d=30, pnl_180d=100, pnl_all_time=150,
+            sortino_180d=2, calmar_180d=3, adjusted_profit_factor_180d=2.5,
+            episode_count_180d=120, loss_count_180d=25,
+            daily_return_count_180d=179, downside_day_count_180d=25,
+            max_drawdown_pct=6, window_trusted=True,
+            equity_curve_complete=True, equity_curve_verified=True,
+            largest_loser_complete=True,
+        )
+        no_elite = build_risk_trend_quality_rank(**common, largest_loser_pct=7)
+        shadow = build_risk_trend_quality_rank(**common, largest_loser_pct=20)
+        self.assertEqual(no_elite["label"], "Strong")
+        self.assertFalse(no_elite["eliteEligible"])
+        self.assertEqual(shadow["label"], "Shadow")
+        self.assertIn("largest_loser", shadow["shadowReasons"])
 
     def test_trade_sortino_and_cashflow_neutral_drawdown_failure_cases(self) -> None:
         self.assertGreater(to_float(trade_sortino_ratio([0.02, 0.01, -0.01], 180)), 0)
@@ -135,6 +208,53 @@ class SegmentTests(unittest.TestCase):
         pnl = [[0, "0"], [86_400_000, "0"]]
         account = [[0, "100"], [86_400_000, "50"]]
         self.assertEqual(cashflow_neutral_drawdown_pct(pnl, account), (0.0, 0))
+
+    def test_daily_equity_metrics_use_daily_returns_without_annualizing_sortino(self) -> None:
+        day_ms = 86_400_000
+        returns = [0.01 if day % 10 else -0.005 for day in range(1, 181)]
+        pnl = [[0, 0.0]]
+        account = [[0, 100.0]]
+        cumulative_pnl = 0.0
+        equity = 100.0
+        for day, daily_return in enumerate(returns, 1):
+            cumulative_pnl += equity * daily_return
+            equity *= 1.0 + daily_return
+            pnl.append([day * day_ms, cumulative_pnl])
+            account.append([day * day_ms, equity])
+        metrics = daily_equity_metrics_180d(pnl, account, 0, 180 * day_ms)
+        downside = (sum(min(value, 0.0) ** 2 for value in returns) / len(returns)) ** 0.5
+        expected_sortino = (sum(returns) / len(returns)) / downside
+        self.assertAlmostEqual(metrics["sortino"], expected_sortino)
+        self.assertEqual(metrics["dailyReturnCount"], 180)
+        self.assertEqual(metrics["downsideDayCount"], 18)
+        self.assertTrue(metrics["equityCurveComplete"])
+
+    def test_incomplete_curve_with_zero_downside_does_not_get_infinite_sortino(self) -> None:
+        day_ms = 86_400_000
+        pnl = [[day * day_ms, day] for day in range(20)]
+        account = [[day * day_ms, 100 + day] for day in range(20)]
+        metrics = daily_equity_metrics_180d(pnl, account, 0, 180 * day_ms)
+        self.assertIsNone(metrics["sortino"])
+        self.assertFalse(metrics["equityCurveComplete"])
+
+    def test_internal_daily_gap_makes_cagr_calmar_and_curve_completeness_unavailable(self) -> None:
+        day_ms = 86_400_000
+        points = [[day * day_ms, float(day)] for day in range(181) if day != 90]
+        accounts = [[day * day_ms, 100.0 + day] for day in range(181) if day != 90]
+        metrics = daily_equity_metrics_180d(points, accounts, 0, 180 * day_ms)
+        self.assertFalse(metrics["equityCurveComplete"])
+        self.assertIsNone(metrics["cagrPct"])
+        self.assertIsNone(metrics["calmar"])
+
+    def test_episode_loser_uses_capital_before_episode_and_reports_missing_capital(self) -> None:
+        day_ms = 86_400_000
+        episodes = [
+            {"startMs": 2 * day_ms, "pnl": -20.0},
+            {"startMs": 10 * day_ms, "pnl": -5.0},
+        ]
+        metrics = episode_loss_metrics(episodes, [[day_ms, 100.0]])
+        self.assertEqual(metrics["largestLoserPct"], 20.0)
+        self.assertEqual(metrics["largestLoserMissingCapitalEpisodes"], 1)
 
     def test_wallet_quality_rank_combines_7d_hit_rate_and_pnl(self) -> None:
         self.assertEqual(build_wallet_quality_rank(100, 1, 10_000, 100_000)["label"], "Unranked")
