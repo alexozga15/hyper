@@ -6,6 +6,7 @@ import decimal
 import hashlib
 import hmac
 import json
+import math
 import os
 import random
 import re
@@ -599,7 +600,7 @@ WALLET_WINDOW_FILL_CAP = int(float(os.environ.get("WALLET_WINDOW_FILL_CAP", 2000
 # only wallets that genuinely have this much history pay for the budget. Across
 # the tracked set a full sweep goes from 137 pages to 172, and the refresh
 # rotation spreads that over three wallets per cycle.
-FILL_HISTORY_MAX_PAGES = int(os.environ.get("FILL_HISTORY_MAX_PAGES", "30"))
+FILL_HISTORY_MAX_PAGES = int(os.environ.get("FILL_HISTORY_MAX_PAGES", "60"))
 # A paged walk is all-or-nothing: one failed page discards every page already
 # collected, so the failure probability compounds with page count and the
 # busiest wallets - the ones needing the most pages - are the ones that can
@@ -626,6 +627,10 @@ WALLET_CACHED_QUALITY_FIELDS = (
     "closedTrades30d",
     "grossProfit30d",
     "grossLoss30d",
+    "pnl180d",
+    "sortino180d",
+    "sortinoTrades180d",
+    "maxDrawdown30dPct",
     "winRate90d",
     "closedTrades90d",
     "qualityClosedEvents30d",
@@ -656,6 +661,9 @@ WALLET_CACHED_QUALITY_FIELDS = (
 QUALITY_WINDOW_MIN_COVERAGE_MS = int(
     float(os.environ.get("QUALITY_WINDOW_MIN_COVERAGE_MS", 7 * 24 * 60 * 60 * 1000))
 )
+RISK_SCORE_MIN_COVERAGE_MS = int(
+    float(os.environ.get("RISK_SCORE_MIN_COVERAGE_MS", 150 * 24 * 60 * 60 * 1000))
+)
 LORACLE_WALLET_ADDRESS = "0x8def9f50456c6c4e37fa5d3d57f108ed23992dae"
 EXCLUDED_COUNTED_POSITIONS = {
     (LORACLE_WALLET_ADDRESS, "HYPE"),
@@ -670,8 +678,10 @@ RANKING_FULL_CONFIDENCE_7D_CLOSED_TRADES = 20
 # unit left 7 of 31 wallets unrankable, this one leaves 6.
 RANKING_MIN_30D_CLOSED_TRADES = 10
 RANKING_FULL_CONFIDENCE_30D_CLOSED_TRADES = 30
-# The fills window the wallet quality refresh pulls for the conviction weight
-# path. Widened from 30 to 90 days: measured against actual position outcomes,
+# The fills window the wallet quality refresh pulls. It is now at least 180
+# days for Sortino; the legacy 90d win-rate diagnostics still use their own
+# cutoff over the same fetched page. When it was widened from 30 to 90 days,
+# measured against actual position outcomes,
 # a raw 90d win rate predicts whether a position closes profitable (AUC 0.701)
 # better than the production convictionWeightScore composite (AUC 0.643); a
 # shrunk mapping of the 90d rate (see CONVICTION_WIN_RATE_BASELINE /
@@ -687,7 +697,11 @@ RANKING_FULL_CONFIDENCE_30D_CLOSED_TRADES = 30
 # and the wallet-level rank correlation was rho +0.636 at p=0.054 on the ten
 # wallets with enough test positions to check. Treat the headline as the top of
 # a range, not a point estimate.
-WALLET_QUALITY_WINDOW_DAYS = int(float(os.environ.get("WALLET_QUALITY_WINDOW_DAYS", 90)))
+SORTINO_WINDOW_DAYS = 180
+WALLET_QUALITY_WINDOW_DAYS = max(
+    SORTINO_WINDOW_DAYS,
+    int(float(os.environ.get("WALLET_QUALITY_WINDOW_DAYS", SORTINO_WINDOW_DAYS))),
+)
 # Minimum 90d closed-run count before convictionWinRateWeight is trusted enough
 # to emit. Mirrors RANKING_MIN_30D_CLOSED_TRADES's role for the 30d score.
 RANKING_MIN_90D_CLOSED_TRADES = int(os.environ.get("RANKING_MIN_90D_CLOSED_TRADES", 10))
@@ -1487,6 +1501,7 @@ def reconstruct_position_episodes(
                 "endMs": fill_time,
                 "fills": 0,
                 "anchored": start_position == 0,
+                "grossNotional": 0.0,
                 # End position of this episode's last fill. The next fill on
                 # the coin must report it as its startPosition; anything else
                 # means the feed skipped something in between.
@@ -1494,6 +1509,7 @@ def reconstruct_position_episodes(
             }
         episode["pnl"] += to_float(fill.get("closedPnl"))
         episode["fee"] += to_float(fill.get("fee"))
+        episode["grossNotional"] += abs(to_float(fill.get("px")) * to_float(fill.get("sz")))
         episode["fills"] = int(episode["fills"]) + 1
         episode["endMs"] = fill_time
         episode["expected"] = end_position
@@ -1509,6 +1525,10 @@ def reconstruct_position_episodes(
 
         finished = open_episodes.pop(coin)
         finished["pnl"] = finished["pnl"] - finished["fee"]
+        # A fully observed round trip contains both opening and closing
+        # notional. Dividing their sum by two is a stable capital proxy for a
+        # trade return; unanchored episodes are excluded from Sortino below.
+        finished["notional"] = finished.pop("grossNotional") / 2.0
         del finished["fee"]
         # Bookkeeping only, and a Decimal that nothing downstream should try
         # to serialise.
@@ -1527,6 +1547,7 @@ def reconstruct_position_episodes(
                 "endMs": fill_time,
                 "fills": 0,
                 "anchored": True,
+                "grossNotional": 0.0,
                 "expected": end_position,
             }
     return finished_episodes
@@ -1913,6 +1934,8 @@ def refreshed_quality_rank(
     """
     if not isinstance(rank, dict):
         return rank
+    if rank.get("metric") == "risk_sortino_trend_180d":
+        return rank
     shrunk = shrunk_win_rate(hit_rate_90d, closed_trade_count_90d)
     if shrunk is None:
         # Too thin a 90d sample to score. The key must stay absent, because
@@ -1986,6 +2009,95 @@ def signal_quality_estimate_fields(source: Any) -> dict[str, Any]:
     }
 
 
+def build_risk_trend_quality_rank(
+    *,
+    pnl_7d: float,
+    pnl_30d: float,
+    pnl_180d: float,
+    pnl_all_time: float,
+    sortino_180d: float,
+    sortino_trade_count_180d: int,
+    sortino_loss_count_180d: int,
+    max_drawdown_pct: float,
+    window_trusted: bool,
+    risk_window_trusted: bool | None = None,
+    drawdown_invalid_days: int = 0,
+) -> dict[str, Any]:
+    """Wallet score: 50% drawdown, 25% 180d Sortino, 25% PnL trend."""
+    drawdown = max(0.0, to_float(max_drawdown_pct))
+    # A discontinuous account-mode day makes the drawdown denominator
+    # unverifiable. Because drawdown is half of the score, unknown risk must
+    # not receive the same credit as zero risk.
+    drawdown_score = 0.0 if drawdown_invalid_days else clamp((1.0 - drawdown / 30.0) * 100.0)
+    sortino = to_float(sortino_180d)
+    sortino_score = 100.0 if sortino == float("inf") else clamp((sortino / 5.0) * 100.0)
+    pnl_7d_value = to_float(pnl_7d)
+    pnl_30d_value = to_float(pnl_30d)
+    pnl_180d_value = to_float(pnl_180d)
+    trend_checks = {
+        "pnl7dPositive": pnl_7d_value > 0,
+        "pnl30dAbove7d": pnl_30d_value > pnl_7d_value,
+        "pnl180dAbove30d": pnl_180d_value > pnl_30d_value,
+    }
+    trend_points = (
+        (8.0 if trend_checks["pnl7dPositive"] else 0.0)
+        + (8.0 if trend_checks["pnl30dAbove7d"] else 0.0)
+        + (9.0 if trend_checks["pnl180dAbove30d"] else 0.0)
+    )
+    score = drawdown_score * 0.50 + sortino_score * 0.25 + trend_points
+    sample_size = max(0, int(to_float(sortino_trade_count_180d)))
+    loss_count = max(0, int(to_float(sortino_loss_count_180d)))
+    confidence = "High" if sample_size >= 100 and loss_count >= 20 else (
+        "Medium" if sample_size >= 40 and loss_count >= 10 else "Low"
+    )
+    full_positive_trend = all(trend_checks.values())
+    all_time_control = to_float(pnl_all_time) > pnl_180d_value
+    risk_trusted = bool(window_trusted if risk_window_trusted is None else risk_window_trusted)
+    elite_eligible = (
+        risk_trusted
+        and drawdown_invalid_days == 0
+        and drawdown < 30.0
+        and sortino > 0
+        and full_positive_trend
+        and all_time_control
+    )
+    if score >= 85 and elite_eligible:
+        label = "Elite"
+    elif score >= 70:
+        label = "Strong"
+    elif score >= 55:
+        label = "Balanced"
+    elif score >= 40:
+        label = "Weak"
+    else:
+        label = "Cold"
+    return {
+        "label": label,
+        "score": round(score, 1),
+        "convictionWeightScore": round(score, 1),
+        "pnl": round(pnl_7d_value, 2),
+        "pnl30d": round(pnl_30d_value, 2),
+        "pnl180d": round(pnl_180d_value, 2),
+        "pnlAllTime": round(to_float(pnl_all_time), 2),
+        "sortino180d": "inf" if sortino == float("inf") else round(sortino, 3),
+        "sortinoTrades180d": sample_size,
+        "sortinoLosses180d": loss_count,
+        "sortinoConfidence": confidence,
+        "sortinoScore": round(sortino_score, 1),
+        "maxDrawdownPct": round(drawdown, 2),
+        "drawdownScore": round(drawdown_score, 1),
+        "drawdownInvalidDays": int(drawdown_invalid_days),
+        "trendScore": trend_points,
+        "trendChecks": trend_checks,
+        "positiveTrend": full_positive_trend,
+        "allTimeControl": all_time_control,
+        "eliteEligible": elite_eligible,
+        "windowTrusted": bool(window_trusted),
+        "riskWindowTrusted": risk_trusted,
+        "metric": "risk_sortino_trend_180d",
+    }
+
+
 def build_wallet_quality_rank(
     hit_rate: float,
     closed_trade_count: int,
@@ -2003,7 +2115,28 @@ def build_wallet_quality_rank(
     margin_usage_pct: float = 0.0,
     unrealized_pnl: float = 0.0,
     window_trusted: bool = True,
+    pnl_180d: float | None = None,
+    pnl_all_time: float | None = None,
+    sortino_180d: float | None = None,
+    sortino_trade_count_180d: int = 0,
+    sortino_loss_count_180d: int = 0,
+    drawdown_invalid_days: int = 0,
+    risk_window_trusted: bool | None = None,
 ) -> dict[str, Any]:
+    if pnl_180d is not None and pnl_all_time is not None and sortino_180d is not None:
+        return build_risk_trend_quality_rank(
+            pnl_7d=pnl_7d,
+            pnl_30d=to_float(pnl_30d),
+            pnl_180d=pnl_180d,
+            pnl_all_time=pnl_all_time,
+            sortino_180d=sortino_180d,
+            sortino_trade_count_180d=sortino_trade_count_180d,
+            sortino_loss_count_180d=sortino_loss_count_180d,
+            max_drawdown_pct=max_drawdown_pct,
+            window_trusted=window_trusted,
+            risk_window_trusted=risk_window_trusted,
+            drawdown_invalid_days=drawdown_invalid_days,
+        )
     normalized_hit_rate = max(0.0, min(to_float(hit_rate), 100.0))
     sample_size_7d = max(0, int(to_float(closed_trade_count)))
     sample_size_30d = max(0, int(to_float(closed_trade_count_30d if closed_trade_count_30d is not None else sample_size_7d)))
@@ -2203,6 +2336,79 @@ def max_drawdown_pct(points: list[Any]) -> float:
         if peak and peak > 0:
             worst = max(worst, ((peak - value) / peak) * 100)
     return round(worst, 2)
+
+
+def interpolated_window_pnl(points: list[Any], cutoff_ms: int) -> float:
+    """PnL earned after cutoff, interpolating sparse official snapshots."""
+    valid = sorted(
+        (int(to_float(point[0])), to_float(point[1]))
+        for point in points or []
+        if isinstance(point, (list, tuple)) and len(point) > 1
+    )
+    if not valid:
+        return 0.0
+    latest_value = valid[-1][1]
+    if cutoff_ms <= valid[0][0]:
+        return latest_value - valid[0][1]
+    if cutoff_ms >= valid[-1][0]:
+        return 0.0
+    for (left_ms, left_value), (right_ms, right_value) in zip(valid, valid[1:]):
+        if left_ms <= cutoff_ms <= right_ms:
+            span = right_ms - left_ms
+            weight = (cutoff_ms - left_ms) / span if span > 0 else 0.0
+            cutoff_value = left_value + (right_value - left_value) * weight
+            return latest_value - cutoff_value
+    return 0.0
+
+
+def cashflow_neutral_drawdown_pct(pnl_points: list[Any], account_points: list[Any]) -> tuple[float, int]:
+    """Compound daily trading returns so deposits and withdrawals do not look like drawdown."""
+    day_ms = 24 * 60 * 60 * 1000
+
+    def daily_last(points: list[Any]) -> dict[int, float]:
+        values: dict[int, float] = {}
+        for point in points or []:
+            if not (isinstance(point, (list, tuple)) and len(point) > 1):
+                continue
+            values[int(to_float(point[0])) // day_ms] = to_float(point[1])
+        return values
+
+    pnl_by_day = daily_last(pnl_points)
+    account_by_day = daily_last(account_points)
+    days = sorted(set(pnl_by_day).intersection(account_by_day))
+    equity_index = 1.0
+    peak = 1.0
+    worst = 0.0
+    invalid_days = 0
+    for previous_day, day in zip(days, days[1:]):
+        starting_equity = account_by_day[previous_day]
+        if starting_equity <= 0:
+            invalid_days += 1
+            continue
+        daily_return = (pnl_by_day[day] - pnl_by_day[previous_day]) / starting_equity
+        # A return below -100% means the account-value denominator belongs to
+        # another account mode or a discontinuous snapshot. It is not a valid
+        # portfolio return and must be surfaced rather than compounded.
+        if daily_return <= -1.0:
+            invalid_days += 1
+            continue
+        equity_index *= 1.0 + daily_return
+        peak = max(peak, equity_index)
+        worst = max(worst, (peak - equity_index) / peak)
+    return round(worst * 100.0, 2), invalid_days
+
+
+def trade_sortino_ratio(trade_returns: list[float], window_days: int = 180) -> float | None:
+    """Annualized trade-level Sortino with MAR=0 over the requested window."""
+    returns = [to_float(value) for value in trade_returns if math.isfinite(to_float(value))]
+    if not returns or window_days <= 0:
+        return None
+    mean_return = sum(returns) / len(returns)
+    downside_deviation = math.sqrt(sum(min(value, 0.0) ** 2 for value in returns) / len(returns))
+    if downside_deviation == 0:
+        return float("inf") if mean_return > 0 else 0.0
+    trades_per_year = len(returns) * 365.0 / window_days
+    return (mean_return / downside_deviation) * math.sqrt(trades_per_year)
 
 
 def current_time_ms() -> int:
@@ -3027,17 +3233,17 @@ class WalletTrackerService:
         now_ms = current_time_ms()
         cutoff_7d_ms = now_ms - RANKING_WINDOW_MS
         cutoff_30d_ms = now_ms - HOLDING_ONLY_WINDOW_MS
-        cutoff_90d_ms = now_ms - (WALLET_QUALITY_WINDOW_DAYS * 24 * 60 * 60 * 1000)
+        cutoff_90d_ms = now_ms - (90 * 24 * 60 * 60 * 1000)
+        cutoff_180d_ms = now_ms - (SORTINO_WINDOW_DAYS * 24 * 60 * 60 * 1000)
         cutoff_holdout_ms = now_ms - MONTHLY_QUALITY_HOLDOUT_MS
-        # The quality path fetches WALLET_QUALITY_WINDOW_DAYS (90d) of fills so
-        # winRate90d/closedTrades90d have a real sample - see the constant's
-        # comment above for the measured justification. Every existing 30d
+        # The quality path fetches at least 180 days of fills for Sortino.
+        # winRate90d/closedTrades90d retain their own 90-day cutoff. Every 30d
         # aggregate below (closedTrades30d, grossProfit30d/grossLoss30d,
         # qualityClosedEvents30d, fills30d, ...) still applies its own
         # cutoff_30d_ms filter over whatever gets fetched, so widening this
         # start time does not change what those fields mean.
-        fills_start_ms = cutoff_90d_ms if full_quality_refresh else now_ms - WALLET_LIVE_FILL_LOOKBACK_MS
-        # A full quality refresh needs the 90-day window, so it always fetches.
+        fills_start_ms = cutoff_180d_ms if full_quality_refresh else now_ms - WALLET_LIVE_FILL_LOOKBACK_MS
+        # A full quality refresh needs the 180-day window, so it always fetches.
         skip_fills = bool(skip_fill_fetch) and not full_quality_refresh
         skip_live_fills = bool(skip_live_fill_fetch) and not full_quality_refresh and not skip_fills
         with ThreadPoolExecutor(max_workers=HYPERLIQUID_SNAPSHOT_WORKERS) as executor:
@@ -3365,6 +3571,14 @@ class WalletTrackerService:
         loss_count_90d = sum(1 for run in closed_runs_90d if run["pnl"] < 0)
         closed_trade_count_90d = win_count_90d + loss_count_90d
         win_rate_90d = (win_count_90d / max(closed_trade_count_90d, 1)) * 100
+        closed_runs_180d = reconstruct_position_episodes(fills, cutoff_180d_ms)
+        sortino_returns_180d = [
+            to_float(run["pnl"]) / to_float(run["notional"])
+            for run in closed_runs_180d
+            if run.get("anchored") and to_float(run.get("notional")) > 0
+        ]
+        sortino_180d = trade_sortino_ratio(sortino_returns_180d, SORTINO_WINDOW_DAYS)
+        sortino_loss_count_180d = sum(1 for value in sortino_returns_180d if value < 0)
         # Per-asset quality is the same metric one level down. Runs are already
         # per coin, so they group directly; pnl stays a raw sum as above.
         asset_trade_stats: dict[str, dict[str, float]] = {}
@@ -3382,6 +3596,18 @@ class WalletTrackerService:
 
         performance = self.build_performance(portfolio)
         all_time_realized = performance.get("allTime", {}).get("pnl", 0.0)
+        perp_week = portfolio.get("perpWeek") or portfolio.get("week") or {}
+        perp_month = portfolio.get("perpMonth") or portfolio.get("month") or {}
+        perp_all_time = portfolio.get("perpAllTime") or portfolio.get("allTime") or {}
+        pnl_7d_official = latest_series_value(perp_week.get("pnlHistory", []))
+        pnl_30d_official = latest_series_value(perp_month.get("pnlHistory", []))
+        pnl_all_time_official = latest_series_value(perp_all_time.get("pnlHistory", []))
+        pnl_180d_official = interpolated_window_pnl(
+            perp_all_time.get("pnlHistory", []), cutoff_180d_ms
+        )
+        drawdown_30d_pct, drawdown_invalid_days = cashflow_neutral_drawdown_pct(
+            perp_month.get("pnlHistory", []), perp_month.get("accountValueHistory", [])
+        )
         recent_closed_trade_count = win_count + loss_count
         hit_rate = (win_count / max(recent_closed_trade_count, 1)) * 100
         closed_trade_count_30d = win_count_30d + loss_count_30d
@@ -3413,19 +3639,23 @@ class WalletTrackerService:
         if last_fill_time:
             days_since_last_fill = round(max(0, now_ms - last_fill_time) / (24 * 60 * 60 * 1000), 1)
         discovery_score = account_value + (abs(total_notional) * 0.2) + max(all_time_realized, 0.0)
+        risk_score_window_trusted = (
+            not quality_window_truncated
+            or quality_window_coverage_ms >= RISK_SCORE_MIN_COVERAGE_MS
+        )
         recent_win_rate_rank = build_wallet_quality_rank(
             hit_rate,
             recent_closed_trade_count,
-            recent_realized_pnl,
+            pnl_7d_official,
             account_value,
             hit_rate_30d=hit_rate_30d,
             closed_trade_count_30d=closed_trade_count_30d,
-            pnl_30d=realized_pnl_30d,
+            pnl_30d=pnl_30d_official,
             gross_profit_30d=gross_profit_30d,
             gross_loss_30d=gross_loss_30d,
             hit_rate_90d=win_rate_90d,
             closed_trade_count_90d=closed_trade_count_90d,
-            max_drawdown_pct=performance.get("month", {}).get("maxDrawdownPct", 0.0),
+            max_drawdown_pct=drawdown_30d_pct,
             margin_usage_pct=margin_usage_pct,
             unrealized_pnl=unrealized_pnl,
             window_trusted=wallet_quality_window_trusted(
@@ -3434,6 +3664,13 @@ class WalletTrackerService:
                     "qualityWindowCoverageMs": quality_window_coverage_ms,
                 }
             ),
+            risk_window_trusted=risk_score_window_trusted,
+            pnl_180d=pnl_180d_official,
+            pnl_all_time=pnl_all_time_official,
+            sortino_180d=sortino_180d if sortino_180d is not None else 0.0,
+            sortino_trade_count_180d=len(sortino_returns_180d),
+            sortino_loss_count_180d=sortino_loss_count_180d,
+            drawdown_invalid_days=drawdown_invalid_days,
         )
         if wallet.address.lower() in ELITE_WALLET_OVERRIDES:
             recent_win_rate_rank = {
@@ -3473,10 +3710,12 @@ class WalletTrackerService:
             "closedTrades30d": win_count_30d + loss_count_30d,
             "grossProfit30d": gross_profit_30d,
             "grossLoss30d": gross_loss_30d,
+            "pnl180d": round(pnl_180d_official, 2),
+            "sortino180d": "inf" if sortino_180d == float("inf") else round(to_float(sortino_180d), 3),
+            "sortinoTrades180d": len(sortino_returns_180d),
+            "maxDrawdown30dPct": drawdown_30d_pct,
             # Same position-episode reconstruction as closedTrades30d, over the
-            # wider WALLET_QUALITY_WINDOW_DAYS (90d) window - see
-            # reconstruct_position_episodes. Feeds convictionWinRateWeight in
-            # build_wallet_quality_rank; does not replace any 30d field above.
+            # Legacy 90d diagnostic, rebuilt from the wider 180d fill page.
             "winRate90d": round(win_rate_90d, 1),
             "closedTrades90d": closed_trade_count_90d,
             "qualityClosedEvents30d": len(quality_event_pnls),

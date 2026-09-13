@@ -433,10 +433,14 @@ function renderWalletDetails() {
       <div><span>Wallet Size</span><strong>${wallet.cohorts.walletSize}</strong></div>
       <div><span>Profitability</span><strong>${wallet.cohorts.profitability}</strong></div>
       <div><span>Quality Rank</span><strong>${wallet.recentWinRateRank?.label || "Unranked"} (${percentFormatter.format(wallet.recentWinRateRank?.score || 0)})</strong></div>
+      <div><span>180D Sortino</span><strong>${wallet.sortino180d === "inf" ? "∞" : Number(wallet.sortino180d || 0).toFixed(2)} / ${wallet.sortinoTrades180d || 0} trades</strong></div>
+      <div><span>30D Drawdown</span><strong>${Number(wallet.maxDrawdown30dPct || 0).toFixed(2)}%</strong></div>
+      <div><span>Positive Trend</span><strong>${wallet.recentWinRateRank?.positiveTrend ? "Yes" : "No"}</strong></div>
       <div><span>7D Hit Rate</span><strong>${percentFormatter.format(wallet.hitRate)}% / ${wallet.recentClosedTrades || 0} closes</strong></div>
-      <div><span>30D PnL</span><strong class="${(wallet.realizedPnl30d || 0) >= 0 ? "positive" : "negative"}">${formatMoney(wallet.realizedPnl30d || 0)} / ${wallet.closedTrades30d || 0} closes</strong></div>
+      <div><span>30D PnL</span><strong class="${(wallet.recentWinRateRank?.pnl30d || 0) >= 0 ? "positive" : "negative"}">${formatMoney(wallet.recentWinRateRank?.pnl30d || 0)}</strong></div>
+      <div><span>180D PnL</span><strong class="${(wallet.pnl180d || 0) >= 0 ? "positive" : "negative"}">${formatMoney(wallet.pnl180d || 0)}</strong></div>
       <div><span>30D Activity</span><strong>${wallet.holdingOnly30d ? "Holding only" : `${wallet.fills30d || 0} fills`}</strong></div>
-      <div><span>7D PnL</span><strong class="${wallet.recentRealizedPnl >= 0 ? "positive" : "negative"}">${formatMoney(wallet.recentRealizedPnl)}</strong></div>
+      <div><span>7D PnL</span><strong class="${(wallet.recentWinRateRank?.pnl || 0) >= 0 ? "positive" : "negative"}">${formatMoney(wallet.recentWinRateRank?.pnl || 0)}</strong></div>
       <div><span>Day PnL</span><strong class="${wallet.performance.day.pnl >= 0 ? "positive" : "negative"}">${formatMoney(wallet.performance.day.pnl)}</strong></div>
       <div><span>Week PnL</span><strong class="${wallet.performance.week.pnl >= 0 ? "positive" : "negative"}">${formatMoney(wallet.performance.week.pnl)}</strong></div>
       <div><span>Month PnL</span><strong class="${wallet.performance.month.pnl >= 0 ? "positive" : "negative"}">${formatMoney(wallet.performance.month.pnl)}</strong></div>

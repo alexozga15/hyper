@@ -44,6 +44,8 @@ from server import (
     WalletStore,
     WalletTrackerService,
     build_wallet_quality_rank,
+    build_risk_trend_quality_rank,
+    cashflow_neutral_drawdown_pct,
     collapse_twap_slice_fills,
     current_time_ms,
     classify_profitability,
@@ -57,6 +59,7 @@ from server import (
     refreshed_quality_rank,
     to_float,
     shrunk_win_rate,
+    trade_sortino_ratio,
     CONVICTION_WALLET_WEIGHT_MAX,
     NON_TOP_CONVICTION_WALLET_MULTIPLIER,
     TOP_CONVICTION_WALLET_MULTIPLIER,
@@ -77,6 +80,61 @@ class SegmentTests(unittest.TestCase):
         self.assertEqual(classify_profitability(2_000_000), "Money Printer")
         self.assertEqual(classify_profitability(50_000), "Profitable")
         self.assertEqual(classify_profitability(-250_000), "Very Unprofitable")
+
+    def test_new_quality_score_prioritizes_drawdown_sortino_and_trend(self) -> None:
+        strong = build_risk_trend_quality_rank(
+            pnl_7d=10,
+            pnl_30d=30,
+            pnl_180d=100,
+            pnl_all_time=150,
+            sortino_180d=5,
+            sortino_trade_count_180d=120,
+            sortino_loss_count_180d=25,
+            max_drawdown_pct=6,
+            window_trusted=True,
+        )
+        self.assertEqual(strong["score"], 90.0)
+        self.assertEqual(strong["label"], "Elite")
+        self.assertTrue(strong["positiveTrend"])
+        self.assertEqual(strong["sortinoConfidence"], "High")
+
+        unstable = build_risk_trend_quality_rank(
+            pnl_7d=-10,
+            pnl_30d=30,
+            pnl_180d=20,
+            pnl_all_time=150,
+            sortino_180d=5,
+            sortino_trade_count_180d=120,
+            sortino_loss_count_180d=25,
+            max_drawdown_pct=30,
+            window_trusted=True,
+        )
+        self.assertEqual(unstable["score"], 33.0)
+        self.assertEqual(unstable["label"], "Cold")
+
+        unverifiable_drawdown = build_risk_trend_quality_rank(
+            pnl_7d=10,
+            pnl_30d=30,
+            pnl_180d=100,
+            pnl_all_time=150,
+            sortino_180d=5,
+            sortino_trade_count_180d=120,
+            sortino_loss_count_180d=25,
+            max_drawdown_pct=0,
+            window_trusted=True,
+            drawdown_invalid_days=1,
+        )
+        self.assertEqual(unverifiable_drawdown["drawdownScore"], 0.0)
+        self.assertEqual(unverifiable_drawdown["score"], 50.0)
+
+    def test_trade_sortino_and_cashflow_neutral_drawdown_failure_cases(self) -> None:
+        self.assertGreater(to_float(trade_sortino_ratio([0.02, 0.01, -0.01], 180)), 0)
+        self.assertLess(to_float(trade_sortino_ratio([-0.02, -0.01, 0.005], 180)), 0)
+        # A 50% withdrawal with unchanged cumulative PnL is a cash flow, not a
+        # trading drawdown. Raw account-value peak/trough would call it 50%.
+        pnl = [[0, "0"], [86_400_000, "0"]]
+        account = [[0, "100"], [86_400_000, "50"]]
+        self.assertEqual(cashflow_neutral_drawdown_pct(pnl, account), (0.0, 0))
 
     def test_wallet_quality_rank_combines_7d_hit_rate_and_pnl(self) -> None:
         self.assertEqual(build_wallet_quality_rank(100, 1, 10_000, 100_000)["label"], "Unranked")
@@ -2916,6 +2974,10 @@ class AlertSummaryTests(unittest.TestCase):
             # constantly in small amounts and carries the losses open. It was
             # in `additions` below until then.
             "0xfc98b6ec7f59ea13354bae6171a9120692fb8777",
+            # Cut 2026-09-13 after the 180d risk/trend review.
+            "0x8607a7d180de23645db594d90621d837749408d5",
+            "0x9e8b1e51c642f4c8b87c6ba11c53d516a218afc4",
+            "0x95fde6cf0d305078b7eeac44182a931c169dd947",
         }
         addresses = {wallet.address.lower() for wallet in WalletStore(Path(WALLETS_FILE)).list_wallets()}
         additions = {
