@@ -200,6 +200,24 @@ class SegmentTests(unittest.TestCase):
         self.assertEqual(shadow["label"], "Shadow")
         self.assertIn("largest_loser", shadow["shadowReasons"])
 
+    def test_current_open_loss_is_part_of_largest_loss_gates(self) -> None:
+        common = dict(
+            pnl_7d=10, pnl_30d=30, pnl_180d=100, pnl_all_time=150,
+            sortino_180d=2, calmar_180d=3, adjusted_profit_factor_180d=2.5,
+            episode_count_180d=120, loss_count_180d=25,
+            daily_return_count_180d=179, downside_day_count_180d=25,
+            max_drawdown_pct=6, window_trusted=True,
+            equity_curve_complete=True, equity_curve_verified=True,
+            largest_loser_pct=3, largest_loser_complete=True,
+        )
+        no_elite = build_risk_trend_quality_rank(**common, current_open_loss_pct=7)
+        shadow = build_risk_trend_quality_rank(**common, current_open_loss_pct=40)
+        self.assertEqual(no_elite["label"], "Strong")
+        self.assertFalse(no_elite["eliteEligible"])
+        self.assertEqual(shadow["label"], "Shadow")
+        self.assertEqual(shadow["effectiveLargestLossPct"], 40.0)
+        self.assertIn("current_open_loss", shadow["shadowReasons"])
+
     def test_trade_sortino_and_cashflow_neutral_drawdown_failure_cases(self) -> None:
         self.assertGreater(to_float(trade_sortino_ratio([0.02, 0.01, -0.01], 180)), 0)
         self.assertLess(to_float(trade_sortino_ratio([-0.02, -0.01, 0.005], 180)), 0)
@@ -245,6 +263,28 @@ class SegmentTests(unittest.TestCase):
         self.assertFalse(metrics["equityCurveComplete"])
         self.assertIsNone(metrics["cagrPct"])
         self.assertIsNone(metrics["calmar"])
+
+    def test_intraday_transfer_snapshot_sets_the_correct_post_deposit_denominator(self) -> None:
+        day_ms = 86_400_000
+        pnl = [[day * day_ms, 0.0 if day <= 90 else -100.0] for day in range(181)]
+        account = [[day * day_ms, 100.0 if day <= 90 else 900.0] for day in range(181)]
+        pnl.extend([[90 * day_ms + day_ms // 2, 0.0], [91 * day_ms - 1, -100.0]])
+        account.extend([[90 * day_ms + day_ms // 2, 1000.0], [91 * day_ms - 1, 900.0]])
+        metrics = daily_equity_metrics_180d(pnl, account, 0, 180 * day_ms)
+        self.assertTrue(metrics["equityCurveComplete"])
+        self.assertAlmostEqual(metrics["maxDrawdownPct"], 10.0)
+
+    def test_ambiguous_cashflow_day_returns_unknown_not_zero_drawdown(self) -> None:
+        day_ms = 86_400_000
+        metrics = daily_equity_metrics_180d(
+            [[0, 0.0], [day_ms, -100.0]],
+            [[0, 100.0], [day_ms, 900.0]],
+            0,
+            day_ms,
+        )
+        self.assertEqual(metrics["invalidDayCount"], 1)
+        self.assertIsNone(metrics["maxDrawdownPct"])
+        self.assertEqual(metrics["observedMaxDrawdownPct"], 0.0)
 
     def test_episode_loser_uses_capital_before_episode_and_reports_missing_capital(self) -> None:
         day_ms = 86_400_000
@@ -3035,6 +3075,32 @@ class AlertSummaryTests(unittest.TestCase):
             self.service.wallet_conviction_weight(ordinary, {ordinary["address"]}),
             CONVICTION_WALLET_WEIGHT_MAX,
         )
+
+    def test_shadow_is_a_signal_participation_veto(self) -> None:
+        wallet = {
+            "address": "0x1111111111111111111111111111111111111111",
+            "recentWinRateRank": {
+                "score": 100.0,
+                "convictionWeightScore": 100.0,
+                "convictionWinRateWeight": 1.5,
+                "label": "Shadow",
+            },
+            "recentFills": [{"time": current_time_ms()}],
+        }
+        self.assertEqual(self.service.wallet_conviction_weight(wallet, {wallet["address"]}), 0.0)
+        self.assertFalse(self.service.should_count_wallet_for_conviction(wallet))
+        filtered = self.service.filter_counted_large_positions({
+            "shadow": {
+                "address": wallet["address"], "coin": "BTC",
+                "totalValue": 1_000_000, "convictionWeight": 0.0,
+            },
+            "legacy": {
+                "address": "0x2222222222222222222222222222222222222222",
+                "coin": "ETH", "totalValue": 1_000_000,
+            },
+        })
+        self.assertNotIn("shadow", filtered)
+        self.assertIn("legacy", filtered)
 
     def test_conviction_weight_without_win_rate_key_falls_back_to_score(self) -> None:
         # The deploy-transition case: a rank cached by the previous version -

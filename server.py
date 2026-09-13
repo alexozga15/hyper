@@ -638,6 +638,7 @@ WALLET_CACHED_QUALITY_FIELDS = (
     "downsideDays180d",
     "missingDailyReturns180d",
     "maxDrawdown180dPct",
+    "observedMaxDrawdownPct",
     "largestLoserPct",
     "largestLoserMeasuredEpisodes",
     "largestLoserMissingCapitalEpisodes",
@@ -2041,7 +2042,7 @@ def build_risk_trend_quality_rank(
     loss_count_180d: int,
     daily_return_count_180d: int,
     downside_day_count_180d: int,
-    max_drawdown_pct: float,
+    max_drawdown_pct: float | None,
     window_trusted: bool,
     equity_curve_complete: bool,
     equity_curve_verified: bool = False,
@@ -2058,11 +2059,12 @@ def build_risk_trend_quality_rank(
     score.  A high point estimate cannot override missing observations or a
     measured risk failure.
     """
-    drawdown = max(0.0, to_float(max_drawdown_pct))
+    drawdown_known = max_drawdown_pct is not None
+    drawdown = max(0.0, to_float(max_drawdown_pct)) if drawdown_known else None
     calmar = None if calmar_180d is None else to_float(calmar_180d)
     sortino = None if sortino_180d is None else to_float(sortino_180d)
     adjusted_pf = None if adjusted_profit_factor_180d is None else to_float(adjusted_profit_factor_180d)
-    curve_usable = bool(equity_curve_complete and not drawdown_invalid_days)
+    curve_usable = bool(equity_curve_complete and drawdown_known and not drawdown_invalid_days)
     verified_curve_usable = bool(curve_usable and equity_curve_verified)
     calmar_score = 0.0 if calmar is None else (
         (100.0 if verified_curve_usable else 0.0)
@@ -2107,21 +2109,45 @@ def build_risk_trend_quality_rank(
     risk_trusted = bool(window_trusted if risk_window_trusted is None else risk_window_trusted)
     largest_loser_known = largest_loser_pct is not None
     largest_loser = max(0.0, to_float(largest_loser_pct)) if largest_loser_known else None
+    current_open_loss = max(0.0, to_float(current_open_loss_pct))
+    observed_position_drawdown = (
+        None if max_observed_position_drawdown_pct is None
+        else max(0.0, to_float(max_observed_position_drawdown_pct))
+    )
+    loss_risk_values = [current_open_loss]
+    if largest_loser is not None:
+        loss_risk_values.append(largest_loser)
+    if observed_position_drawdown is not None:
+        loss_risk_values.append(observed_position_drawdown)
+    effective_largest_loss = max(loss_risk_values)
     data_complete = bool(
         curve_usable and equity_curve_verified and risk_trusted and window_trusted
         and largest_loser_known and largest_loser_complete
     )
     shadow_reasons: list[str] = []
-    if drawdown >= SHADOW_MIN_180D_DRAWDOWN_PCT:
+    if drawdown is not None and drawdown >= SHADOW_MIN_180D_DRAWDOWN_PCT:
         shadow_reasons.append("drawdown")
     if largest_loser is not None and largest_loser >= SHADOW_MIN_LARGEST_LOSER_PCT:
         shadow_reasons.append("largest_loser")
+    if current_open_loss >= SHADOW_MIN_LARGEST_LOSER_PCT:
+        shadow_reasons.append("current_open_loss")
+    if (
+        observed_position_drawdown is not None
+        and observed_position_drawdown >= SHADOW_MIN_LARGEST_LOSER_PCT
+    ):
+        shadow_reasons.append("observed_position_drawdown")
     elite_eligible = (
         data_complete
         and sample_gate_passed
+        and drawdown is not None
         and drawdown < ELITE_MAX_180D_DRAWDOWN_PCT
         and largest_loser is not None
         and largest_loser < ELITE_MAX_LARGEST_LOSER_PCT
+        and current_open_loss < ELITE_MAX_LARGEST_LOSER_PCT
+        and (
+            observed_position_drawdown is None
+            or observed_position_drawdown < ELITE_MAX_LARGEST_LOSER_PCT
+        )
         and sortino is not None
         and sortino > 0
         and calmar is not None
@@ -2162,7 +2188,7 @@ def build_risk_trend_quality_rank(
         "sortinoScore": round(sortino_score, 1),
         "calmarScore": round(calmar_score, 1),
         "adjustedProfitFactorScore": round(profit_factor_score_180d, 1),
-        "maxDrawdownPct": round(drawdown, 2),
+        "maxDrawdownPct": None if drawdown is None else round(drawdown, 2),
         "drawdownInvalidDays": int(drawdown_invalid_days),
         "trendScore": trend_points,
         "trendChecks": trend_checks,
@@ -2176,11 +2202,12 @@ def build_risk_trend_quality_rank(
         "equityCurveComplete": bool(equity_curve_complete),
         "equityCurveVerified": bool(equity_curve_verified),
         "largestLoserPct": None if largest_loser is None else round(largest_loser, 2),
+        "effectiveLargestLossPct": round(effective_largest_loss, 2),
         "largestLoserComplete": bool(largest_loser_complete),
-        "currentOpenLossPct": round(max(0.0, to_float(current_open_loss_pct)), 2),
+        "currentOpenLossPct": round(current_open_loss, 2),
         "maxObservedPositionDrawdownPct": (
-            None if max_observed_position_drawdown_pct is None
-            else round(max(0.0, to_float(max_observed_position_drawdown_pct)), 2)
+            None if observed_position_drawdown is None
+            else round(observed_position_drawdown, 2)
         ),
         "shadowReasons": shadow_reasons,
         "windowTrusted": bool(window_trusted),
@@ -2529,8 +2556,8 @@ def daily_equity_metrics_180d(
     cutoff_day = int(cutoff_ms) // day_ms
     end_day = int(end_ms) // day_ms
 
-    def daily_last(points: list[Any]) -> dict[int, tuple[int, float]]:
-        values: dict[int, tuple[int, float]] = {}
+    def timestamp_values(points: list[Any]) -> dict[int, float]:
+        values: dict[int, float] = {}
         for point in points or []:
             if not (isinstance(point, (list, tuple)) and len(point) > 1):
                 continue
@@ -2538,33 +2565,38 @@ def daily_equity_metrics_180d(
             day = timestamp // day_ms
             if day < cutoff_day or day > end_day:
                 continue
-            if day not in values or timestamp >= values[day][0]:
-                values[day] = (timestamp, to_float(point[1]))
+            values[timestamp] = to_float(point[1])
         return values
 
-    pnl_by_day = daily_last(pnl_points)
-    account_by_day = daily_last(account_points)
-    days = sorted(set(pnl_by_day).intersection(account_by_day))
-    returns: list[float] = []
+    pnl_by_time = timestamp_values(pnl_points)
+    account_by_time = timestamp_values(account_points)
+    timestamps = sorted(set(pnl_by_time).intersection(account_by_time))
+    daily_factors: dict[int, float] = {}
     invalid_days = 0
     missing_days = 0
-    equity_index = 1.0
-    peak = 1.0
-    worst_drawdown = 0.0
-    for previous_day, day in zip(days, days[1:]):
+    for previous_time, timestamp in zip(timestamps, timestamps[1:]):
+        previous_day = previous_time // day_ms
+        day = timestamp // day_ms
         gap = day - previous_day
-        if gap != 1:
-            missing_days += max(0, gap - 1)
+        if gap > 1:
+            missing_days += gap - 1
             continue
-        starting_equity = account_by_day[previous_day][1]
+        starting_equity = account_by_time[previous_time]
         if starting_equity <= 0:
             invalid_days += 1
             continue
-        daily_return = (pnl_by_day[day][1] - pnl_by_day[previous_day][1]) / starting_equity
-        if not math.isfinite(daily_return) or daily_return <= -1.0:
+        interval_return = (pnl_by_time[timestamp] - pnl_by_time[previous_time]) / starting_equity
+        if not math.isfinite(interval_return) or interval_return <= -1.0:
             invalid_days += 1
             continue
-        returns.append(daily_return)
+        daily_factors[day] = daily_factors.get(day, 1.0) * (1.0 + interval_return)
+
+    days = sorted(daily_factors)
+    returns = [daily_factors[day] - 1.0 for day in days]
+    equity_index = 1.0
+    peak = 1.0
+    worst_drawdown = 0.0
+    for daily_return in returns:
         equity_index *= 1.0 + daily_return
         peak = max(peak, equity_index)
         worst_drawdown = max(worst_drawdown, (peak - equity_index) / peak)
@@ -2575,14 +2607,14 @@ def daily_equity_metrics_180d(
         observed_days >= RISK_SCORE_MIN_DAILY_RETURNS
         and invalid_days == 0
         and missing_days == 0
-        and days
-        and days[0] <= cutoff_day + 1
-        and days[-1] >= end_day - 1
+        and timestamps
+        and timestamps[0] // day_ms <= cutoff_day + 1
+        and timestamps[-1] // day_ms >= end_day - 1
     )
     sortino: float | None = None
     cagr_pct: float | None = None
     calmar: float | None = None
-    if returns:
+    if returns and invalid_days == 0:
         mean_return = sum(returns) / observed_days
         downside_deviation = math.sqrt(
             sum(min(value, 0.0) ** 2 for value in returns) / observed_days
@@ -2591,11 +2623,11 @@ def daily_equity_metrics_180d(
             sortino = mean_return / downside_deviation
         elif complete:
             sortino = float("inf") if mean_return > 0 else 0.0
-        elapsed_days = max(1, days[-1] - days[0]) if len(days) > 1 else 1
-        # With an internal gap, omitted sub-period returns make CAGR and
-        # Calmar mathematically undefined. Preserve the partial Sortino
-        # estimate, but do not manufacture a growth rate across the gap.
-        if equity_index > 0 and missing_days == 0:
+        elapsed_days = max(1, (timestamps[-1] - timestamps[0]) / day_ms) if len(timestamps) > 1 else 1
+        # CAGR, drawdown and Calmar describe a 180-day path only when the path
+        # is complete. A partial peak/trough is retained below as an explicitly
+        # observed diagnostic, never presented as the 180-day risk metric.
+        if equity_index > 0 and complete:
             cagr_pct = (equity_index ** (365.0 / elapsed_days) - 1.0) * 100.0
             drawdown_pct = worst_drawdown * 100.0
             if drawdown_pct > 0:
@@ -2607,7 +2639,8 @@ def daily_equity_metrics_180d(
         "sortino": sortino,
         "cagrPct": cagr_pct,
         "calmar": calmar,
-        "maxDrawdownPct": worst_drawdown * 100.0,
+        "maxDrawdownPct": worst_drawdown * 100.0 if complete else None,
+        "observedMaxDrawdownPct": worst_drawdown * 100.0,
         "dailyReturnCount": observed_days,
         "downsideDayCount": downside_days,
         "invalidDayCount": invalid_days,
@@ -3920,7 +3953,7 @@ class WalletTrackerService:
             gross_loss_30d=gross_loss_30d,
             hit_rate_90d=win_rate_90d,
             closed_trade_count_90d=closed_trade_count_90d,
-            max_drawdown_pct=to_float(equity_metrics_180d.get("maxDrawdownPct")),
+            max_drawdown_pct=equity_metrics_180d.get("maxDrawdownPct"),
             margin_usage_pct=margin_usage_pct,
             unrealized_pnl=unrealized_pnl,
             window_trusted=wallet_quality_window_trusted(
@@ -4002,7 +4035,13 @@ class WalletTrackerService:
             "dailyReturns180d": int(to_float(equity_metrics_180d.get("dailyReturnCount"))),
             "downsideDays180d": int(to_float(equity_metrics_180d.get("downsideDayCount"))),
             "missingDailyReturns180d": int(to_float(equity_metrics_180d.get("missingDayCount"))),
-            "maxDrawdown180dPct": round(to_float(equity_metrics_180d.get("maxDrawdownPct")), 2),
+            "maxDrawdown180dPct": (
+                None if equity_metrics_180d.get("maxDrawdownPct") is None
+                else round(to_float(equity_metrics_180d.get("maxDrawdownPct")), 2)
+            ),
+            "observedMaxDrawdownPct": round(
+                to_float(equity_metrics_180d.get("observedMaxDrawdownPct")), 2
+            ),
             "largestLoserPct": loss_metrics_180d.get("largestLoserPct"),
             "largestLoserMeasuredEpisodes": loss_metrics_180d.get("largestLoserMeasuredEpisodes"),
             "largestLoserMissingCapitalEpisodes": loss_metrics_180d.get("largestLoserMissingCapitalEpisodes"),
@@ -4930,6 +4969,11 @@ class WalletTrackerService:
         coin: str | None = None,
     ) -> float:
         rank = wallet.get("recentWinRateRank")
+        # Shadow is a participation veto, not a cosmetic tier. Returning zero
+        # here also protects every downstream caller that does not run through
+        # should_count_wallet_for_conviction first.
+        if isinstance(rank, dict) and str(rank.get("label") or "").lower() == "shadow":
+            return 0.0
         if not isinstance(rank, dict):
             base_weight = 1.0
         elif not wallet_quality_window_trusted(wallet):
@@ -5144,6 +5188,9 @@ class WalletTrackerService:
         return not self.wallet_has_fills_in_window(wallet, now_ms=now_ms, window_ms=window)
 
     def should_count_wallet_for_conviction(self, wallet: dict[str, Any]) -> bool:
+        rank = wallet.get("recentWinRateRank")
+        if isinstance(rank, dict) and str(rank.get("label") or "").lower() == "shadow":
+            return False
         quality_age_ms = self.wallet_quality_age_ms(wallet)
         if quality_age_ms is not None and quality_age_ms > WALLET_QUALITY_HARD_TTL_MS:
             return False
@@ -6272,6 +6319,8 @@ class WalletTrackerService:
                 current_item = current_map.get(position_key)
                 if not isinstance(current_item, dict):
                     continue
+                if "convictionWeight" in current_item and to_float(current_item.get("convictionWeight")) <= 0:
+                    continue
                 if to_float(current_item.get("totalValue")) < FRESH_WALLET_FLOW_MIN_VALUE:
                     continue
                 fill_price = to_float(fill.get("price"))
@@ -6491,6 +6540,10 @@ class WalletTrackerService:
             if (
                 isinstance(item, dict)
                 and should_count_position(item.get("address"), item.get("coin"))
+                and (
+                    "convictionWeight" not in item
+                    or to_float(item.get("convictionWeight")) > 0
+                )
                 and to_float(item.get("totalValue")) >= large_position_tracking_min_value()
             )
         }
@@ -7350,6 +7403,9 @@ class WalletTrackerService:
         for wallet in dashboard.get("wallets", []):
             address = str(wallet.get("address") or "")
             if not address or not self.wallet_fill_data_reliable(wallet):
+                continue
+            rank = wallet.get("recentWinRateRank")
+            if isinstance(rank, dict) and str(rank.get("label") or "").lower() == "shadow":
                 continue
             for fill in wallet.get("recentFills", []):
                 classified = self.classify_fill_direction(fill.get("direction"))
