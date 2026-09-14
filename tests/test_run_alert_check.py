@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -7,6 +8,36 @@ from scripts import run_alert_check
 
 
 class RunAlertCheckTests(unittest.TestCase):
+    @patch("scripts.run_alert_check.HyperliquidClient")
+    @patch("scripts.run_alert_check.WalletStore")
+    @patch("scripts.run_alert_check.WalletTrackerService")
+    def test_main_defaults_agreement_to_three(self, service_cls, wallet_store_cls, client_cls) -> None:
+        service_cls.return_value.check_alerts.return_value = {"sent": False, "error": ""}
+        with patch.dict(
+            "os.environ",
+            {
+                "ALERTS_ENABLED": "false",
+                "SEND_HOURLY_UPDATE": "false",
+                "SEND_CHANGE_ALERTS": "false",
+                "QUIET_HOURS_ENABLED": "false",
+            },
+            clear=True,
+        ):
+            exit_code = run_alert_check.main()
+
+        self.assertEqual(exit_code, 0)
+        settings = service_cls.return_value.update_alert_settings.call_args.args[0]
+        self.assertEqual(settings["minConsensusWallets"], 3)
+        wallet_store_cls.assert_called_once()
+        client_cls.assert_called_once()
+
+    def test_telegram_workflows_set_agreement_to_three(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        for name in ("hourly-update.yml", "sentiment-alerts.yml", "telegram-commands.yml"):
+            workflow = (root / ".github" / "workflows" / name).read_text(encoding="utf-8")
+            self.assertIn('MIN_CONSENSUS_WALLETS: "3"', workflow)
+            self.assertNotIn('MIN_CONSENSUS_WALLETS: "4"', workflow)
+
     @patch("scripts.run_alert_check.HyperliquidClient")
     @patch("scripts.run_alert_check.WalletStore")
     @patch("scripts.run_alert_check.WalletTrackerService")

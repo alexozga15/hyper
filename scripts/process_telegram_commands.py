@@ -17,6 +17,7 @@ from server import (
     ALERTS_FILE,
     DASHBOARD_SNAPSHOT_FILE,
     DASHBOARD_SNAPSHOT_MAX_AGE_SECONDS,
+    DEFAULT_CONSENSUS_THRESHOLD,
     HyperliquidClient,
     TELEGRAM_STATE_FILE,
     WalletStore,
@@ -418,7 +419,10 @@ def build_moni_cache(service: WalletTrackerService) -> dict[str, Any]:
 def main() -> int:
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     allowed_chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-    min_wallets = max(1, int(os.environ.get("MIN_CONSENSUS_WALLETS", "4")))
+    min_wallets = max(
+        1,
+        int(os.environ.get("MIN_CONSENSUS_WALLETS", str(DEFAULT_CONSENSUS_THRESHOLD))),
+    )
 
     if not bot_token or not allowed_chat_id:
         print("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")

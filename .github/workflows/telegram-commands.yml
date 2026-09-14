@@ -33,6 +33,6 @@ jobs:
           CMM_SIGNAL_MAX_TREND_SEGMENTS_PER_COIN: "2"
           CMM_SIGNAL_MAX_TREND_REQUESTS: "6"
           CMM_SIGNAL_CACHE_TTL_MINUTES: "60"
-          MIN_CONSENSUS_WALLETS: "4"
+          MIN_CONSENSUS_WALLETS: "3"
           TELEGRAM_POLLING_BACKUP: "true"
         run: python3 scripts/process_telegram_commands.py

@@ -11,7 +11,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from server import HyperliquidClient, WalletStore, WalletTrackerService, WALLETS_FILE
+from server import (
+    DEFAULT_CONSENSUS_THRESHOLD,
+    HyperliquidClient,
+    WalletStore,
+    WalletTrackerService,
+    WALLETS_FILE,
+)
 
 
 def env_flag(name: str, default: bool) -> bool:
@@ -48,7 +54,9 @@ def is_quiet_hours(now: datetime | None = None) -> bool:
 
 def main() -> int:
     service = WalletTrackerService(WalletStore(WALLETS_FILE), HyperliquidClient())
-    min_wallets = int(os.environ.get("MIN_CONSENSUS_WALLETS", "4"))
+    min_wallets = int(
+        os.environ.get("MIN_CONSENSUS_WALLETS", str(DEFAULT_CONSENSUS_THRESHOLD))
+    )
     send_hourly_update = env_flag("SEND_HOURLY_UPDATE", False)
     send_change_alerts = env_flag("SEND_CHANGE_ALERTS", not send_hourly_update)
     quiet_hours = is_quiet_hours()
