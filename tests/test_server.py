@@ -1122,6 +1122,12 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertEqual(config["minConsensusWallets"], 3)
         self.assertTrue(config["trackHip3"])
 
+    def test_resolve_alert_config_defaults_agreement_to_three(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            config = self.service.resolve_alert_config({})
+
+        self.assertEqual(config["minConsensusWallets"], 3)
+
     def test_build_summary_message_includes_consensus_and_hip3_sections(self) -> None:
         summary = {
             "generatedAt": "2026-04-09T06:00:00Z",

@@ -14,6 +14,8 @@ services:
         value: /var/data
       - key: ALERT_CHECK_INTERVAL_SECONDS
         value: 900
+      - key: MIN_CONSENSUS_WALLETS
+        value: 3
       # Required for any /api access from outside the container. Without it the
       # server refuses remote API requests with HTTP 503.
       - key: HYPERWATCH_API_TOKEN
