@@ -1852,6 +1852,16 @@ def format_money_compact(value: float) -> str:
     return f"{sign}${absolute:,.0f}"
 
 
+def format_optional_pct(value: Any, digits: int = 1) -> str:
+    """Format a measured percentage without turning unknown into zero."""
+    if value is None or value == "":
+        return "n/a"
+    numeric = to_float(value)
+    if not math.isfinite(numeric):
+        return "n/a"
+    return f"{numeric:.{digits}f}%"
+
+
 def format_update_time(value: Any) -> str:
     raw = str(value or "").strip()
     if not raw:
@@ -2046,6 +2056,7 @@ def build_risk_trend_quality_rank(
     window_trusted: bool,
     equity_curve_complete: bool,
     equity_curve_verified: bool = False,
+    observed_drawdown_pct: float | None = None,
     largest_loser_pct: float | None = None,
     largest_loser_complete: bool = False,
     current_open_loss_pct: float = 0.0,
@@ -2061,6 +2072,9 @@ def build_risk_trend_quality_rank(
     """
     drawdown_known = max_drawdown_pct is not None
     drawdown = max(0.0, to_float(max_drawdown_pct)) if drawdown_known else None
+    observed_drawdown = (
+        None if observed_drawdown_pct is None else max(0.0, to_float(observed_drawdown_pct))
+    )
     calmar = None if calmar_180d is None else to_float(calmar_180d)
     sortino = None if sortino_180d is None else to_float(sortino_180d)
     adjusted_pf = None if adjusted_profit_factor_180d is None else to_float(adjusted_profit_factor_180d)
@@ -2127,6 +2141,10 @@ def build_risk_trend_quality_rank(
     shadow_reasons: list[str] = []
     if drawdown is not None and drawdown >= SHADOW_MIN_180D_DRAWDOWN_PCT:
         shadow_reasons.append("drawdown")
+    elif observed_drawdown is not None and observed_drawdown >= SHADOW_MIN_180D_DRAWDOWN_PCT:
+        # An incomplete tail can widen uncertainty, but it cannot erase a
+        # drawdown already present in the observed prefix.
+        shadow_reasons.append("observed_drawdown")
     if largest_loser is not None and largest_loser >= SHADOW_MIN_LARGEST_LOSER_PCT:
         shadow_reasons.append("largest_loser")
     if current_open_loss >= SHADOW_MIN_LARGEST_LOSER_PCT:
@@ -2189,6 +2207,7 @@ def build_risk_trend_quality_rank(
         "calmarScore": round(calmar_score, 1),
         "adjustedProfitFactorScore": round(profit_factor_score_180d, 1),
         "maxDrawdownPct": None if drawdown is None else round(drawdown, 2),
+        "observedDrawdownPct": None if observed_drawdown is None else round(observed_drawdown, 2),
         "drawdownInvalidDays": int(drawdown_invalid_days),
         "trendScore": trend_points,
         "trendChecks": trend_checks,
@@ -2244,6 +2263,7 @@ def build_wallet_quality_rank(
     downside_day_count_180d: int = 0,
     equity_curve_complete: bool = False,
     equity_curve_verified: bool = False,
+    observed_drawdown_pct: float | None = None,
     largest_loser_pct: float | None = None,
     largest_loser_complete: bool = False,
     current_open_loss_pct: float = 0.0,
@@ -2268,6 +2288,7 @@ def build_wallet_quality_rank(
             window_trusted=window_trusted,
             equity_curve_complete=equity_curve_complete,
             equity_curve_verified=equity_curve_verified,
+            observed_drawdown_pct=observed_drawdown_pct,
             largest_loser_pct=largest_loser_pct,
             largest_loser_complete=largest_loser_complete,
             current_open_loss_pct=current_open_loss_pct,
@@ -2545,9 +2566,10 @@ def daily_equity_metrics_180d(
     """Return 180d metrics from one cash-flow-neutral daily return series.
 
     Hyperliquid's portfolio PnL series is mark-to-market and adjusted for
-    deposits and withdrawals.  Dividing each consecutive daily PnL change by
-    the preceding account value therefore preserves trading returns while an
-    external cash flow changes only the next day's denominator.
+    deposits and withdrawals. Each interval reconciles its ending account
+    value against that PnL change to infer post-flow capital; this prevents a
+    deposit between two retained snapshots from being treated as leverage on
+    the old, much smaller balance.
 
     Sparse days are not interpolated.  Inventing intermediate daily returns
     would make Sortino look more stable than the observations support.
@@ -2581,11 +2603,17 @@ def daily_equity_metrics_180d(
         if gap > 1:
             missing_days += gap - 1
             continue
-        starting_equity = account_by_time[previous_time]
-        if starting_equity <= 0:
+        pnl_change = pnl_by_time[timestamp] - pnl_by_time[previous_time]
+        # Reconcile the account endpoints with cash-flow-adjusted PnL:
+        #   ending equity = starting equity + external flow + trading PnL
+        # therefore ending equity - trading PnL is the capital available after
+        # the interval's net flow. This also handles a deposit between two
+        # snapshots when no separate post-deposit point was retained.
+        flow_adjusted_equity = account_by_time[timestamp] - pnl_change
+        if flow_adjusted_equity <= 0:
             invalid_days += 1
             continue
-        interval_return = (pnl_by_time[timestamp] - pnl_by_time[previous_time]) / starting_equity
+        interval_return = pnl_change / flow_adjusted_equity
         if not math.isfinite(interval_return) or interval_return <= -1.0:
             invalid_days += 1
             continue
@@ -3973,6 +4001,7 @@ class WalletTrackerService:
             daily_return_count_180d=int(to_float(equity_metrics_180d.get("dailyReturnCount"))),
             downside_day_count_180d=int(to_float(equity_metrics_180d.get("downsideDayCount"))),
             equity_curve_complete=bool(equity_metrics_180d.get("equityCurveComplete")),
+            observed_drawdown_pct=equity_metrics_180d.get("observedMaxDrawdownPct"),
             largest_loser_pct=loss_metrics_180d.get("largestLoserPct"),
             largest_loser_complete=int(to_float(loss_metrics_180d.get("largestLoserMissingCapitalEpisodes"))) == 0,
             current_open_loss_pct=current_open_loss_pct,
@@ -10415,7 +10444,7 @@ class WalletTrackerService:
                     f'{rank.get("label", "Unranked")} '
                     f'({to_float(rank.get("winRate")):.1f}% 7D WR, {int(rank.get("sampleSize") or 0)} 7D closes, '
                     f'{int(rank.get("sampleSize30d") or 0)} 30D closes, 30D PnL ${to_float(rank.get("pnl30d")):,.0f}, '
-                    f'PF {rank.get("profitFactor", 0)}, DD {to_float(rank.get("maxDrawdownPct")):.1f}%, '
+                    f'PF {rank.get("profitFactor", 0)}, DD {format_optional_pct(rank.get("maxDrawdownPct"))}, '
                     f'score {to_float(rank.get("score")):.1f}/100)'
                 )
         else:
@@ -10463,7 +10492,7 @@ class WalletTrackerService:
                 f'{wallet_label(wallet.get("alias", ""), wallet.get("address", ""))} '
                 f'({to_float(rank.get("score")):.1f}/100, {to_float(rank.get("winRate")):.1f}% 7D WR, '
                 f'{int(rank.get("sampleSize30d") or 0)} 30D closes, PF {rank.get("profitFactor", 0)}, '
-                f'DD {to_float(rank.get("maxDrawdownPct")):.1f}%)'
+                f'DD {format_optional_pct(rank.get("maxDrawdownPct"))})'
             )
             if not positions:
                 lines.append("- No open pos")

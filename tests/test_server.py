@@ -264,6 +264,28 @@ class SegmentTests(unittest.TestCase):
         self.assertIsNone(metrics["cagrPct"])
         self.assertIsNone(metrics["calmar"])
 
+    def test_observed_drawdown_breach_survives_a_later_history_gap(self) -> None:
+        day_ms = 86_400_000
+        pnl = [[day * day_ms, 0.0 if day == 0 else -60.0] for day in range(181) if day != 90]
+        account = [[day * day_ms, 100.0 if day == 0 else 40.0] for day in range(181) if day != 90]
+        metrics = daily_equity_metrics_180d(pnl, account, 0, 180 * day_ms)
+        self.assertFalse(metrics["equityCurveComplete"])
+        self.assertIsNone(metrics["maxDrawdownPct"])
+        self.assertAlmostEqual(metrics["observedMaxDrawdownPct"], 60.0)
+        rank = build_risk_trend_quality_rank(
+            pnl_7d=10, pnl_30d=30, pnl_180d=100, pnl_all_time=150,
+            sortino_180d=2, calmar_180d=None, adjusted_profit_factor_180d=2.5,
+            episode_count_180d=120, loss_count_180d=25,
+            daily_return_count_180d=metrics["dailyReturnCount"],
+            downside_day_count_180d=metrics["downsideDayCount"],
+            max_drawdown_pct=metrics["maxDrawdownPct"],
+            observed_drawdown_pct=metrics["observedMaxDrawdownPct"],
+            window_trusted=True, equity_curve_complete=False,
+            largest_loser_pct=3, largest_loser_complete=True,
+        )
+        self.assertEqual(rank["label"], "Shadow")
+        self.assertIn("observed_drawdown", rank["shadowReasons"])
+
     def test_intraday_transfer_snapshot_sets_the_correct_post_deposit_denominator(self) -> None:
         day_ms = 86_400_000
         pnl = [[day * day_ms, 0.0 if day <= 90 else -100.0] for day in range(181)]
@@ -274,11 +296,19 @@ class SegmentTests(unittest.TestCase):
         self.assertTrue(metrics["equityCurveComplete"])
         self.assertAlmostEqual(metrics["maxDrawdownPct"], 10.0)
 
-    def test_ambiguous_cashflow_day_returns_unknown_not_zero_drawdown(self) -> None:
+    def test_deposit_between_snapshots_is_inferred_from_account_and_pnl_endpoints(self) -> None:
+        day_ms = 86_400_000
+        pnl = [[day * day_ms, 0.0 if day < 90 else -10.0] for day in range(181)]
+        account = [[day * day_ms, 100.0 if day < 90 else 990.0] for day in range(181)]
+        metrics = daily_equity_metrics_180d(pnl, account, 0, 180 * day_ms)
+        self.assertTrue(metrics["equityCurveComplete"])
+        self.assertAlmostEqual(metrics["maxDrawdownPct"], 1.0)
+
+    def test_unreconcilable_cashflow_interval_returns_unknown_not_zero_drawdown(self) -> None:
         day_ms = 86_400_000
         metrics = daily_equity_metrics_180d(
-            [[0, 0.0], [day_ms, -100.0]],
-            [[0, 100.0], [day_ms, 900.0]],
+            [[0, 0.0], [day_ms, 100.0]],
+            [[0, 100.0], [day_ms, 50.0]],
             0,
             day_ms,
         )
@@ -5586,6 +5616,20 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertIn("1. Consistent Winner 0x2222222222222222222222222222222222222222: Strong", message)
         self.assertIn("2. High WR Losing 0x3333333333333333333333333333333333333333: Cold", message)
         self.assertNotIn("Lucky Small Sample", message)
+
+    def test_wallet_rankings_message_shows_unknown_drawdown_as_na(self) -> None:
+        dashboard = {
+            "wallets": [{
+                "address": "0x1111111111111111111111111111111111111111",
+                "recentWinRateRank": {
+                    "label": "Weak", "score": 40.0,
+                    "maxDrawdownPct": None,
+                },
+            }],
+        }
+        message = self.service.build_wallet_rankings_message(dashboard)
+        self.assertIn("DD n/a", message)
+        self.assertNotIn("DD 0.0%", message)
 
     def test_build_elite_wallet_positions_message_lists_only_elite_wallet_positions(self) -> None:
         dashboard = {
