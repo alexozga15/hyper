@@ -436,7 +436,7 @@ function renderWalletDetails() {
       <div><span>180D Sortino</span><strong>${wallet.sortino180d == null ? "n/a" : (wallet.sortino180d === "inf" ? "∞" : Number(wallet.sortino180d).toFixed(2))} / ${wallet.dailyReturns180d || 0} daily returns</strong></div>
       <div><span>180D Calmar</span><strong>${wallet.calmar180d == null ? "n/a" : (wallet.calmar180d === "inf" ? "∞" : Number(wallet.calmar180d).toFixed(2))}</strong></div>
       <div><span>180D Adjusted PF</span><strong>${wallet.adjustedProfitFactor180d == null ? "n/a" : (wallet.adjustedProfitFactor180d === "inf" ? "∞" : Number(wallet.adjustedProfitFactor180d).toFixed(2))}</strong></div>
-      <div><span>180D Drawdown</span><strong>${wallet.maxDrawdown180dPct == null ? "n/a" : `${Number(wallet.maxDrawdown180dPct).toFixed(2)}%`}</strong></div>
+      <div><span>180D Drawdown</span><strong>${wallet.maxDrawdown180dPct == null ? (wallet.maxDrawdownUpperBoundPct == null ? "n/a" : `n/a · risk bound ${Number(wallet.maxDrawdownUpperBoundPct).toFixed(2)}%`) : `${Number(wallet.maxDrawdown180dPct).toFixed(2)}%`}</strong></div>
       <div><span>Largest loser</span><strong>${wallet.largestLoserPct == null ? "n/a" : `${Number(wallet.largestLoserPct).toFixed(2)}%`}</strong></div>
       <div><span>Current open loss</span><strong>${Number(wallet.currentOpenLossPct || 0).toFixed(2)}%</strong></div>
       <div><span>Positive Trend</span><strong>${wallet.recentWinRateRank?.positiveTrend ? "Yes" : "No"}</strong></div>

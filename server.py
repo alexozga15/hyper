@@ -639,6 +639,8 @@ WALLET_CACHED_QUALITY_FIELDS = (
     "missingDailyReturns180d",
     "maxDrawdown180dPct",
     "observedMaxDrawdownPct",
+    "maxDrawdownUpperBoundPct",
+    "cashflowAmbiguousIntervals",
     "largestLoserPct",
     "largestLoserMeasuredEpisodes",
     "largestLoserMissingCapitalEpisodes",
@@ -1862,6 +1864,15 @@ def format_optional_pct(value: Any, digits: int = 1) -> str:
     return f"{numeric:.{digits}f}%"
 
 
+def format_drawdown_pct(value: Any, upper_bound: Any = None, digits: int = 1) -> str:
+    """Show an exact drawdown, or disclose the conservative risk bound."""
+    exact = format_optional_pct(value, digits)
+    if exact != "n/a":
+        return exact
+    bound = format_optional_pct(upper_bound, digits)
+    return "n/a" if bound == "n/a" else f"n/a (risk bound {bound})"
+
+
 def format_update_time(value: Any) -> str:
     raw = str(value or "").strip()
     if not raw:
@@ -2057,12 +2068,14 @@ def build_risk_trend_quality_rank(
     equity_curve_complete: bool,
     equity_curve_verified: bool = False,
     observed_drawdown_pct: float | None = None,
+    drawdown_upper_bound_pct: float | None = None,
     largest_loser_pct: float | None = None,
     largest_loser_complete: bool = False,
     current_open_loss_pct: float = 0.0,
     max_observed_position_drawdown_pct: float | None = None,
     risk_window_trusted: bool | None = None,
     drawdown_invalid_days: int = 0,
+    cashflow_ambiguous_intervals: int = 0,
 ) -> dict[str, Any]:
     """V1 wallet score: Calmar/Sortino/adjusted-PF/trend = 35/25/20/20.
 
@@ -2074,6 +2087,10 @@ def build_risk_trend_quality_rank(
     drawdown = max(0.0, to_float(max_drawdown_pct)) if drawdown_known else None
     observed_drawdown = (
         None if observed_drawdown_pct is None else max(0.0, to_float(observed_drawdown_pct))
+    )
+    drawdown_upper_bound = (
+        None if drawdown_upper_bound_pct is None
+        else max(0.0, to_float(drawdown_upper_bound_pct))
     )
     calmar = None if calmar_180d is None else to_float(calmar_180d)
     sortino = None if sortino_180d is None else to_float(sortino_180d)
@@ -2145,6 +2162,11 @@ def build_risk_trend_quality_rank(
         # An incomplete tail can widen uncertainty, but it cannot erase a
         # drawdown already present in the observed prefix.
         shadow_reasons.append("observed_drawdown")
+    elif (
+        drawdown_upper_bound is not None
+        and drawdown_upper_bound >= SHADOW_MIN_180D_DRAWDOWN_PCT
+    ):
+        shadow_reasons.append("drawdown_upper_bound")
     if largest_loser is not None and largest_loser >= SHADOW_MIN_LARGEST_LOSER_PCT:
         shadow_reasons.append("largest_loser")
     if current_open_loss >= SHADOW_MIN_LARGEST_LOSER_PCT:
@@ -2208,7 +2230,11 @@ def build_risk_trend_quality_rank(
         "adjustedProfitFactorScore": round(profit_factor_score_180d, 1),
         "maxDrawdownPct": None if drawdown is None else round(drawdown, 2),
         "observedDrawdownPct": None if observed_drawdown is None else round(observed_drawdown, 2),
+        "drawdownUpperBoundPct": (
+            None if drawdown_upper_bound is None else round(drawdown_upper_bound, 2)
+        ),
         "drawdownInvalidDays": int(drawdown_invalid_days),
+        "cashflowAmbiguousIntervals": max(0, int(to_float(cashflow_ambiguous_intervals))),
         "trendScore": trend_points,
         "trendChecks": trend_checks,
         "positiveTrend": full_positive_trend,
@@ -2264,11 +2290,13 @@ def build_wallet_quality_rank(
     equity_curve_complete: bool = False,
     equity_curve_verified: bool = False,
     observed_drawdown_pct: float | None = None,
+    drawdown_upper_bound_pct: float | None = None,
     largest_loser_pct: float | None = None,
     largest_loser_complete: bool = False,
     current_open_loss_pct: float = 0.0,
     max_observed_position_drawdown_pct: float | None = None,
     drawdown_invalid_days: int = 0,
+    cashflow_ambiguous_intervals: int = 0,
     risk_window_trusted: bool | None = None,
 ) -> dict[str, Any]:
     if pnl_180d is not None and pnl_all_time is not None:
@@ -2289,12 +2317,14 @@ def build_wallet_quality_rank(
             equity_curve_complete=equity_curve_complete,
             equity_curve_verified=equity_curve_verified,
             observed_drawdown_pct=observed_drawdown_pct,
+            drawdown_upper_bound_pct=drawdown_upper_bound_pct,
             largest_loser_pct=largest_loser_pct,
             largest_loser_complete=largest_loser_complete,
             current_open_loss_pct=current_open_loss_pct,
             max_observed_position_drawdown_pct=max_observed_position_drawdown_pct,
             risk_window_trusted=risk_window_trusted,
             drawdown_invalid_days=drawdown_invalid_days,
+            cashflow_ambiguous_intervals=cashflow_ambiguous_intervals,
         )
     normalized_hit_rate = max(0.0, min(to_float(hit_rate), 100.0))
     sample_size_7d = max(0, int(to_float(closed_trade_count)))
@@ -2563,15 +2593,15 @@ def daily_equity_metrics_180d(
     cutoff_ms: int,
     end_ms: int,
 ) -> dict[str, Any]:
-    """Return 180d metrics from one cash-flow-neutral daily return series.
+    """Return 180d metrics from a cash-flow-neutral daily return series.
 
-    Hyperliquid's portfolio PnL series is mark-to-market and adjusted for
-    deposits and withdrawals. Each interval reconciles its ending account
-    value against that PnL change to infer post-flow capital; this prevents a
-    deposit between two retained snapshots from being treated as leverage on
-    the old, much smaller balance.
+    A flow and trading PnL between the same two snapshots have no identifiable
+    order. Such an interval is excluded from the exact curve and makes the
+    assessment preliminary. A second curve applies the worse of the two
+    possible endpoint orderings so confirmed cash-flow-order risk can still
+    trigger a gate. A separate snapshot after the flow removes the ambiguity.
 
-    Sparse days are not interpolated.  Inventing intermediate daily returns
+    Sparse days are not interpolated. Inventing intermediate daily returns
     would make Sortino look more stable than the observations support.
     """
     day_ms = 24 * 60 * 60 * 1000
@@ -2594,8 +2624,15 @@ def daily_equity_metrics_180d(
     account_by_time = timestamp_values(account_points)
     timestamps = sorted(set(pnl_by_time).intersection(account_by_time))
     daily_factors: dict[int, float] = {}
+    risk_daily_factors: dict[int, float] = {}
     invalid_days = 0
     missing_days = 0
+    cashflow_ambiguous_intervals = 0
+    cashflow_bound_valid = True
+
+    def add_factor(bucket: dict[int, float], day: int, interval_return: float) -> None:
+        bucket[day] = bucket.get(day, 1.0) * (1.0 + interval_return)
+
     for previous_time, timestamp in zip(timestamps, timestamps[1:]):
         previous_day = previous_time // day_ms
         day = timestamp // day_ms
@@ -2603,31 +2640,74 @@ def daily_equity_metrics_180d(
         if gap > 1:
             missing_days += gap - 1
             continue
+        starting_equity = account_by_time[previous_time]
+        ending_equity = account_by_time[timestamp]
         pnl_change = pnl_by_time[timestamp] - pnl_by_time[previous_time]
-        # Reconcile the account endpoints with cash-flow-adjusted PnL:
-        #   ending equity = starting equity + external flow + trading PnL
-        # therefore ending equity - trading PnL is the capital available after
-        # the interval's net flow. This also handles a deposit between two
-        # snapshots when no separate post-deposit point was retained.
-        flow_adjusted_equity = account_by_time[timestamp] - pnl_change
-        if flow_adjusted_equity <= 0:
+        inferred_flow = ending_equity - starting_equity - pnl_change
+        tolerance = max(
+            1e-8,
+            max(abs(starting_equity), abs(ending_equity), abs(pnl_change), 1.0) * 1e-8,
+        )
+        has_flow = abs(inferred_flow) > tolerance
+        has_pnl = abs(pnl_change) > tolerance
+
+        if has_flow and has_pnl:
+            # Endpoints alone cannot distinguish flow→PnL from PnL→flow.
+            # Preserve that uncertainty in the exact metrics. For the risk
+            # gate, use the smaller positive capital base, which produces the
+            # worse loss (and the higher possible pre-loss peak).
+            cashflow_ambiguous_intervals += 1
             invalid_days += 1
+            possible_capital = [
+                value
+                for value in (starting_equity, starting_equity + inferred_flow)
+                if value > tolerance
+            ]
+            if possible_capital:
+                risk_return = pnl_change / min(possible_capital)
+                if math.isfinite(risk_return):
+                    add_factor(risk_daily_factors, day, max(-1.0, risk_return))
+                else:
+                    cashflow_bound_valid = False
+            else:
+                cashflow_bound_valid = False
             continue
-        interval_return = pnl_change / flow_adjusted_equity
-        if not math.isfinite(interval_return) or interval_return <= -1.0:
-            invalid_days += 1
-            continue
-        daily_factors[day] = daily_factors.get(day, 1.0) * (1.0 + interval_return)
+
+        if not has_pnl:
+            # A flow-only interval has a zero time-weighted return regardless
+            # of whether the retained point is immediately before or after it.
+            if starting_equity <= tolerance and ending_equity <= tolerance:
+                invalid_days += 1
+                continue
+            interval_return = 0.0
+        else:
+            # No material flow: PnL was earned on the starting capital.
+            if starting_equity <= tolerance:
+                invalid_days += 1
+                continue
+            interval_return = pnl_change / starting_equity
+            if not math.isfinite(interval_return) or interval_return <= -1.0:
+                invalid_days += 1
+                continue
+        add_factor(daily_factors, day, interval_return)
+        add_factor(risk_daily_factors, day, interval_return)
 
     days = sorted(daily_factors)
     returns = [daily_factors[day] - 1.0 for day in days]
-    equity_index = 1.0
-    peak = 1.0
-    worst_drawdown = 0.0
-    for daily_return in returns:
-        equity_index *= 1.0 + daily_return
-        peak = max(peak, equity_index)
-        worst_drawdown = max(worst_drawdown, (peak - equity_index) / peak)
+
+    def compounded_path(values: list[float]) -> tuple[float, float]:
+        equity_index = 1.0
+        peak = 1.0
+        worst_drawdown = 0.0
+        for daily_return in values:
+            equity_index *= 1.0 + daily_return
+            peak = max(peak, equity_index)
+            worst_drawdown = max(worst_drawdown, (peak - equity_index) / peak)
+        return equity_index, worst_drawdown
+
+    equity_index, worst_drawdown = compounded_path(returns)
+    risk_returns = [risk_daily_factors[day] - 1.0 for day in sorted(risk_daily_factors)]
+    _, worst_drawdown_upper_bound = compounded_path(risk_returns)
 
     observed_days = len(returns)
     downside_days = sum(1 for value in returns if value < 0)
@@ -2669,10 +2749,16 @@ def daily_equity_metrics_180d(
         "calmar": calmar,
         "maxDrawdownPct": worst_drawdown * 100.0 if complete else None,
         "observedMaxDrawdownPct": worst_drawdown * 100.0,
+        "maxDrawdownUpperBoundPct": (
+            worst_drawdown_upper_bound * 100.0
+            if cashflow_ambiguous_intervals and cashflow_bound_valid
+            else None
+        ),
         "dailyReturnCount": observed_days,
         "downsideDayCount": downside_days,
         "invalidDayCount": invalid_days,
         "missingDayCount": missing_days,
+        "cashflowAmbiguousIntervals": cashflow_ambiguous_intervals,
         "equityCurveComplete": complete,
     }
 
@@ -4002,6 +4088,7 @@ class WalletTrackerService:
             downside_day_count_180d=int(to_float(equity_metrics_180d.get("downsideDayCount"))),
             equity_curve_complete=bool(equity_metrics_180d.get("equityCurveComplete")),
             observed_drawdown_pct=equity_metrics_180d.get("observedMaxDrawdownPct"),
+            drawdown_upper_bound_pct=equity_metrics_180d.get("maxDrawdownUpperBoundPct"),
             largest_loser_pct=loss_metrics_180d.get("largestLoserPct"),
             largest_loser_complete=int(to_float(loss_metrics_180d.get("largestLoserMissingCapitalEpisodes"))) == 0,
             current_open_loss_pct=current_open_loss_pct,
@@ -4009,6 +4096,9 @@ class WalletTrackerService:
             # this distinct and unknown rather than relabelling current uPnL.
             max_observed_position_drawdown_pct=None,
             drawdown_invalid_days=int(to_float(equity_metrics_180d.get("invalidDayCount"))),
+            cashflow_ambiguous_intervals=int(
+                to_float(equity_metrics_180d.get("cashflowAmbiguousIntervals"))
+            ),
         )
         if wallet.address.lower() in ELITE_WALLET_OVERRIDES:
             # Overrides may break ties inside the eligible cohort, never bypass
@@ -4070,6 +4160,14 @@ class WalletTrackerService:
             ),
             "observedMaxDrawdownPct": round(
                 to_float(equity_metrics_180d.get("observedMaxDrawdownPct")), 2
+            ),
+            "maxDrawdownUpperBoundPct": (
+                None
+                if equity_metrics_180d.get("maxDrawdownUpperBoundPct") is None
+                else round(to_float(equity_metrics_180d.get("maxDrawdownUpperBoundPct")), 2)
+            ),
+            "cashflowAmbiguousIntervals": int(
+                to_float(equity_metrics_180d.get("cashflowAmbiguousIntervals"))
             ),
             "largestLoserPct": loss_metrics_180d.get("largestLoserPct"),
             "largestLoserMeasuredEpisodes": loss_metrics_180d.get("largestLoserMeasuredEpisodes"),
@@ -10444,7 +10542,8 @@ class WalletTrackerService:
                     f'{rank.get("label", "Unranked")} '
                     f'({to_float(rank.get("winRate")):.1f}% 7D WR, {int(rank.get("sampleSize") or 0)} 7D closes, '
                     f'{int(rank.get("sampleSize30d") or 0)} 30D closes, 30D PnL ${to_float(rank.get("pnl30d")):,.0f}, '
-                    f'PF {rank.get("profitFactor", 0)}, DD {format_optional_pct(rank.get("maxDrawdownPct"))}, '
+                    f'PF {rank.get("profitFactor", 0)}, DD '
+                    f'{format_drawdown_pct(rank.get("maxDrawdownPct"), rank.get("drawdownUpperBoundPct"))}, '
                     f'score {to_float(rank.get("score")):.1f}/100)'
                 )
         else:
@@ -10492,7 +10591,7 @@ class WalletTrackerService:
                 f'{wallet_label(wallet.get("alias", ""), wallet.get("address", ""))} '
                 f'({to_float(rank.get("score")):.1f}/100, {to_float(rank.get("winRate")):.1f}% 7D WR, '
                 f'{int(rank.get("sampleSize30d") or 0)} 30D closes, PF {rank.get("profitFactor", 0)}, '
-                f'DD {format_optional_pct(rank.get("maxDrawdownPct"))})'
+                f'DD {format_drawdown_pct(rank.get("maxDrawdownPct"), rank.get("drawdownUpperBoundPct"))})'
             )
             if not positions:
                 lines.append("- No open pos")

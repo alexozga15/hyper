@@ -245,6 +245,8 @@ class SegmentTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["sortino"], expected_sortino)
         self.assertEqual(metrics["dailyReturnCount"], 180)
         self.assertEqual(metrics["downsideDayCount"], 18)
+        self.assertIsNone(metrics["maxDrawdownUpperBoundPct"])
+        self.assertEqual(metrics["cashflowAmbiguousIntervals"], 0)
         self.assertTrue(metrics["equityCurveComplete"])
 
     def test_incomplete_curve_with_zero_downside_does_not_get_infinite_sortino(self) -> None:
@@ -296,13 +298,45 @@ class SegmentTests(unittest.TestCase):
         self.assertTrue(metrics["equityCurveComplete"])
         self.assertAlmostEqual(metrics["maxDrawdownPct"], 10.0)
 
-    def test_deposit_between_snapshots_is_inferred_from_account_and_pnl_endpoints(self) -> None:
+    def test_cashflow_and_loss_between_snapshots_is_preliminary_with_risk_bound(self) -> None:
+        day_ms = 86_400_000
+        # The same endpoints permit both loss→deposit (60% DD) and
+        # deposit→loss (6% DD). Without another timestamp neither is exact.
+        pnl = [[day * day_ms, 0.0 if day < 90 else -60.0] for day in range(181)]
+        account = [[day * day_ms, 100.0 if day < 90 else 940.0] for day in range(181)]
+        metrics = daily_equity_metrics_180d(pnl, account, 0, 180 * day_ms)
+        self.assertFalse(metrics["equityCurveComplete"])
+        self.assertIsNone(metrics["maxDrawdownPct"])
+        self.assertEqual(metrics["cashflowAmbiguousIntervals"], 1)
+        self.assertAlmostEqual(metrics["maxDrawdownUpperBoundPct"], 60.0)
+
+        rank = build_risk_trend_quality_rank(
+            pnl_7d=10, pnl_30d=30, pnl_180d=100, pnl_all_time=150,
+            sortino_180d=None, calmar_180d=None, adjusted_profit_factor_180d=2.5,
+            episode_count_180d=120, loss_count_180d=25,
+            daily_return_count_180d=metrics["dailyReturnCount"],
+            downside_day_count_180d=metrics["downsideDayCount"],
+            max_drawdown_pct=metrics["maxDrawdownPct"],
+            observed_drawdown_pct=metrics["observedMaxDrawdownPct"],
+            drawdown_upper_bound_pct=metrics["maxDrawdownUpperBoundPct"],
+            window_trusted=True, equity_curve_complete=False,
+            largest_loser_pct=3, largest_loser_complete=True,
+            cashflow_ambiguous_intervals=metrics["cashflowAmbiguousIntervals"],
+        )
+        self.assertEqual(rank["label"], "Shadow")
+        self.assertEqual(rank["assessmentStatus"], "Preliminary")
+        self.assertIn("drawdown_upper_bound", rank["shadowReasons"])
+        self.assertEqual(rank["cashflowAmbiguousIntervals"], 1)
+
+    def test_ambiguous_deposit_and_small_loss_does_not_claim_exact_one_percent_drawdown(self) -> None:
         day_ms = 86_400_000
         pnl = [[day * day_ms, 0.0 if day < 90 else -10.0] for day in range(181)]
         account = [[day * day_ms, 100.0 if day < 90 else 990.0] for day in range(181)]
         metrics = daily_equity_metrics_180d(pnl, account, 0, 180 * day_ms)
-        self.assertTrue(metrics["equityCurveComplete"])
-        self.assertAlmostEqual(metrics["maxDrawdownPct"], 1.0)
+        self.assertFalse(metrics["equityCurveComplete"])
+        self.assertIsNone(metrics["maxDrawdownPct"])
+        self.assertEqual(metrics["cashflowAmbiguousIntervals"], 1)
+        self.assertAlmostEqual(metrics["maxDrawdownUpperBoundPct"], 10.0)
 
     def test_unreconcilable_cashflow_interval_returns_unknown_not_zero_drawdown(self) -> None:
         day_ms = 86_400_000
@@ -5629,6 +5663,21 @@ class AlertSummaryTests(unittest.TestCase):
         }
         message = self.service.build_wallet_rankings_message(dashboard)
         self.assertIn("DD n/a", message)
+        self.assertNotIn("DD 0.0%", message)
+
+    def test_wallet_rankings_message_discloses_drawdown_risk_bound(self) -> None:
+        dashboard = {
+            "wallets": [{
+                "address": "0x1111111111111111111111111111111111111111",
+                "recentWinRateRank": {
+                    "label": "Shadow", "score": 40.0,
+                    "maxDrawdownPct": None,
+                    "drawdownUpperBoundPct": 60.0,
+                },
+            }],
+        }
+        message = self.service.build_wallet_rankings_message(dashboard)
+        self.assertIn("DD n/a (risk bound 60.0%)", message)
         self.assertNotIn("DD 0.0%", message)
 
     def test_build_elite_wallet_positions_message_lists_only_elite_wallet_positions(self) -> None:
