@@ -338,6 +338,77 @@ class SegmentTests(unittest.TestCase):
         self.assertEqual(metrics["cashflowAmbiguousIntervals"], 1)
         self.assertAlmostEqual(metrics["maxDrawdownUpperBoundPct"], 10.0)
 
+    def test_confirmed_total_loss_is_preserved_across_later_recapitalization(self) -> None:
+        day_ms = 86_400_000
+        pnl = []
+        account = []
+        for day in range(181):
+            pnl.append([day * day_ms, 0.0 if day < 90 else -100.0])
+            account.append([
+                day * day_ms,
+                100.0 if day < 90 else (0.0 if day == 90 else 1000.0),
+            ])
+        metrics = daily_equity_metrics_180d(pnl, account, 0, 180 * day_ms)
+        self.assertTrue(metrics["equityCurveComplete"])
+        self.assertAlmostEqual(metrics["maxDrawdownPct"], 100.0)
+        self.assertAlmostEqual(metrics["observedMaxDrawdownPct"], 100.0)
+        self.assertAlmostEqual(metrics["cagrPct"], -100.0)
+
+        rank = build_risk_trend_quality_rank(
+            pnl_7d=10, pnl_30d=30, pnl_180d=100, pnl_all_time=150,
+            sortino_180d=metrics["sortino"], calmar_180d=metrics["calmar"],
+            adjusted_profit_factor_180d=2.5,
+            episode_count_180d=120, loss_count_180d=25,
+            daily_return_count_180d=metrics["dailyReturnCount"],
+            downside_day_count_180d=metrics["downsideDayCount"],
+            max_drawdown_pct=metrics["maxDrawdownPct"],
+            observed_drawdown_pct=metrics["observedMaxDrawdownPct"],
+            window_trusted=True, equity_curve_complete=True,
+            largest_loser_pct=3, largest_loser_complete=True,
+        )
+        self.assertEqual(rank["label"], "Shadow")
+        self.assertIn("drawdown", rank["shadowReasons"])
+
+    def test_cashflow_order_bound_uses_lower_return_path_and_observed_segments(self) -> None:
+        day_ms = 86_400_000
+        pnl = []
+        account = []
+        for day in range(181):
+            if day < 89:
+                pnl_value, account_value = 0.0, 100.0
+            elif day == 89:
+                pnl_value, account_value = -45.0, 55.0
+            elif day == 90:
+                # +100 flow and +10 PnL share one interval. The lower possible
+                # gain is 10/155, not 10/55.
+                pnl_value, account_value = -35.0, 165.0
+            else:
+                pnl_value, account_value = -65.0, 135.0
+            pnl.append([day * day_ms, pnl_value])
+            account.append([day * day_ms, account_value])
+
+        metrics = daily_equity_metrics_180d(pnl, account, 0, 180 * day_ms)
+        expected_drawdown = (1.0 - 0.55 * (1.0 + 10.0 / 155.0) * (1.0 - 30.0 / 165.0)) * 100.0
+        self.assertFalse(metrics["equityCurveComplete"])
+        self.assertIsNone(metrics["maxDrawdownPct"])
+        self.assertAlmostEqual(metrics["maxDrawdownUpperBoundPct"], expected_drawdown)
+        self.assertAlmostEqual(metrics["observedMaxDrawdownPct"], 45.0)
+
+        rank = build_risk_trend_quality_rank(
+            pnl_7d=10, pnl_30d=30, pnl_180d=100, pnl_all_time=150,
+            sortino_180d=None, calmar_180d=None, adjusted_profit_factor_180d=2.5,
+            episode_count_180d=120, loss_count_180d=25,
+            daily_return_count_180d=metrics["dailyReturnCount"],
+            downside_day_count_180d=metrics["downsideDayCount"],
+            max_drawdown_pct=metrics["maxDrawdownPct"],
+            observed_drawdown_pct=metrics["observedMaxDrawdownPct"],
+            drawdown_upper_bound_pct=metrics["maxDrawdownUpperBoundPct"],
+            window_trusted=True, equity_curve_complete=False,
+            largest_loser_pct=3, largest_loser_complete=True,
+        )
+        self.assertEqual(rank["label"], "Shadow")
+        self.assertIn("drawdown_upper_bound", rank["shadowReasons"])
+
     def test_unreconcilable_cashflow_interval_returns_unknown_not_zero_drawdown(self) -> None:
         day_ms = 86_400_000
         metrics = daily_equity_metrics_180d(

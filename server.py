@@ -2625,6 +2625,7 @@ def daily_equity_metrics_180d(
     timestamps = sorted(set(pnl_by_time).intersection(account_by_time))
     daily_factors: dict[int, float] = {}
     risk_daily_factors: dict[int, float] = {}
+    observed_segments: list[dict[int, float]] = [{}]
     invalid_days = 0
     missing_days = 0
     cashflow_ambiguous_intervals = 0
@@ -2633,12 +2634,17 @@ def daily_equity_metrics_180d(
     def add_factor(bucket: dict[int, float], day: int, interval_return: float) -> None:
         bucket[day] = bucket.get(day, 1.0) * (1.0 + interval_return)
 
+    def break_observed_segment() -> None:
+        if observed_segments[-1]:
+            observed_segments.append({})
+
     for previous_time, timestamp in zip(timestamps, timestamps[1:]):
         previous_day = previous_time // day_ms
         day = timestamp // day_ms
         gap = day - previous_day
         if gap > 1:
             missing_days += gap - 1
+            break_observed_segment()
             continue
         starting_equity = account_by_time[previous_time]
         ending_equity = account_by_time[timestamp]
@@ -2654,18 +2660,22 @@ def daily_equity_metrics_180d(
         if has_flow and has_pnl:
             # Endpoints alone cannot distinguish flow→PnL from PnL→flow.
             # Preserve that uncertainty in the exact metrics. For the risk
-            # gate, use the smaller positive capital base, which produces the
-            # worse loss (and the higher possible pre-loss peak).
+            # gate, choose the lower possible return. For losses that uses the
+            # smaller capital base; for gains it uses the larger base. The
+            # element-wise lower-return path maximizes peak-to-trough loss over
+            # every possible sub-period.
             cashflow_ambiguous_intervals += 1
             invalid_days += 1
+            break_observed_segment()
             possible_capital = [
                 value
                 for value in (starting_equity, starting_equity + inferred_flow)
                 if value > tolerance
             ]
             if possible_capital:
-                risk_return = pnl_change / min(possible_capital)
-                if math.isfinite(risk_return):
+                possible_returns = [pnl_change / capital for capital in possible_capital]
+                if all(math.isfinite(value) for value in possible_returns):
+                    risk_return = min(possible_returns)
                     add_factor(risk_daily_factors, day, max(-1.0, risk_return))
                 else:
                     cashflow_bound_valid = False
@@ -2678,19 +2688,23 @@ def daily_equity_metrics_180d(
             # of whether the retained point is immediately before or after it.
             if starting_equity <= tolerance and ending_equity <= tolerance:
                 invalid_days += 1
+                break_observed_segment()
                 continue
             interval_return = 0.0
         else:
             # No material flow: PnL was earned on the starting capital.
             if starting_equity <= tolerance:
                 invalid_days += 1
+                break_observed_segment()
                 continue
             interval_return = pnl_change / starting_equity
-            if not math.isfinite(interval_return) or interval_return <= -1.0:
+            if not math.isfinite(interval_return) or interval_return < -1.0:
                 invalid_days += 1
+                break_observed_segment()
                 continue
         add_factor(daily_factors, day, interval_return)
         add_factor(risk_daily_factors, day, interval_return)
+        add_factor(observed_segments[-1], day, interval_return)
 
     days = sorted(daily_factors)
     returns = [daily_factors[day] - 1.0 for day in days]
@@ -2708,6 +2722,14 @@ def daily_equity_metrics_180d(
     equity_index, worst_drawdown = compounded_path(returns)
     risk_returns = [risk_daily_factors[day] - 1.0 for day in sorted(risk_daily_factors)]
     _, worst_drawdown_upper_bound = compounded_path(risk_returns)
+    observed_drawdown = max(
+        (
+            compounded_path([segment[day] - 1.0 for day in sorted(segment)])[1]
+            for segment in observed_segments
+            if segment
+        ),
+        default=0.0,
+    )
 
     observed_days = len(returns)
     downside_days = sum(1 for value in returns if value < 0)
@@ -2735,7 +2757,7 @@ def daily_equity_metrics_180d(
         # CAGR, drawdown and Calmar describe a 180-day path only when the path
         # is complete. A partial peak/trough is retained below as an explicitly
         # observed diagnostic, never presented as the 180-day risk metric.
-        if equity_index > 0 and complete:
+        if equity_index >= 0 and complete:
             cagr_pct = (equity_index ** (365.0 / elapsed_days) - 1.0) * 100.0
             drawdown_pct = worst_drawdown * 100.0
             if drawdown_pct > 0:
@@ -2748,10 +2770,18 @@ def daily_equity_metrics_180d(
         "cagrPct": cagr_pct,
         "calmar": calmar,
         "maxDrawdownPct": worst_drawdown * 100.0 if complete else None,
-        "observedMaxDrawdownPct": worst_drawdown * 100.0,
+        "observedMaxDrawdownPct": observed_drawdown * 100.0,
         "maxDrawdownUpperBoundPct": (
             worst_drawdown_upper_bound * 100.0
-            if cashflow_ambiguous_intervals and cashflow_bound_valid
+            if (
+                cashflow_ambiguous_intervals
+                and cashflow_bound_valid
+                and invalid_days == cashflow_ambiguous_intervals
+                and missing_days == 0
+                and timestamps
+                and timestamps[0] // day_ms <= cutoff_day + 1
+                and timestamps[-1] // day_ms >= end_day - 1
+            )
             else None
         ),
         "dailyReturnCount": observed_days,
