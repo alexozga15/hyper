@@ -53,7 +53,7 @@ SOURCE_CODE_HASH = hashlib.sha256(
         (ROOT / filename).read_bytes()
         for filename in (
             "server.py", "execution_journal.py", "paper_execution.py",
-            "paper_portfolio.py",
+            "paper_portfolio.py", "paper_analysis.py",
             "hyper-paper-v4/RULES.md",
             "coinmarketman.py", "moni.py", "ratelimit.py"
         )
@@ -6160,7 +6160,9 @@ class WalletTrackerService:
         return reasons
 
     def paper_experiment_evaluations(
-        self, consensus: list[dict[str, Any]], *, now_ms: int
+        self, consensus: list[dict[str, Any]], *, now_ms: int,
+        entry_decisions: dict[str, str] | None = None,
+        default_entry_decision: str = "not_recorded",
     ) -> list[dict[str, Any]]:
         config_hash = execution_config_hash()
         evaluations: list[dict[str, Any]] = []
@@ -6171,6 +6173,14 @@ class WalletTrackerService:
             fingerprint = self.shadow_consensus_fingerprint(item)
             for arm in ("ranked_consensus", "consensus_unranked", "fresh_entry"):
                 reasons = self.paper_experiment_arm_reasons(item, arm)
+                decision_key = json.dumps(
+                    [arm, signal_key, fingerprint],
+                    sort_keys=True, separators=(",", ":"),
+                )
+                entry_decision = (
+                    entry_decisions.get(decision_key, default_entry_decision)
+                    if entry_decisions is not None else None
+                )
                 # Mark-to-market notional changes every cycle even if nobody
                 # trades. Key the audit once per day and per decision state,
                 # not once per price tick.
@@ -6181,6 +6191,8 @@ class WalletTrackerService:
                     "eligible": not reasons,
                     "reasons": reasons,
                 }
+                if entry_decision is not None:
+                    decision["entryDecision"] = entry_decision
                 identity = json.dumps(
                     [config_hash, arm, signal_key, decision],
                     sort_keys=True, separators=(",", ":"),
@@ -6217,6 +6229,7 @@ class WalletTrackerService:
                             "entryDistancePct": to_float(item.get("entryDistancePct")),
                             "probabilityScore": self.signal_probability_score(item),
                             "consensusFingerprint": fingerprint,
+                            "entryDecision": entry_decision,
                         },
                     }
                 )
@@ -6231,6 +6244,7 @@ class WalletTrackerService:
         now_ms: int,
         allow_new_entries: bool = True,
         baseline_at_ms: int = 0,
+        entry_decisions: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         records = {
             str(key): dict(value)
@@ -6261,34 +6275,50 @@ class WalletTrackerService:
             signal_key = self.signal_key(item)
             fingerprint = self.shadow_consensus_fingerprint(item)
             for arm in ("ranked_consensus", "consensus_unranked", "fresh_entry"):
+                decision_key = json.dumps(
+                    [arm, signal_key, fingerprint],
+                    sort_keys=True, separators=(",", ":"),
+                )
+                def note(reason: str) -> None:
+                    if entry_decisions is not None:
+                        entry_decisions[decision_key] = reason
+
                 if self.paper_experiment_arm_reasons(item, arm):
+                    note("policy_rejected")
                     continue
                 fresh_at = int(to_float(
                     item.get("candidateFreshAddLatestTime") if arm == "fresh_entry"
                     else item.get("freshAddLatestTime")
                 ))
                 if baseline_at_ms and fresh_at <= baseline_at_ms:
+                    note("pre_baseline_fresh_event")
                     continue
                 previous_record = latest.get((arm, signal_key))
                 if previous_record is not None:
                     if previous_record.get("executionStatus") in {"entry_quoted", "exit_pending"} and previous_record.get("status") != "closed":
+                        note("existing_open_setup")
                         continue
                     elapsed = now_ms - int(to_float(previous_record.get("startedAt")))
                     if elapsed < PAPER_EXPERIMENT_MIN_GAP_MS:
+                        note("resample_cooldown")
                         continue
                     sample_reason = self.shadow_sample_reason(
                         fingerprint, previous_record, now_ms=now_ms
                     )
                     if not sample_reason:
+                        note("unchanged_setup")
                         continue
                 else:
                     sample_reason = "initial"
                 if (arm, normalize_position_coin(item.get("coin"))) in open_coins_by_arm:
+                    note("one_open_position_per_coin")
                     continue
                 if open_by_arm.get(arm, 0) >= 10:
+                    note("portfolio_position_cap")
                     continue
                 entry_price = to_float(item.get("markPrice"))
                 if entry_price <= 0:
+                    note("missing_mark_price")
                     continue
                 initial_wallets = (
                     sorted({str(value).lower() for value in (item.get("candidateFreshWalletAddresses") or [])})
@@ -6321,6 +6351,7 @@ class WalletTrackerService:
                 }
                 key = f"paper:{arm}:{signal_key}:{now_ms}"
                 records[key] = record
+                note("selected_for_quote")
                 latest[(arm, signal_key)] = record
                 open_by_arm[arm] = open_by_arm.get(arm, 0) + 1
                 open_coins_by_arm.add((arm, normalize_position_coin(item.get("coin"))))
@@ -10903,10 +10934,12 @@ class WalletTrackerService:
             dashboard, state, position_lifecycle=position_lifecycle
         )
         previous_paper = journal.load_stream("paper")
+        entry_decisions: dict[str, str] = {}
         paper_outcomes = self.update_paper_experiment_outcomes(
             previous_paper, summary, consensus, now_ms=now_ms,
             allow_new_entries=bool(freeze.get("allowNewEntries")),
             baseline_at_ms=int(to_float(freeze.get("baselineAtMs"))),
+            entry_decisions=entry_decisions,
         )
         paper_outcomes = self.quote_new_paper_entries(paper_outcomes, now_ms=now_ms)
         paper_outcomes = self.update_paper_execution_exits(
@@ -10934,7 +10967,13 @@ class WalletTrackerService:
             paper_outcomes, journal=journal,
             current_oracle_samples=oracle_samples, now_ms=now_ms,
         )
-        evaluations = self.paper_experiment_evaluations(consensus, now_ms=now_ms)
+        evaluations = self.paper_experiment_evaluations(
+            consensus, now_ms=now_ms, entry_decisions=entry_decisions,
+            default_entry_decision=(
+                "experiment_paused" if not freeze.get("allowNewEntries")
+                else "entry_decision_missing"
+            ),
+        )
         if not freeze.get("allowNewEntries"):
             for evaluation in evaluations:
                 evaluation["eligible"] = False

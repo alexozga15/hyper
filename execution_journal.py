@@ -8,6 +8,7 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any, Iterable
 
+from paper_analysis import matched_opportunity_analysis
 from paper_portfolio import observed_drawdown, paired_portfolio_comparison
 
 
@@ -447,7 +448,8 @@ class ExecutionJournal:
                 "SELECT source_json FROM signals WHERE stream = 'paper'"
             ).fetchall()
             evaluation_rows = connection.execute(
-                """SELECT experiment_arm, eligible, reasons_json FROM evaluations"""
+                """SELECT experiment_arm, eligible, reasons_json, signal_key,
+                coin, side, inputs_json, evaluated_at_ms FROM evaluations"""
             ).fetchall()
             cycles = connection.execute(
                 """SELECT observed_at_ms, config_hash, alert_config_hash,
@@ -471,6 +473,7 @@ class ExecutionJournal:
         }
         positive_by_asset: dict[str, dict[str, float]] = {arm: {} for arm in arms}
         positive_by_wallet: dict[str, dict[str, float]] = {arm: {} for arm in arms}
+        paper_records: list[dict[str, Any]] = []
         for (source_json,) in signal_rows:
             try:
                 row = json.loads(source_json)
@@ -481,6 +484,7 @@ class ExecutionJournal:
             arm = str(row.get("experimentArm") or "")
             if arm not in arms:
                 continue
+            paper_records.append(row)
             bucket = arms[arm]
             bucket["observations"] += 1
             status = str(row.get("executionStatus") or "")
@@ -530,11 +534,21 @@ class ExecutionJournal:
                 bucket["decisionDays"].add(day)
             if row.get("coin"):
                 bucket["assets"].add(str(row["coin"]))
-        for arm, eligible, reasons_json in evaluation_rows:
+        evaluation_records: list[dict[str, Any]] = []
+        for arm, eligible, reasons_json, signal_key, coin, side, inputs_json, evaluated_at in evaluation_rows:
             if arm not in arms:
                 continue
             bucket = arms[arm]
             bucket["evaluations"] += 1
+            try:
+                inputs = json.loads(inputs_json)
+            except (TypeError, ValueError):
+                inputs = {}
+            evaluation_records.append({
+                "experimentArm": arm, "eligible": bool(eligible),
+                "signalKey": signal_key, "coin": coin, "side": side,
+                "inputs": inputs, "evaluatedAtMs": evaluated_at,
+            })
             if eligible:
                 bucket["eligibleEvaluations"] += 1
             else:
@@ -597,6 +611,10 @@ class ExecutionJournal:
             bucket["walletContributionMethod"] = "equal_split_of_positive_trade_net_not_causal_attribution"
         baseline_at = cycles[0][0] if cycles else None
         last_at = cycles[-1][0] if cycles else None
+        matched = matched_opportunity_analysis(
+            paper_records, evaluation_records,
+            baseline_at_ms=baseline_at,
+        )
         source_frozen = bool(cycles) and len({(row[1], row[2], row[3]) for row in cycles}) == 1
         paused = bool(pause_row and pause_row[0] == "1")
         missing = []
@@ -625,16 +643,16 @@ class ExecutionJournal:
                 )
             ):
                 missing.append(f"{arm}:positive_contribution_not_dominated_by_one_asset_or_wallet")
-        missing.extend([
-            "matched_opportunity_portfolio_comparison",
-            "clustered_uncertainty_interval_for_net_return_difference",
-        ])
+        if not matched.get("complete") or matched.get("twoWayClusterInterval95Usd") is None:
+            missing.append("complete_matched_opportunities_with_day_asset_uncertainty")
+        missing.append("asset_clustered_uncertainty_for_portfolio_return_difference")
         return {
             "baselineAtMs": baseline_at,
             "lastObservedAtMs": last_at,
             "sourceFrozen": source_frozen,
             "paused": paused,
             "arms": arms,
+            "matchedOpportunityAnalysis": matched,
             "pairedPortfolioComparisons": {
                 "rankedVsUnranked": paired_portfolio_comparison(
                     portfolio_history["ranked_consensus"],

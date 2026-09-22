@@ -8884,6 +8884,36 @@ class ShadowSignalSamplingTests(unittest.TestCase):
         self.assertEqual(self.service.paper_experiment_arm_reasons(item, "consensus_unranked"), [])
         self.assertEqual(self.service.paper_experiment_arm_reasons(item, "fresh_entry"), [])
 
+    def test_paper_evaluations_record_rank_rejection_vs_control_entry(self) -> None:
+        item = self.consensus_item(
+            independentWalletCount=4, netIndependentWalletCount=3,
+            verifiedFreshIndependentWalletCount=3, netFreshIndependentWalletCount=3,
+            oppositeVerifiedFreshIndependentWalletCount=0,
+            independentTopWalletCount=0, netIndependentWeightedWalletCount=0.0,
+            freshAddVwap=100.0, candidateFreshAddVwap=100.0,
+            candidateFreshIndependentWalletCount=1,
+            oppositeCandidateFreshIndependentWalletCount=0,
+            maxEntryDistancePct=10.0, entryDistancePct=0.0,
+        )
+        decisions: dict[str, str] = {}
+        self.service.update_paper_experiment_outcomes(
+            {}, self.summary(item), [item], now_ms=self.started_at,
+            baseline_at_ms=self.started_at - 120_000,
+            entry_decisions=decisions,
+        )
+        evaluations = self.service.paper_experiment_evaluations(
+            [item], now_ms=self.started_at, entry_decisions=decisions,
+        )
+        by_arm = {row["experimentArm"]: row for row in evaluations}
+        self.assertEqual(
+            by_arm["ranked_consensus"]["inputs"]["entryDecision"],
+            "policy_rejected",
+        )
+        self.assertEqual(
+            by_arm["consensus_unranked"]["inputs"]["entryDecision"],
+            "selected_for_quote",
+        )
+
     def test_paper_arms_do_not_open_both_directions_of_one_coin(self) -> None:
         long_item = self.consensus_item(
             coin="ETH", side="long", markPrice=100, freshAddVwap=100,
