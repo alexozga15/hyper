@@ -9193,6 +9193,23 @@ class ShadowSignalSamplingTests(unittest.TestCase):
             None,
         )
 
+    def test_paper_cycle_budget_skips_new_requests_after_deadline(self) -> None:
+        self.service._paper_request_deadline_ms = self.started_at - 1
+        with patch.object(server, "current_time_ms", return_value=self.started_at), patch.object(
+            self.service.client, "safe_post_result"
+        ) as request:
+            result = self.service.paper_post_result({"type": "l2Book", "coin": "ETH"}, {})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "paper_cycle_budget_exhausted")
+        request.assert_not_called()
+
+    def test_rate_limiter_does_not_sleep_past_paper_deadline(self) -> None:
+        from ratelimit import RequestRateLimiter
+
+        limiter = RequestRateLimiter(6)
+        limiter.penalize(60)
+        self.assertFalse(limiter.wait(max_wait_seconds=0))
+
     def test_closed_paper_trade_gets_net_only_after_complete_funding_model(self) -> None:
         from unittest.mock import Mock
         from paper_execution import quote_book

@@ -111,6 +111,8 @@ SIGNAL_OUTCOME_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 PAPER_EXPERIMENT_MIN_GAP_MS = 2 * 60 * 60 * 1000
 PAPER_EXPERIMENT_NOTIONAL_USD = 1_000.0
 PAPER_EXPERIMENT_ENROLLMENT_MS = 25 * 24 * 60 * 60 * 1000
+PAPER_EXPERIMENT_CYCLE_BUDGET_MS = 60_000
+PAPER_EXPERIMENT_REQUEST_TIMEOUT_SECONDS = 5.0
 POSITION_LIFECYCLE_CLOSED_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 SIGNAL_OUTCOME_HORIZONS_MS = {
     "15m": 15 * 60 * 1000,
@@ -1384,6 +1386,8 @@ def execution_rule_manifest() -> dict[str, Any]:
             "exitWalletState": "verified_current_dashboard_snapshot_then_direct_clearinghouse",
             "orderNotionalUsd": PAPER_EXPERIMENT_NOTIONAL_USD,
             "enrollmentMs": PAPER_EXPERIMENT_ENROLLMENT_MS,
+            "cycleBudgetMs": PAPER_EXPERIMENT_CYCLE_BUDGET_MS,
+            "requestTimeoutSeconds": PAPER_EXPERIMENT_REQUEST_TIMEOUT_SECONDS,
             "depthReserveFraction": 0.10,
             "adverseSlippageBpsPerSide": 2.0,
             "takerFeeRatePerSide": 0.00045,
@@ -3317,14 +3321,21 @@ class HyperliquidClient:
     def __init__(self, rate_limiter: RequestRateLimiter | None = None) -> None:
         self.rate_limiter = rate_limiter or GLOBAL_HYPERLIQUID_RATE_LIMITER
 
-    def post(self, payload: dict[str, Any], url: str = HYPERLIQUID_INFO_URL) -> Any:
-        self.rate_limiter.wait()
+    def post(
+        self, payload: dict[str, Any], url: str = HYPERLIQUID_INFO_URL,
+        *, timeout_seconds: float = 20.0,
+        max_rate_limit_wait_seconds: float | None = None,
+    ) -> Any:
+        if max_rate_limit_wait_seconds is None:
+            self.rate_limiter.wait()
+        elif not self.rate_limiter.wait(max_wait_seconds=max_rate_limit_wait_seconds):
+            raise TimeoutError("rate limiter wait exceeds request budget")
         request = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
             return json.load(response)
 
     def safe_post(self, payload: dict[str, Any], fallback: Any) -> Any:
@@ -3340,11 +3351,21 @@ class HyperliquidClient:
         *,
         attempts: int = HYPERLIQUID_API_RETRY_ATTEMPTS,
         retry_delay: float = HYPERLIQUID_API_RETRY_DELAY_SECONDS,
+        request_timeout_seconds: float | None = None,
+        max_rate_limit_wait_seconds: float | None = None,
     ) -> dict[str, Any]:
         last_error = ""
         for attempt in range(max(1, attempts)):
             try:
-                return {"ok": True, "data": self.post(payload), "error": ""}
+                data = (
+                    self.post(payload)
+                    if request_timeout_seconds is None
+                    else self.post(
+                        payload, timeout_seconds=request_timeout_seconds,
+                        max_rate_limit_wait_seconds=max_rate_limit_wait_seconds,
+                    )
+                )
+                return {"ok": True, "data": data, "error": ""}
             except urllib.error.HTTPError as exc:
                 last_error = f"HTTP {exc.code}: {exc.reason}"
                 if exc.code == HTTPStatus.TOO_MANY_REQUESTS:
@@ -10197,22 +10218,36 @@ class WalletTrackerService:
         return consensus if isinstance(consensus, list) else []
 
     def fetch_paper_book_result(self, market_coin: str) -> dict[str, Any]:
-        return self.client.safe_post_result(
-            {"type": "l2Book", "coin": market_coin}, {}
-        )
+        return self.paper_post_result({"type": "l2Book", "coin": market_coin}, {})
 
     def fetch_paper_market_meta_result(self) -> dict[str, Any]:
-        return self.client.safe_post_result({"type": "meta"}, {})
+        return self.paper_post_result({"type": "meta"}, {})
 
     def fetch_paper_wallet_state_result(self, address: str) -> dict[str, Any]:
+        return self.paper_post_result({"type": "clearinghouseState", "user": address}, {})
+
+    def paper_post_result(self, payload: dict[str, Any], fallback: Any) -> dict[str, Any]:
+        deadline = int(getattr(self, "_paper_request_deadline_ms", 0) or 0)
+        remaining_seconds = (deadline - current_time_ms()) / 1000 if deadline else None
+        if remaining_seconds is not None and remaining_seconds <= 0:
+            return {"ok": False, "data": fallback, "error": "paper_cycle_budget_exhausted"}
+        timeout_seconds = min(
+            PAPER_EXPERIMENT_REQUEST_TIMEOUT_SECONDS,
+            remaining_seconds if remaining_seconds is not None else PAPER_EXPERIMENT_REQUEST_TIMEOUT_SECONDS,
+        )
         return self.client.safe_post_result(
-            {"type": "clearinghouseState", "user": address}, {}
+            payload, fallback, attempts=1, retry_delay=0.0,
+            request_timeout_seconds=timeout_seconds,
+            max_rate_limit_wait_seconds=(
+                max(0.0, remaining_seconds - timeout_seconds)
+                if remaining_seconds is not None else None
+            ),
         )
 
     def fetch_paper_oracle_samples(self, coins: set[str]) -> list[dict[str, Any]]:
         if not coins:
             return []
-        result = self.client.safe_post_result({"type": "metaAndAssetCtxs"}, [])
+        result = self.paper_post_result({"type": "metaAndAssetCtxs"}, [])
         data = result.get("data") if isinstance(result, dict) and result.get("ok") else None
         if not isinstance(data, list) or len(data) != 2:
             return []
@@ -10241,7 +10276,7 @@ class WalletTrackerService:
         seen: set[int] = set()
         cursor = start_ms
         for _page in range(max_pages):
-            result = self.client.safe_post_result({
+            result = self.paper_post_result({
                 "type": "fundingHistory", "coin": coin,
                 "startTime": cursor, "endTime": end_ms,
             }, [])
@@ -10816,6 +10851,9 @@ class WalletTrackerService:
         L2 depth and funding are modeled, not actual fills. Failures cannot
         block Telegram, and no observation grants live-trading permission.
         """
+        self._paper_request_deadline_ms = (
+            current_time_ms() + PAPER_EXPERIMENT_CYCLE_BUDGET_MS
+        )
         journal = ExecutionJournal(self.alerts_path.parent / EXECUTION_JOURNAL_FILE.name)
         manifest = execution_rule_manifest()
         config_hash = execution_config_hash(manifest)

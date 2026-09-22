@@ -23,13 +23,16 @@ class RequestRateLimiter:
         self.throttle_events = 0
         self.throttle_seconds = 0.0
 
-    def wait(self) -> None:
+    def wait(self, *, max_wait_seconds: float | None = None) -> bool:
         with self.lock:
             now = time.monotonic()
             delay = max(0.0, self.next_request_at - now)
+            if max_wait_seconds is not None and delay > max_wait_seconds:
+                return False
             self.next_request_at = max(now, self.next_request_at) + self.interval
         if delay > 0:
             time.sleep(delay)
+        return True
 
     def penalize(self, seconds: float) -> None:
         with self.lock:
