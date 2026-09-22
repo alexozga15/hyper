@@ -38,10 +38,27 @@ except ImportError:  # pragma: no cover - fcntl is unavailable on Windows
     fcntl = None  # type: ignore[assignment]
 
 from coinmarketman import CoinMarketManApiError, CoinMarketManClient
+from execution_journal import ExecutionJournal
 from moni import MoniApiError, MoniClient
+from paper_execution import (
+    modeled_funding_cashflow, paper_trade_result, quote_book,
+    stressed_trade_result,
+)
+from paper_portfolio import portfolio_snapshot, scenario_portfolio_snapshot
 
 
 ROOT = Path(__file__).resolve().parent
+SOURCE_CODE_HASH = hashlib.sha256(
+    b"".join(
+        (ROOT / filename).read_bytes()
+        for filename in (
+            "server.py", "execution_journal.py", "paper_execution.py",
+            "paper_portfolio.py",
+            "hyper-paper-v4/RULES.md",
+            "coinmarketman.py", "moni.py", "ratelimit.py"
+        )
+    )
+).hexdigest()
 STATIC_DIR = ROOT / "static"
 DATA_DIR = Path(os.environ.get("DATA_DIR", str(ROOT / "data"))).resolve()
 WALLETS_FILE = DATA_DIR / "tracked_wallets.json"
@@ -53,6 +70,8 @@ WALLET_COPYABILITY_FILE = DATA_DIR / "wallet_copyability.json"
 RUNTIME_HEALTH_FILE = DATA_DIR / "runtime_health.json"
 DASHBOARD_SNAPSHOT_FILE = DATA_DIR / "dashboard_snapshot.json"
 CMM_HEATMAP_HISTORY_FILE = DATA_DIR / "cmm_heatmap_history.json"
+EXECUTION_JOURNAL_FILE = DATA_DIR / "execution_journal.sqlite3"
+EXECUTION_JOURNAL_ENABLED = os.environ.get("EXECUTION_JOURNAL_ENABLED", "1") == "1"
 DASHBOARD_SNAPSHOT_VERSION = 1
 # The sentiment timer rebuilds the dashboard every 5 minutes. Three cadences of
 # slack means one skipped or slow sentiment run still serves a Telegram command
@@ -82,10 +101,16 @@ HEX_ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 MAX_IMPORT_BATCH = 100
 MAX_DISCOVERY_BATCH = 60
 DEFAULT_CONSENSUS_THRESHOLD = 3
+EXECUTION_RULE_VERSION = os.environ.get(
+    "EXECUTION_RULE_VERSION", "hyper-execution-v1-2026-09-21"
+).strip() or "hyper-execution-v1-2026-09-21"
 SIGNAL_CONVICTION_ALERT_MIN_DELTA = 15.0
 SIGNAL_RE_ALERT_VWAP_DELTA_PCT = 1.0
 SIGNAL_LIFETIME_MS = 2 * 60 * 60 * 1000
 SIGNAL_OUTCOME_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
+PAPER_EXPERIMENT_MIN_GAP_MS = 2 * 60 * 60 * 1000
+PAPER_EXPERIMENT_NOTIONAL_USD = 1_000.0
+PAPER_EXPERIMENT_ENROLLMENT_MS = 25 * 24 * 60 * 60 * 1000
 POSITION_LIFECYCLE_CLOSED_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 SIGNAL_OUTCOME_HORIZONS_MS = {
     "15m": 15 * 60 * 1000,
@@ -106,9 +131,12 @@ ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD = float(
     os.environ.get("ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD", "70.0")
 )
 EXTREME_SIGNAL_PROBABILITY_THRESHOLD = 85.0
-ACTIONABLE_SIGNAL_MIN_WALLETS = 4
-ACTIONABLE_SIGNAL_MIN_NET_WALLETS = 2
 ACTIONABLE_SIGNAL_MIN_QNET = 1.5
+# Deliberate two-stage policy: three independent wallets are enough to display
+# and measure a setup, but a wallet-native executable signal still needs four.
+# The 30-day walk-forward test did not validate a three-wallet trading edge, so
+# lowering publication to the display threshold would turn an observation rule
+# into an execution rule without evidence.
 ACTIONABLE_SIGNAL_MIN_INDEPENDENT_WALLETS = 4
 ACTIONABLE_SIGNAL_MIN_INDEPENDENT_NET_WALLETS = 3
 ACTIONABLE_SIGNAL_MIN_VERIFIED_FRESH_WALLETS = int(
@@ -137,6 +165,8 @@ CANDIDATE_SIGNAL_ROUND_TRIP_COST_PCT = 0.20
 # Published-signal outcomes use the same round-trip cost assumption as the
 # candidate layer (fees + slippage on entry and exit).
 SIGNAL_ROUND_TRIP_COST_PCT = CANDIDATE_SIGNAL_ROUND_TRIP_COST_PCT
+FUNDING_HISTORY_PAGE_SIZE = 500
+FUNDING_HISTORY_MAX_PAGES = int(os.environ.get("FUNDING_HISTORY_MAX_PAGES", "20"))
 # An outcome measured substantially after its nominal horizon is informative
 # for tracking, but must not be used to calibrate that horizon.
 SIGNAL_OUTCOME_HORIZON_TOLERANCE_PCT = 50.0
@@ -632,6 +662,11 @@ WALLET_CACHED_QUALITY_FIELDS = (
     "calmar180d",
     "cagr180dPct",
     "adjustedProfitFactor180d",
+    "fundingPnl180d",
+    "fundingEvents180d",
+    "fundingHistoryComplete",
+    "pfHistoryComplete",
+    "equityCurveVerification",
     "episodes180d",
     "losses180d",
     "dailyReturns180d",
@@ -651,6 +686,8 @@ WALLET_CACHED_QUALITY_FIELDS = (
     "qualityClosedEvents30d",
     "qualityNetPnl30d",
     "qualityProfitFactor30d",
+    "fundingPnl30d",
+    "fundingEvents30d",
     "qualityTopWinConcentrationPct",
     "qualityHoldout6dEvents",
     "qualityHoldout6dNetPnl",
@@ -1304,6 +1341,80 @@ def to_float(value: Any) -> float:
         return 0.0
 
 
+def execution_rule_manifest() -> dict[str, Any]:
+    """Resolved, audit-friendly policy attached to every new outcome.
+
+    Values are read after environment overrides have been resolved, so the
+    hash identifies the rules the process actually executed rather than the
+    defaults committed to Git.
+    """
+    return {
+        "ruleVersion": EXECUTION_RULE_VERSION,
+        "sourceCodeHash": SOURCE_CODE_HASH,
+        "agreement": {
+            "displayWallets": DEFAULT_CONSENSUS_THRESHOLD,
+            "candidateIndependentWallets": CANDIDATE_SIGNAL_MIN_INDEPENDENT_WALLETS,
+            "shadowWallets": SHADOW_SIGNAL_MIN_CONSENSUS_WALLETS,
+            "executableIndependentWallets": ACTIONABLE_SIGNAL_MIN_INDEPENDENT_WALLETS,
+            "executableIndependentNetWallets": ACTIONABLE_SIGNAL_MIN_INDEPENDENT_NET_WALLETS,
+            "verifiedFreshWallets": ACTIONABLE_SIGNAL_MIN_VERIFIED_FRESH_WALLETS,
+            "freshNetWallets": ACTIONABLE_SIGNAL_MIN_FRESH_NET_WALLETS,
+            "topWallets": ACTIONABLE_SIGNAL_MIN_TOP_WALLETS,
+        },
+        "freshness": {
+            "activityWindowMs": WALLET_SIGNAL_ACTIVITY_WINDOW_MS,
+            "verifiedWalletMinNotional": FRESH_WALLET_FLOW_MIN_VALUE,
+            "candidateTotalMinNotional": CANDIDATE_SIGNAL_MIN_FRESH_NOTIONAL,
+        },
+        "publication": {
+            "probabilityThreshold": ACTIONABLE_SIGNAL_PROBABILITY_THRESHOLD,
+            "minQualityNetWeight": ACTIONABLE_SIGNAL_MIN_QNET,
+            "maxOppositeFreshWallets": ACTIONABLE_SIGNAL_MAX_OPPOSITE_FRESH_WALLETS,
+        },
+        "costModel": {
+            "roundTripPct": SIGNAL_ROUND_TRIP_COST_PCT,
+            "walletEpisodeFees": "actual_fill_fees_signed",
+            "walletEpisodeFunding": "actual_user_funding_allocated_by_coin_and_holding_interval",
+            "signalFunding": "not_available_excluded",
+        },
+        "paperStudy": {
+            "arms": ["ranked_consensus", "consensus_unranked", "fresh_entry"],
+            "status": "prospective_book_entry_exit_modeled_funding_and_portfolio_diagnostics",
+            "hardRiskCohort": "common_admitted_wallets",
+            "exitWalletState": "verified_current_dashboard_snapshot_then_direct_clearinghouse",
+            "orderNotionalUsd": PAPER_EXPERIMENT_NOTIONAL_USD,
+            "enrollmentMs": PAPER_EXPERIMENT_ENROLLMENT_MS,
+            "depthReserveFraction": 0.10,
+            "adverseSlippageBpsPerSide": 2.0,
+            "takerFeeRatePerSide": 0.00045,
+            "fundingRates": "persisted_official_hourly_no_missing_event_imputation",
+            "stressPortfolios": ["double_cost", "delayed_entry_1h"],
+        },
+        "equityCurveVerification": {
+            "minDailyReturns": RISK_SCORE_MIN_DAILY_RETURNS,
+            "requireCompleteOfficialHistory": True,
+            "requireNoMissingOrInvalidDays": True,
+            "requireNoAmbiguousCashflowIntervals": True,
+            "requireFundingHistory": True,
+        },
+    }
+
+
+def execution_config_hash(manifest: dict[str, Any] | None = None) -> str:
+    payload = manifest if isinstance(manifest, dict) else execution_rule_manifest()
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+def execution_record_metadata() -> dict[str, Any]:
+    manifest = execution_rule_manifest()
+    return {
+        "ruleVersion": EXECUTION_RULE_VERSION,
+        "configHash": execution_config_hash(manifest),
+        "costModel": manifest["costModel"],
+    }
+
+
 def first_present(source: dict[str, Any], *keys: str) -> Any:
     for key in keys:
         value = source.get(key)
@@ -1326,6 +1437,52 @@ def normalize_position_coin(coin: Any) -> str:
     if separator and prefix in STOCK_POSITION_PREFIXES and suffix and suffix not in NON_STOCK_MARKET_SUFFIXES:
         return suffix
     return label
+
+
+def paper_wallet_position_size(state: Any, coin: str) -> float | None:
+    """Return 0 only for a valid flat state, None for malformed/unknown data."""
+    positions = state.get("assetPositions") if isinstance(state, dict) else None
+    if not isinstance(positions, list):
+        return None
+    size = 0.0
+    for row in positions:
+        position = row.get("position") if isinstance(row, dict) else None
+        if not isinstance(position, dict) or not isinstance(position.get("coin"), str):
+            return None
+        if position.get("coin") != coin:
+            continue
+        try:
+            value = float(position["szi"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(value):
+            return None
+        size += value
+    return size
+
+
+def paper_dashboard_clearinghouse_state(wallet: Any, *, now_ms: int) -> dict[str, Any] | None:
+    """Reuse a fresh official dashboard state; malformed data cannot mean flat."""
+    if not isinstance(wallet, dict):
+        return None
+    quality = wallet.get("dataQuality")
+    if not isinstance(quality, dict) or quality.get("stateOk") is not True:
+        return None
+    observed_at = iso_to_ms(wallet.get("fetchedAt"))
+    if observed_at <= 0 or observed_at > now_ms or now_ms - observed_at > 15 * 60 * 1000:
+        return None
+    positions = wallet.get("positions")
+    if not isinstance(positions, list):
+        return None
+    raw_positions = []
+    for row in positions:
+        if not isinstance(row, dict) or not isinstance(row.get("coin"), str):
+            return None
+        value = row.get("size")
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
+            return None
+        raw_positions.append({"position": {"coin": row["coin"], "szi": value}})
+    return {"assetPositions": raw_positions, "observedAtMs": observed_at}
 
 
 def format_window_minutes(window_ms: int) -> str:
@@ -1425,7 +1582,9 @@ def collapse_twap_slice_fills(slices: Any) -> list[dict[str, Any]]:
 
 
 def reconstruct_position_episodes(
-    fills: list[dict[str, Any]], cutoff_ms: float
+    fills: list[dict[str, Any]],
+    cutoff_ms: float,
+    funding_events: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Rebuild per-coin position episodes from time-sorted fills at/after cutoff_ms.
 
@@ -1572,7 +1731,67 @@ def reconstruct_position_episodes(
                 "grossNotional": 0.0,
                 "expected": end_position,
             }
-    return finished_episodes
+    if funding_events is None:
+        return finished_episodes
+    return apply_funding_to_position_episodes(finished_episodes, funding_events)
+
+
+def apply_funding_to_position_episodes(
+    episodes: list[dict[str, Any]], funding_events: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Add signed Hyperliquid funding cashflows to closed position episodes.
+
+    ``delta.usdc`` is positive when the wallet receives funding and negative
+    when it pays.  Allocation is by normalized coin and the actual holding
+    interval.  Funding outside a fully closed episode is intentionally not
+    forced into PF: it belongs to an open or unobservable position.
+    """
+    normalized_events: dict[str, list[tuple[int, float]]] = {}
+    for row in funding_events:
+        if not isinstance(row, dict):
+            continue
+        delta = row.get("delta")
+        if not isinstance(delta, dict) or str(delta.get("type") or "") != "funding":
+            continue
+        coin = normalize_position_coin(delta.get("coin"))
+        event_time = int(to_float(row.get("time")))
+        if not coin or event_time <= 0:
+            continue
+        normalized_events.setdefault(coin, []).append((event_time, to_float(delta.get("usdc"))))
+    for rows in normalized_events.values():
+        rows.sort(key=lambda item: item[0])
+
+    funded: list[dict[str, Any]] = []
+    for source in episodes:
+        episode = dict(source)
+        start_ms = int(to_float(episode.get("startMs")))
+        end_ms = int(to_float(episode.get("endMs")))
+        rows = [
+            amount
+            for event_time, amount in normalized_events.get(
+                normalize_position_coin(episode.get("coin")), []
+            )
+            # A close and the next open can share a millisecond (a flip).
+            # Half-open intervals assign such a cashflow at most once.
+            if start_ms <= event_time < end_ms
+        ]
+        # Exchange timestamps alone do not order a funding transfer against a
+        # fill at the exact close millisecond. Keep the estimate, but do not
+        # promote its PF to a complete/verified observation.
+        episode["fundingAllocationAmbiguous"] = any(
+            event_time == end_ms
+            for event_time, _amount in normalized_events.get(
+                normalize_position_coin(episode.get("coin")), []
+            )
+        )
+        funding_usd = sum(rows)
+        pnl_before_funding = to_float(episode.get("pnl"))
+        episode["pnlBeforeFunding"] = pnl_before_funding
+        episode["fundingUsd"] = funding_usd
+        episode["fundingEventCount"] = len(rows)
+        episode["pnl"] = pnl_before_funding + funding_usd
+        funded.append(episode)
+    return funded
 
 
 def cached_window_fill_count(entry: Any) -> int | None:
@@ -2153,7 +2372,7 @@ def build_risk_trend_quality_rank(
     effective_largest_loss = max(loss_risk_values)
     data_complete = bool(
         curve_usable and equity_curve_verified and risk_trusted and window_trusted
-        and largest_loser_known and largest_loser_complete
+        and largest_loser_known and largest_loser_complete and adjusted_pf is not None
     )
     shadow_reasons: list[str] = []
     if drawdown is not None and drawdown >= SHADOW_MIN_180D_DRAWDOWN_PCT:
@@ -2793,6 +3012,42 @@ def daily_equity_metrics_180d(
     }
 
 
+def equity_curve_verification(
+    metrics: dict[str, Any], *, portfolio_ok: bool, funding_complete: bool,
+    episode_history_complete: bool = True,
+) -> dict[str, Any]:
+    """Deterministic confirmation gate for the official 180-day curve.
+
+    This is intentionally stricter than merely having enough points.  A curve
+    with a missing day or an interval where cashflow order is unknowable stays
+    preliminary, and funding-dependent PF cannot be called complete when its
+    ledger fetch was truncated or failed.
+    """
+    reasons: list[str] = []
+    if not portfolio_ok:
+        reasons.append("portfolio_fetch_failed")
+    if not bool(metrics.get("equityCurveComplete")):
+        reasons.append("official_history_incomplete")
+    if int(to_float(metrics.get("dailyReturnCount"))) < RISK_SCORE_MIN_DAILY_RETURNS:
+        reasons.append("insufficient_daily_returns")
+    if int(to_float(metrics.get("missingDayCount"))) > 0:
+        reasons.append("missing_days")
+    if int(to_float(metrics.get("invalidDayCount"))) > 0:
+        reasons.append("invalid_days")
+    if int(to_float(metrics.get("cashflowAmbiguousIntervals"))) > 0:
+        reasons.append("cashflow_order_ambiguous")
+    if not funding_complete:
+        reasons.append("funding_history_incomplete")
+    if not episode_history_complete:
+        reasons.append("episode_history_incomplete")
+    return {
+        "verified": not reasons,
+        "status": "verified_official_history" if not reasons else "preliminary",
+        "reasons": reasons,
+        "ruleVersion": EXECUTION_RULE_VERSION,
+    }
+
+
 def episode_loss_metrics(
     episodes: list[dict[str, Any]], account_points: list[Any]
 ) -> dict[str, Any]:
@@ -3416,6 +3671,70 @@ class WalletTrackerService:
         ok = bool(result.get("ok")) and isinstance(orders, list)
         return {"ok": ok, "data": orders if isinstance(orders, list) else [], "error": result.get("error", "")}
 
+    def fetch_user_funding_result(self, address: str, start_time: int) -> dict[str, Any]:
+        result = self.client.safe_post_result(
+            {"type": "userFunding", "user": address, "startTime": int(start_time)},
+            [],
+        )
+        rows = result.get("data") if result.get("ok") else []
+        ok = bool(result.get("ok")) and isinstance(rows, list)
+        return {"ok": ok, "data": rows if isinstance(rows, list) else [], "error": result.get("error", "")}
+
+    def fetch_user_funding_paginated_result(
+        self,
+        address: str,
+        start_time: int,
+        *,
+        max_pages: int | None = None,
+        page_size: int = FUNDING_HISTORY_PAGE_SIZE,
+    ) -> dict[str, Any]:
+        """Fetch the complete userFunding window instead of its first 500 rows."""
+        if max_pages is None:
+            max_pages = FUNDING_HISTORY_MAX_PAGES
+        collected: list[dict[str, Any]] = []
+        seen: set[tuple[Any, ...]] = set()
+        cursor = int(start_time)
+        pages = 0
+        while pages < max_pages:
+            result = self.fetch_page_with_retry(
+                lambda cursor=cursor: self.fetch_user_funding_result(address, cursor)
+            )
+            if not result.get("ok"):
+                return {
+                    "ok": False,
+                    "data": collected,
+                    "error": result.get("error", ""),
+                    "truncated": True,
+                    "pages": pages,
+                }
+            page = result.get("data")
+            if not isinstance(page, list) or not page:
+                return {"ok": True, "data": collected, "error": "", "truncated": False, "pages": pages + 1}
+            pages += 1
+            fresh = 0
+            newest = cursor
+            for row in page:
+                if not isinstance(row, dict):
+                    continue
+                delta = row.get("delta") if isinstance(row.get("delta"), dict) else {}
+                identity = (
+                    int(to_float(row.get("time"))),
+                    str(row.get("hash") or ""),
+                    str(delta.get("coin") or ""),
+                    str(delta.get("usdc") or ""),
+                )
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                collected.append(row)
+                fresh += 1
+                newest = max(newest, identity[0])
+            if len(page) < page_size or fresh == 0 or newest <= cursor:
+                truncated = len(page) >= page_size and (fresh == 0 or newest <= cursor)
+                return {"ok": True, "data": collected, "error": "", "truncated": truncated, "pages": pages}
+            cursor = newest
+        return {"ok": True, "data": collected, "error": "", "truncated": True, "pages": pages}
+
     def fetch_fills_result(self, address: str, start_time: int) -> dict[str, Any]:
         result = self.client.safe_post_result(
             {
@@ -3710,6 +4029,9 @@ class WalletTrackerService:
                 futures["orders"] = executor.submit(self.fetch_open_orders_result, wallet.address)
                 futures["role"] = executor.submit(self.fetch_wallet_role, wallet.address)
                 futures["portfolio"] = executor.submit(self.fetch_portfolio_result, wallet.address)
+                futures["funding"] = executor.submit(
+                    self.fetch_user_funding_paginated_result, wallet.address, fills_start_ms
+                )
                 # Two fill requests per wallet per cycle are already the
                 # largest traffic block (see WALLET_IDLE_FILL_THRESHOLD_MS
                 # above), so this must not become a third one every cycle. The
@@ -3718,8 +4040,8 @@ class WalletTrackerService:
                 # requires it) and quality_window_truncated below already ANDs
                 # full_quality_refresh, so tying this fetch to the same flag
                 # costs +3 calls a cycle instead of +30 and its request window
-                # (fills_start_ms == cutoff_90d_ms here) always matches the
-                # 90-day window it feeds.
+                # matches the 180-day quality window shared with regular fills
+                # and funding.
                 futures["twapFills"] = executor.submit(
                     self.fetch_twap_slice_fills_paginated_result, wallet.address, fills_start_ms
                 )
@@ -3739,6 +4061,7 @@ class WalletTrackerService:
         cached = cached_snapshot if isinstance(cached_snapshot, dict) else {}
         orders_fetched = "orders" in futures
         portfolio_fetched = "portfolio" in futures
+        funding_fetched = "funding" in futures
         twap_fetched = "twapFills" in futures
         orders_result = (
             futures["orders"].result()
@@ -3750,6 +4073,11 @@ class WalletTrackerService:
             futures["portfolio"].result()
             if portfolio_fetched
             else {"ok": True, "data": cached.get("portfolio", {}), "error": ""}
+        )
+        funding_result = (
+            futures["funding"].result()
+            if funding_fetched
+            else {"ok": True, "data": [], "error": "", "skipped": True}
         )
         open_orders = orders_result.get("data", []) if isinstance(orders_result, dict) else []
         base_fills = fills_result.get("data", []) if isinstance(fills_result, dict) else []
@@ -3763,6 +4091,9 @@ class WalletTrackerService:
         # wallet safely under the cap.
         window_fill_count = len(base_fills) if not skip_fills else cached_window_fill_count(cached)
         portfolio = portfolio_result.get("data", {}) if isinstance(portfolio_result, dict) else {}
+        funding_events = funding_result.get("data", []) if isinstance(funding_result, dict) else []
+        if not isinstance(funding_events, list):
+            funding_events = []
         fills_ok = bool(isinstance(fills_result, dict) and fills_result.get("ok"))
         twap_fills_ok = bool(isinstance(twap_fills_result, dict) and twap_fills_result.get("ok"))
         # userFillsByTime never returns TWAP slice fills at all (see
@@ -3782,6 +4113,11 @@ class WalletTrackerService:
         if not isinstance(live_fills, list):
             live_fills = []
         portfolio_ok = bool(isinstance(portfolio_result, dict) and portfolio_result.get("ok"))
+        funding_ok = bool(isinstance(funding_result, dict) and funding_result.get("ok"))
+        funding_truncated = bool(
+            isinstance(funding_result, dict) and funding_result.get("truncated")
+        )
+        funding_complete = bool(funding_ok and not funding_truncated)
         orders_ok = bool(isinstance(orders_result, dict) and orders_result.get("ok"))
 
         margin_summary = state.get("marginSummary", {})
@@ -3966,7 +4302,15 @@ class WalletTrackerService:
         # runs over-counted it 4,356 to 2,080 measured across the tracked set,
         # by splitting on zero-closedPnl fills and idle gaps that were not
         # actually flat.
-        closed_runs = reconstruct_position_episodes(fills, cutoff_30d_ms)
+        # Reconstruct once from the oldest fetched fill, then filter on the
+        # close timestamp. Reconstructing afresh at 30d/90d lost opening fees
+        # and pre-window funding for positions that closed inside the window.
+        closed_runs_180d = reconstruct_position_episodes(
+            fills, cutoff_180d_ms, funding_events
+        )
+        closed_runs = [
+            run for run in closed_runs_180d if int(to_float(run.get("endMs"))) >= cutoff_30d_ms
+        ]
 
         def _run_wins_losses(window_start_ms: float | None) -> tuple[int, int]:
             wins = losses = 0
@@ -3987,16 +4331,28 @@ class WalletTrackerService:
         win_count, loss_count = _run_wins_losses(cutoff_7d_ms)
         # winRate90d/closedTrades90d use the same position-episode rule as the
         # 30d fields above (see reconstruct_position_episodes), just
-        # reconstructed over the wider cutoff_90d_ms window that `fills` now
-        # covers on a full refresh. A laddered exit collapses into one episode
-        # here exactly as it does for the 30d fields, since it is the same
-        # rule.
-        closed_runs_90d = reconstruct_position_episodes(fills, cutoff_90d_ms)
+        # filtered from the same 180-day episode reconstruction. A laddered
+        # exit collapses into one episode here exactly as it does for 30d.
+        closed_runs_90d = [
+            run for run in closed_runs_180d if int(to_float(run.get("endMs"))) >= cutoff_90d_ms
+        ]
         win_count_90d = sum(1 for run in closed_runs_90d if run["pnl"] > 0)
         loss_count_90d = sum(1 for run in closed_runs_90d if run["pnl"] < 0)
         closed_trade_count_90d = win_count_90d + loss_count_90d
         win_rate_90d = (win_count_90d / max(closed_trade_count_90d, 1)) * 100
-        closed_runs_180d = reconstruct_position_episodes(fills, cutoff_180d_ms)
+        funding_30d = sum(to_float(run.get("fundingUsd")) for run in closed_runs)
+        funding_180d = sum(to_float(run.get("fundingUsd")) for run in closed_runs_180d)
+        funding_events_30d = sum(int(to_float(run.get("fundingEventCount"))) for run in closed_runs)
+        funding_events_180d = sum(
+            int(to_float(run.get("fundingEventCount"))) for run in closed_runs_180d
+        )
+        pf_history_complete = bool(
+            funding_complete
+            and twap_fills_ok
+            and not quality_window_truncated
+            and all(bool(run.get("anchored")) for run in closed_runs_180d)
+            and not any(run.get("fundingAllocationAmbiguous") for run in closed_runs_180d)
+        )
         loss_count_180d = sum(1 for run in closed_runs_180d if to_float(run.get("pnl")) < 0)
         gross_profit_180d = sum(
             to_float(run.get("pnl")) for run in closed_runs_180d if to_float(run.get("pnl")) > 0
@@ -4036,6 +4392,12 @@ class WalletTrackerService:
             cutoff_180d_ms,
             now_ms,
         )
+        equity_verification = equity_curve_verification(
+            equity_metrics_180d,
+            portfolio_ok=portfolio_ok,
+            funding_complete=funding_complete,
+            episode_history_complete=pf_history_complete,
+        )
         loss_metrics_180d = episode_loss_metrics(
             closed_runs_180d, perp_all_time.get("accountValueHistory", [])
         )
@@ -4070,10 +4432,13 @@ class WalletTrackerService:
             if to_float(position.get("unrealizedPnl")) < 0
         )
         current_open_loss_pct = current_open_loss / account_value * 100.0 if account_value > 0 else 0.0
-        adjusted_profit_factor_180d = (
+        adjusted_profit_factor_180d_raw = (
             gross_profit_180d / (gross_loss_180d + current_open_loss)
             if gross_loss_180d + current_open_loss > 0
             else (float("inf") if gross_profit_180d > 0 else 0.0)
+        )
+        adjusted_profit_factor_180d = (
+            adjusted_profit_factor_180d_raw if pf_history_complete else None
         )
         margin_usage_pct = (margin_used / account_value) * 100 if account_value > 0 else 0.0
         holding_only_30d = bool(positions) and fills_ok and fills_30d_count == 0 and len(open_orders) == 0
@@ -4117,6 +4482,7 @@ class WalletTrackerService:
             daily_return_count_180d=int(to_float(equity_metrics_180d.get("dailyReturnCount"))),
             downside_day_count_180d=int(to_float(equity_metrics_180d.get("downsideDayCount"))),
             equity_curve_complete=bool(equity_metrics_180d.get("equityCurveComplete")),
+            equity_curve_verified=bool(equity_verification.get("verified")),
             observed_drawdown_pct=equity_metrics_180d.get("observedMaxDrawdownPct"),
             drawdown_upper_bound_pct=equity_metrics_180d.get("maxDrawdownUpperBoundPct"),
             largest_loser_pct=loss_metrics_180d.get("largestLoserPct"),
@@ -4130,6 +4496,14 @@ class WalletTrackerService:
                 to_float(equity_metrics_180d.get("cashflowAmbiguousIntervals"))
             ),
         )
+        recent_win_rate_rank = {
+            **recent_win_rate_rank,
+            "equityCurveComplete": bool(equity_metrics_180d.get("equityCurveComplete")),
+            "equityCurveVerified": bool(equity_verification.get("verified")),
+            "equityCurveVerification": equity_verification,
+            "fundingIncluded": funding_complete,
+            "pfHistoryComplete": pf_history_complete,
+        }
         if wallet.address.lower() in ELITE_WALLET_OVERRIDES:
             # Overrides may break ties inside the eligible cohort, never bypass
             # sample, completeness, largest-loser, or drawdown gates.
@@ -4179,6 +4553,11 @@ class WalletTrackerService:
                 else round(to_float(equity_metrics_180d.get("cagrPct")), 2)
             ),
             "adjustedProfitFactor180d": recent_win_rate_rank.get("adjustedProfitFactor180d"),
+            "fundingPnl180d": round(funding_180d, 2),
+            "fundingEvents180d": funding_events_180d,
+            "fundingHistoryComplete": funding_complete,
+            "pfHistoryComplete": pf_history_complete,
+            "equityCurveVerification": equity_verification,
             "episodes180d": len(closed_runs_180d),
             "losses180d": loss_count_180d,
             "dailyReturns180d": int(to_float(equity_metrics_180d.get("dailyReturnCount"))),
@@ -4211,8 +4590,12 @@ class WalletTrackerService:
             "qualityClosedEvents30d": len(quality_event_pnls),
             "qualityNetPnl30d": round(sum(quality_event_pnls), 2),
             "qualityProfitFactor30d": (
-                "inf" if quality_profit_factor == float("inf") else round(quality_profit_factor, 2)
+                None
+                if not pf_history_complete
+                else ("inf" if quality_profit_factor == float("inf") else round(quality_profit_factor, 2))
             ),
+            "fundingPnl30d": round(funding_30d, 2),
+            "fundingEvents30d": funding_events_30d,
             "qualityTopWinConcentrationPct": round(quality_top_win_concentration_pct, 1),
             "qualityHoldout6dEvents": len(holdout_event_pnls),
             "qualityHoldout6dNetPnl": round(sum(holdout_event_pnls), 2),
@@ -4247,6 +4630,10 @@ class WalletTrackerService:
                 "fillsOk": fills_ok,
                 "portfolioOk": portfolio_ok if portfolio_fetched else None,
                 "portfolioFetched": portfolio_fetched,
+                "fundingOk": funding_ok if funding_fetched else None,
+                "fundingFetched": funding_fetched,
+                "fundingTruncated": funding_truncated if funding_fetched else None,
+                "fundingEventCount": len(funding_events) if funding_fetched else None,
                 "ordersOk": orders_ok if orders_fetched else None,
                 "ordersFetched": orders_fetched,
                 "recentFillsOk": recent_fills_ok,
@@ -4265,6 +4652,11 @@ class WalletTrackerService:
                 "portfolioError": (
                     portfolio_result.get("error", "")
                     if portfolio_fetched and isinstance(portfolio_result, dict)
+                    else ""
+                ),
+                "fundingError": (
+                    funding_result.get("error", "")
+                    if funding_fetched and isinstance(funding_result, dict)
                     else ""
                 ),
                 "ordersError": (
@@ -4358,7 +4750,9 @@ class WalletTrackerService:
             default=0,
         )
 
-        quality_refresh_succeeded = full_quality_refresh and fills_ok and portfolio_ok
+        quality_refresh_succeeded = (
+            full_quality_refresh and fills_ok and twap_fills_ok and portfolio_ok and funding_complete
+        )
         has_cached_quality = any(field in cached for field in WALLET_CACHED_QUALITY_FIELDS)
         use_cached_quality = has_cached_quality and not quality_refresh_succeeded
         cached_fields_used: list[str] = []
@@ -5704,6 +6098,217 @@ class WalletTrackerService:
             reasons.append("low_probability")
         return reasons
 
+    def paper_experiment_arm_reasons(
+        self, item: dict[str, Any], arm: str
+    ) -> list[str]:
+        """Apply three frozen selection policies to one identical market setup."""
+        market_coin = str(item.get("marketCoin") or item.get("coin") or "")
+        if ":" in market_coin or market_coin.startswith("@"):
+            return ["unsupported_market"]
+        if arm == "ranked_consensus":
+            return self.signal_rejection_reasons(item, self.signal_probability_score(item))
+
+        reasons: list[str] = []
+        if arm == "consensus_unranked":
+            if int(to_float(item.get("independentWalletCount"))) < ACTIONABLE_SIGNAL_MIN_INDEPENDENT_WALLETS:
+                reasons.append("independent_wallet_count")
+            if int(to_float(item.get("netIndependentWalletCount"))) < ACTIONABLE_SIGNAL_MIN_INDEPENDENT_NET_WALLETS:
+                reasons.append("weak_net")
+            if int(to_float(item.get("verifiedFreshIndependentWalletCount"))) < ACTIONABLE_SIGNAL_MIN_VERIFIED_FRESH_WALLETS:
+                reasons.append("insufficient_verified_activity")
+            if int(to_float(item.get("netFreshIndependentWalletCount"))) < ACTIONABLE_SIGNAL_MIN_FRESH_NET_WALLETS:
+                reasons.append("weak_fresh_net")
+            if int(to_float(item.get("oppositeVerifiedFreshIndependentWalletCount"))) > ACTIONABLE_SIGNAL_MAX_OPPOSITE_FRESH_WALLETS:
+                reasons.append("opposite_fresh_flow")
+        elif arm == "fresh_entry":
+            if int(to_float(item.get("candidateFreshIndependentWalletCount"))) < 1:
+                reasons.append("no_fresh_wallet")
+            if int(to_float(item.get("oppositeCandidateFreshIndependentWalletCount"))) > 0:
+                reasons.append("opposite_fresh_flow")
+        else:
+            return ["unknown_experiment_arm"]
+
+        fresh_vwap = to_float(
+            item.get("candidateFreshAddVwap") if arm == "fresh_entry" else item.get("freshAddVwap")
+        )
+        mark_price = to_float(item.get("markPrice"))
+        if fresh_vwap <= 0 or mark_price <= 0:
+            reasons.append("missing_fresh_vwap")
+        elif abs(((mark_price / fresh_vwap) - 1.0) * 100.0) > to_float(item.get("maxEntryDistancePct")):
+            reasons.append("extended_from_fresh_vwap")
+        return reasons
+
+    def paper_experiment_evaluations(
+        self, consensus: list[dict[str, Any]], *, now_ms: int
+    ) -> list[dict[str, Any]]:
+        config_hash = execution_config_hash()
+        evaluations: list[dict[str, Any]] = []
+        for item in consensus:
+            if not isinstance(item, dict):
+                continue
+            signal_key = self.signal_key(item)
+            fingerprint = self.shadow_consensus_fingerprint(item)
+            for arm in ("ranked_consensus", "consensus_unranked", "fresh_entry"):
+                reasons = self.paper_experiment_arm_reasons(item, arm)
+                # Mark-to-market notional changes every cycle even if nobody
+                # trades. Key the audit once per day and per decision state,
+                # not once per price tick.
+                decision = {
+                    "day": now_ms // (24 * 60 * 60 * 1000),
+                    "wallets": fingerprint.get("walletAddresses"),
+                    "freshAddLatestTime": fingerprint.get("freshAddLatestTime"),
+                    "eligible": not reasons,
+                    "reasons": reasons,
+                }
+                identity = json.dumps(
+                    [config_hash, arm, signal_key, decision],
+                    sort_keys=True, separators=(",", ":"),
+                )
+                evaluation_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+                wallets = (
+                    item.get("candidateFreshWalletAddresses")
+                    if arm == "fresh_entry"
+                    else fingerprint.get("walletAddresses")
+                )
+                evaluations.append(
+                    {
+                        "evaluationId": evaluation_id,
+                        "evaluatedAtMs": now_ms,
+                        "experimentArm": arm,
+                        "signalKey": signal_key,
+                        "coin": item.get("coin", "Unknown"),
+                        "side": item.get("side", ""),
+                        "eligible": not reasons,
+                        "walletAddresses": list(wallets) if isinstance(wallets, list) else [],
+                        "reasons": reasons,
+                        "inputs": {
+                            "independentWalletCount": int(to_float(item.get("independentWalletCount"))),
+                            "netIndependentWalletCount": int(to_float(item.get("netIndependentWalletCount"))),
+                            "verifiedFreshIndependentWalletCount": int(to_float(item.get("verifiedFreshIndependentWalletCount"))),
+                            "netFreshIndependentWalletCount": int(to_float(item.get("netFreshIndependentWalletCount"))),
+                            "independentTopWalletCount": int(to_float(item.get("independentTopWalletCount"))),
+                            "netIndependentWeightedWalletCount": to_float(item.get("netIndependentWeightedWalletCount")),
+                            "freshAddVwap": to_float(
+                                item.get("candidateFreshAddVwap") if arm == "fresh_entry"
+                                else item.get("freshAddVwap")
+                            ),
+                            "markPrice": to_float(item.get("markPrice")),
+                            "entryDistancePct": to_float(item.get("entryDistancePct")),
+                            "probabilityScore": self.signal_probability_score(item),
+                            "consensusFingerprint": fingerprint,
+                        },
+                    }
+                )
+        return evaluations
+
+    def update_paper_experiment_outcomes(
+        self,
+        previous: dict[str, Any],
+        summary: dict[str, Any],
+        consensus: list[dict[str, Any]],
+        *,
+        now_ms: int,
+        allow_new_entries: bool = True,
+        baseline_at_ms: int = 0,
+    ) -> dict[str, Any]:
+        records = {
+            str(key): dict(value)
+            for key, value in (previous.items() if isinstance(previous, dict) else [])
+            if isinstance(value, dict)
+        }
+        latest: dict[tuple[str, str], dict[str, Any]] = {}
+        open_by_arm: dict[str, int] = {}
+        open_coins_by_arm: set[tuple[str, str]] = set()
+        for record in records.values():
+            identity = (
+                str(record.get("experimentArm") or ""),
+                str(record.get("signalKey") or self.signal_key(record)),
+            )
+            if identity not in latest or int(to_float(record.get("startedAt"))) > int(
+                to_float(latest[identity].get("startedAt"))
+            ):
+                latest[identity] = record
+            if record.get("status") not in {"closed", "skipped", "expired", "unpriced"} and record.get("executionStatus") in {
+                "entry_quoted", "exit_pending"
+            }:
+                open_by_arm[identity[0]] = open_by_arm.get(identity[0], 0) + 1
+                open_coins_by_arm.add((identity[0], normalize_position_coin(record.get("coin"))))
+
+        for item in consensus if allow_new_entries else []:
+            if not isinstance(item, dict):
+                continue
+            signal_key = self.signal_key(item)
+            fingerprint = self.shadow_consensus_fingerprint(item)
+            for arm in ("ranked_consensus", "consensus_unranked", "fresh_entry"):
+                if self.paper_experiment_arm_reasons(item, arm):
+                    continue
+                fresh_at = int(to_float(
+                    item.get("candidateFreshAddLatestTime") if arm == "fresh_entry"
+                    else item.get("freshAddLatestTime")
+                ))
+                if baseline_at_ms and fresh_at <= baseline_at_ms:
+                    continue
+                previous_record = latest.get((arm, signal_key))
+                if previous_record is not None:
+                    if previous_record.get("executionStatus") in {"entry_quoted", "exit_pending"} and previous_record.get("status") != "closed":
+                        continue
+                    elapsed = now_ms - int(to_float(previous_record.get("startedAt")))
+                    if elapsed < PAPER_EXPERIMENT_MIN_GAP_MS:
+                        continue
+                    sample_reason = self.shadow_sample_reason(
+                        fingerprint, previous_record, now_ms=now_ms
+                    )
+                    if not sample_reason:
+                        continue
+                else:
+                    sample_reason = "initial"
+                if (arm, normalize_position_coin(item.get("coin"))) in open_coins_by_arm:
+                    continue
+                if open_by_arm.get(arm, 0) >= 10:
+                    continue
+                entry_price = to_float(item.get("markPrice"))
+                if entry_price <= 0:
+                    continue
+                initial_wallets = (
+                    sorted({str(value).lower() for value in (item.get("candidateFreshWalletAddresses") or [])})
+                    if arm == "fresh_entry"
+                    else list(fingerprint.get("walletAddresses") or [])
+                )
+                record = {
+                    "coin": item.get("coin", "Unknown"),
+                    "marketCoin": item.get("marketCoin", item.get("coin", "Unknown")),
+                    "side": item.get("side", ""),
+                    "signalKey": signal_key,
+                    "experimentArm": arm,
+                    "startedAt": now_ms,
+                    "entryPrice": round(entry_price, 8),
+                    "walletVwap": round(to_float(
+                        item.get("candidateFreshAddVwap") if arm == "fresh_entry"
+                        else item.get("freshAddVwap")
+                    ), 8),
+                    "initialWalletAddresses": initial_wallets,
+                    "activeWalletAddresses": list(initial_wallets),
+                    "departedWalletAddresses": [],
+                    "exitThreshold": 1 if arm == "fresh_entry" else 3,
+                    "lastWalletCheckAtMs": now_ms,
+                    "consensusFingerprint": fingerprint,
+                    "sampleReason": sample_reason,
+                    "status": "open",
+                    "executionStatus": "mark_proxy_only",
+                    **execution_record_metadata(),
+                    "outcomes": {},
+                }
+                key = f"paper:{arm}:{signal_key}:{now_ms}"
+                records[key] = record
+                latest[(arm, signal_key)] = record
+                open_by_arm[arm] = open_by_arm.get(arm, 0) + 1
+                open_coins_by_arm.add((arm, normalize_position_coin(item.get("coin"))))
+
+        marks_by_key, marks_by_coin = self.signal_outcome_mark_maps(summary)
+        return self.measure_signal_outcome_records(
+            records, marks_by_key=marks_by_key, marks_by_coin=marks_by_coin, now_ms=now_ms
+        )
+
     def build_high_conviction_signals(
         self,
         consensus: list[dict[str, Any]],
@@ -5748,6 +6353,11 @@ class WalletTrackerService:
                     ),
                     "netFreshIndependentWalletCount": int(to_float(item.get("netFreshIndependentWalletCount"))),
                     "freshWalletAddresses": list(item.get("freshWalletAddresses", [])),
+                    "walletAddresses": sorted({
+                        str(wallet.get("address") or "").lower()
+                        for wallet in item.get("wallets", [])
+                        if isinstance(wallet, dict) and wallet.get("address")
+                    }),
                     "fillQualityUnknownWalletCount": int(to_float(item.get("fillQualityUnknownWalletCount"))),
                     "topWalletCount": int(to_float(item.get("topWalletCount"))),
                     "independentTopWalletCount": int(to_float(item.get("independentTopWalletCount"))),
@@ -6042,6 +6652,15 @@ class WalletTrackerService:
                 "verifiedFreshWalletCount": len(bucket["verifiedFreshWalletAddresses"]),
                 "verifiedFreshIndependentWalletCount": len(bucket["verifiedFreshWalletGroups"]),
                 "freshWalletAddresses": sorted(bucket["verifiedFreshWalletAddresses"]),
+                # Paper-only baseline uses *any* verified recent add, without
+                # the ranked strategy's per-wallet $100K conviction floor.
+                "candidateFreshIndependentWalletCount": len(bucket["candidateFreshWalletGroups"]),
+                "candidateFreshWalletAddresses": sorted(bucket["candidateFreshWalletAddresses"]),
+                "candidateFreshAddLatestTime": int(bucket["candidateFreshAddLatestTime"]),
+                "candidateFreshAddValue": round(bucket["candidateFreshAddValue"], 2),
+                "candidateFreshAddVwap": round(
+                    bucket["candidateFreshAddValue"] / bucket["candidateFreshAddSize"], 8
+                ) if bucket["candidateFreshAddSize"] > 0 else 0.0,
                 "topWalletCount": len(bucket["topWalletAddresses"]),
                 "independentTopWalletCount": len(bucket["topWalletGroups"]),
                 "fillQualityUnknownWalletCount": len(bucket["fillQualityUnknownWalletAddresses"]),
@@ -6128,6 +6747,9 @@ class WalletTrackerService:
             item["netIndependentWeightedWalletCount"] = round(net_independent_weight, 3)
             item["oppositeVerifiedFreshIndependentWalletCount"] = opposite_fresh_independent_count
             item["netFreshIndependentWalletCount"] = net_fresh_independent_count
+            item["oppositeCandidateFreshIndependentWalletCount"] = len(
+                coin_side_candidate_fresh_groups.get(str(item["coin"]), {}).get(opposite_side, set())
+            )
             item["longWalletCount"] = int(to_float(raw_counts.get("long")))
             item["shortWalletCount"] = int(to_float(raw_counts.get("short")))
             item["longWeightedWalletCount"] = round(to_float(side_counts.get("long")), 3)
@@ -9156,6 +9778,11 @@ class WalletTrackerService:
                     "walletVwap": round(to_float(candidate.get("freshAddVwap")), 8),
                     "freshNotional": round(to_float(candidate.get("freshNotional")), 2),
                     "freshWalletAddresses": list(candidate.get("freshWalletAddresses", [])),
+                    "initialWalletAddresses": sorted({
+                        str(address).lower()
+                        for address in candidate.get("freshWalletAddresses", [])
+                        if str(address).strip()
+                    }),
                     "topWalletAddresses": list(candidate.get("topWalletAddresses", [])),
                     "independentWalletCount": int(to_float(candidate.get("independentWalletCount"))),
                     "independentTopWalletCount": int(to_float(candidate.get("independentTopWalletCount"))),
@@ -9166,6 +9793,7 @@ class WalletTrackerService:
                     "cmmConfirmation": candidate.get("cmmConfirmation", "unavailable"),
                     "cmmProbabilityScore": round(to_float(candidate.get("cmmProbabilityScore")), 1),
                     "cmmSnapshotGeneratedAt": candidate.get("cmmSnapshotGeneratedAt", ""),
+                    **execution_record_metadata(),
                     **signal_quality_estimate_fields(candidate),
                     "outcomes": {},
                 },
@@ -9212,6 +9840,9 @@ class WalletTrackerService:
                     "grossReturnPct": round(gross_return, 3),
                     "netReturnPct": round(
                         gross_return - CANDIDATE_SIGNAL_ROUND_TRIP_COST_PCT, 3
+                    ),
+                    "doubleCostNetReturnPct": round(
+                        gross_return - (2.0 * CANDIDATE_SIGNAL_ROUND_TRIP_COST_PCT), 3
                     ),
                     "measuredAt": now_ms,
                 }
@@ -9290,6 +9921,18 @@ class WalletTrackerService:
                     continue
                 elapsed_ms = now_ms - started_at
                 gross_return = ((mark_price / entry_price) - 1.0) * 100.0 * direction
+                delayed_entry = outcomes.get("1h") if label not in {"15m", "1h"} else None
+                delayed_entry_price = (
+                    to_float(delayed_entry.get("markPrice"))
+                    if isinstance(delayed_entry, dict)
+                    else 0.0
+                )
+                delayed_net_return = (
+                    ((mark_price / delayed_entry_price) - 1.0) * 100.0 * direction
+                    - SIGNAL_ROUND_TRIP_COST_PCT
+                    if delayed_entry_price > 0
+                    else None
+                )
                 tolerance_ms = horizon_ms * (1.0 + SIGNAL_OUTCOME_HORIZON_TOLERANCE_PCT / 100.0)
                 # Three fields that used to live here are gone, none of them
                 # carrying information the record does not already hold:
@@ -9306,6 +9949,12 @@ class WalletTrackerService:
                     "markPrice": round(mark_price, 8),
                     "grossReturnPct": round(gross_return, 3),
                     "netReturnPct": round(gross_return - SIGNAL_ROUND_TRIP_COST_PCT, 3),
+                    "doubleCostNetReturnPct": round(
+                        gross_return - (2.0 * SIGNAL_ROUND_TRIP_COST_PCT), 3
+                    ),
+                    "delayedEntryNetReturnPct": (
+                        None if delayed_net_return is None else round(delayed_net_return, 3)
+                    ),
                     "measuredAt": now_ms,
                     "priceSource": price_source,
                     "degraded": elapsed_ms > tolerance_ms,
@@ -9359,6 +10008,17 @@ class WalletTrackerService:
                     # by construction are the ones that did NOT publish.
                     "walletCount": int(to_float(signal.get("walletCount"))),
                     "independentWalletCount": int(to_float(signal.get("independentWalletCount"))),
+                    "initialWalletAddresses": sorted(
+                        {
+                            str(address).lower()
+                            for address in (
+                                signal.get("walletAddresses")
+                                or signal.get("freshWalletAddresses") or []
+                            )
+                            if str(address).strip()
+                        }
+                    ),
+                    **execution_record_metadata(),
                     **signal_quality_estimate_fields(signal),
                     "shadow": False,
                     "published": True,
@@ -9518,6 +10178,752 @@ class WalletTrackerService:
         consensus = wider.get("consensus")
         return consensus if isinstance(consensus, list) else None
 
+    def paper_experiment_consensus(
+        self,
+        dashboard: dict[str, Any],
+        state: dict[str, Any],
+        *,
+        position_lifecycle: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """One-wallet observation surface shared by all three paper arms."""
+        wider, _cohort = self.build_monthly_sentiment_summary(
+            dashboard,
+            1,
+            state,
+            persist=False,
+            position_lifecycle=position_lifecycle,
+        )
+        consensus = wider.get("consensus")
+        return consensus if isinstance(consensus, list) else []
+
+    def fetch_paper_book_result(self, market_coin: str) -> dict[str, Any]:
+        return self.client.safe_post_result(
+            {"type": "l2Book", "coin": market_coin}, {}
+        )
+
+    def fetch_paper_market_meta_result(self) -> dict[str, Any]:
+        return self.client.safe_post_result({"type": "meta"}, {})
+
+    def fetch_paper_wallet_state_result(self, address: str) -> dict[str, Any]:
+        return self.client.safe_post_result(
+            {"type": "clearinghouseState", "user": address}, {}
+        )
+
+    def fetch_paper_oracle_samples(self, coins: set[str]) -> list[dict[str, Any]]:
+        if not coins:
+            return []
+        result = self.client.safe_post_result({"type": "metaAndAssetCtxs"}, [])
+        data = result.get("data") if isinstance(result, dict) and result.get("ok") else None
+        if not isinstance(data, list) or len(data) != 2:
+            return []
+        meta, contexts = data
+        universe = meta.get("universe") if isinstance(meta, dict) else None
+        if not isinstance(universe, list) or not isinstance(contexts, list) or len(universe) != len(contexts):
+            return []
+        observed_at = current_time_ms()
+        samples = []
+        for asset, context in zip(universe, contexts):
+            if not isinstance(asset, dict) or not isinstance(context, dict):
+                continue
+            coin = str(asset.get("name") or "")
+            oracle = to_float(context.get("oraclePx"))
+            if coin in coins and math.isfinite(oracle) and oracle > 0:
+                samples.append({
+                    "coin": coin, "observedAtMs": observed_at, "oraclePrice": oracle,
+                })
+        return samples
+
+    def fetch_paper_funding_history(
+        self, coin: str, *, start_ms: int, end_ms: int, max_pages: int = 20
+    ) -> dict[str, Any]:
+        """Page official hourly rates; a capped or failed page stays incomplete."""
+        rows: list[dict[str, Any]] = []
+        seen: set[int] = set()
+        cursor = start_ms
+        for _page in range(max_pages):
+            result = self.client.safe_post_result({
+                "type": "fundingHistory", "coin": coin,
+                "startTime": cursor, "endTime": end_ms,
+            }, [])
+            page = result.get("data") if isinstance(result, dict) and result.get("ok") else None
+            if not isinstance(page, list):
+                return {"complete": False, "rows": rows, "reason": "funding_fetch_failed"}
+            if not page:
+                return {"complete": True, "rows": rows}
+            newest = cursor - 1
+            for row in page:
+                if not isinstance(row, dict):
+                    return {"complete": False, "rows": rows, "reason": "invalid_funding_row"}
+                try:
+                    rate = float(row["fundingRate"])
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    return {"complete": False, "rows": rows, "reason": "invalid_funding_row"}
+                if str(row.get("coin") or "") != coin or not math.isfinite(rate):
+                    return {"complete": False, "rows": rows, "reason": "invalid_funding_row"}
+                at = to_float(row.get("time"))
+                if not math.isfinite(at) or at < cursor or at > end_ms:
+                    return {"complete": False, "rows": rows, "reason": "invalid_funding_time"}
+                timestamp = int(at)
+                if timestamp not in seen:
+                    seen.add(timestamp)
+                    rows.append(row)
+                newest = max(newest, timestamp)
+            if len(page) < 500:
+                return {"complete": True, "rows": rows}
+            if newest < cursor:
+                return {"complete": False, "rows": rows, "reason": "funding_pagination_stalled"}
+            cursor = newest + 1
+        return {"complete": False, "rows": rows, "reason": "funding_page_cap"}
+
+    def cached_paper_funding_history(
+        self, journal: ExecutionJournal, coin: str, *, start_ms: int, end_ms: int
+    ) -> dict[str, Any]:
+        """Fetch only missing hourly events; never fill a gap with zero funding."""
+        hour_ms = 60 * 60 * 1000
+        tolerance_ms = 60_000
+        boundaries = range((start_ms // hour_ms + 1) * hour_ms, end_ms, hour_ms)
+        rows = journal.load_funding_rates(
+            coin, start_ms=max(0, start_ms - tolerance_ms), end_ms=end_ms
+        )
+        missing = [
+            boundary for boundary in boundaries
+            if not any(abs(int(row["time"]) - boundary) <= tolerance_ms for row in rows)
+        ]
+        if not missing:
+            return {"complete": True, "rows": rows, "source": "cached_hourly_rates"}
+        fetched = self.fetch_paper_funding_history(
+            coin, start_ms=max(start_ms, missing[0] - tolerance_ms), end_ms=end_ms
+        )
+        if not fetched.get("complete"):
+            return fetched
+        try:
+            normalized = [
+                {
+                    "coin": coin,
+                    "time": int(row["time"]),
+                    "fundingRate": float(row["fundingRate"]),
+                }
+                for row in fetched.get("rows") or []
+                if isinstance(row, dict) and str(row.get("coin") or "") == coin
+            ]
+            journal.cache_funding_rates(coin, normalized)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return {"complete": False, "rows": rows, "reason": "invalid_funding_row"}
+        rows = journal.load_funding_rates(
+            coin, start_ms=max(0, start_ms - tolerance_ms), end_ms=end_ms
+        )
+        if any(
+            not any(abs(int(row["time"]) - boundary) <= tolerance_ms for row in rows)
+            for boundary in boundaries
+        ):
+            return {
+                "complete": False, "rows": rows,
+                "reason": "funding_event_missing_or_delayed",
+            }
+        return {"complete": True, "rows": rows, "source": "official_cached_hourly_rates"}
+
+    def quote_new_paper_entries(
+        self, records: dict[str, Any], *, now_ms: int
+    ) -> dict[str, Any]:
+        """Quote all newly eligible arms from the same prospective L2 book."""
+        books: dict[str, dict[str, Any]] = {}
+        market_decimals: dict[str, int] | None = None
+        for record in records.values():
+            if not isinstance(record, dict) or int(to_float(record.get("startedAt"))) != now_ms:
+                continue
+            if record.get("executionStatus") != "mark_proxy_only":
+                continue
+            market_coin = str(record.get("marketCoin") or record.get("coin") or "")
+            if market_decimals is None:
+                meta_result = self.fetch_paper_market_meta_result()
+                meta = meta_result.get("data") if isinstance(meta_result, dict) and meta_result.get("ok") else {}
+                universe = meta.get("universe") if isinstance(meta, dict) else None
+                market_decimals = {
+                    str(row.get("name")): int(row["szDecimals"])
+                    for row in universe
+                    if isinstance(row, dict)
+                    and row.get("name")
+                    and isinstance(row.get("szDecimals"), int)
+                    and not isinstance(row.get("szDecimals"), bool)
+                } if isinstance(universe, list) else {}
+            if market_coin not in market_decimals:
+                record.update(
+                    status="skipped", executionStatus="entry_unpriced",
+                    entrySkipReason="market_meta_unavailable",
+                )
+                continue
+            if market_coin not in books:
+                result = self.fetch_paper_book_result(market_coin)
+                books[market_coin] = {
+                    "result": result,
+                    "receivedAtMs": current_time_ms(),
+                }
+            fetched = books[market_coin]
+            result = fetched["result"]
+            if not isinstance(result, dict) or not result.get("ok") or not isinstance(result.get("data"), dict):
+                record.update(
+                    status="skipped", executionStatus="entry_unpriced",
+                    entrySkipReason="book_fetch_failed",
+                )
+                continue
+            if str(result["data"].get("coin") or "") != market_coin:
+                record.update(
+                    status="skipped", executionStatus="entry_unpriced",
+                    entrySkipReason="book_coin_mismatch",
+                )
+                continue
+            action = "buy" if record.get("side") == "long" else "sell"
+            quote = quote_book(
+                result["data"], action=action,
+                received_at_ms=fetched["receivedAtMs"],
+                detected_at_ms=now_ms,
+                notional_usd=PAPER_EXPERIMENT_NOTIONAL_USD,
+                size_decimals=market_decimals[market_coin],
+            )
+            record["entryQuote"] = quote
+            if not quote.get("ok"):
+                record.update(
+                    status="skipped", executionStatus="entry_unpriced",
+                    entrySkipReason=quote.get("reason") or "invalid_book",
+                )
+                continue
+            record.update(
+                executionStatus="entry_quoted",
+                executableEntryPrice=quote["fillPrice"],
+                executableEntryAtMs=quote["receivedAtMs"],
+                priceAvailableAtMs=quote["receivedAtMs"],
+                entryLatencyMs=quote["latencyMs"],
+            )
+        return records
+
+    def update_paper_execution_exits(
+        self, records: dict[str, Any], *, now_ms: int,
+        dashboard: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Close from original wallet departures, never from today's cohort.
+
+        Unknown wallet state remains active. A member confirmed flat or
+        flipped never re-enters its original cohort. The first quoted book
+        after an observed breach determines the hypothetical exit.
+        """
+        active_records = [
+            record for record in records.values()
+            if isinstance(record, dict)
+            and record.get("executionStatus") in {"entry_quoted", "exit_pending"}
+            and record.get("status") not in {"closed", "skipped"}
+            and int(to_float(record.get("startedAt"))) < now_ms
+        ]
+        if not active_records:
+            return records
+        addresses = sorted({
+            str(address).lower()
+            for record in active_records
+            for address in (record.get("activeWalletAddresses") or [])
+            if str(address).strip()
+        })
+        states: dict[str, dict[str, Any]] = {}
+        dashboard_wallets = {
+            str(wallet.get("address") or "").lower(): wallet
+            for wallet in (dashboard.get("wallets") or [])
+            if isinstance(wallet, dict) and wallet.get("address")
+        } if isinstance(dashboard, dict) and isinstance(dashboard.get("wallets"), list) else {}
+        for address in addresses:
+            dashboard_state = paper_dashboard_clearinghouse_state(
+                dashboard_wallets.get(address), now_ms=now_ms,
+            )
+            if dashboard_state is not None:
+                states[address] = {
+                    "result": {"ok": True, "data": dashboard_state},
+                    "receivedAtMs": dashboard_state["observedAtMs"],
+                    "source": "verified_dashboard_snapshot",
+                }
+            else:
+                result = self.fetch_paper_wallet_state_result(address)
+                states[address] = {
+                    "result": result, "receivedAtMs": current_time_ms(),
+                    "source": "direct_clearinghouse_state",
+                }
+        exit_books: dict[str, dict[str, Any]] = {}
+        for record in active_records:
+            coin = str(record.get("marketCoin") or record.get("coin") or "")
+            direction = 1 if record.get("side") == "long" else -1
+            active = list(record.get("activeWalletAddresses") or [])
+            departed = list(record.get("departedWalletAddresses") or [])
+            unknown: list[str] = []
+            checked_at: list[int] = []
+            departed_at: list[int] = []
+            state_receipts = dict(record.get("walletStateReceivedAtMs") or {})
+            state_sources = dict(record.get("walletStateSources") or {})
+            for address in active[:]:
+                observation = states.get(str(address).lower()) or {}
+                result = observation.get("result")
+                received_at = int(to_float(observation.get("receivedAtMs")))
+                if received_at > 0:
+                    checked_at.append(received_at)
+                    state_receipts[address] = received_at
+                    state_sources[address] = observation.get("source")
+                data = result.get("data") if isinstance(result, dict) and result.get("ok") else None
+                size = paper_wallet_position_size(data, coin)
+                if size is None:
+                    unknown.append(address)
+                elif direction * size <= 0:
+                    active.remove(address)
+                    departed.append(address)
+                    if received_at > 0:
+                        departed_at.append(received_at)
+            record["activeWalletAddresses"] = active
+            record["departedWalletAddresses"] = departed
+            record["unknownWalletAddresses"] = unknown
+            record["walletStateReceivedAtMs"] = state_receipts
+            record["walletStateSources"] = state_sources
+            record["lastWalletCheckAtMs"] = max(checked_at, default=now_ms)
+            if len(active) >= int(to_float(record.get("exitThreshold")) or 1):
+                continue
+            record.setdefault("exitDetectedAtMs", max(departed_at, default=now_ms))
+            if coin not in exit_books:
+                result = self.fetch_paper_book_result(coin)
+                exit_books[coin] = {
+                    "result": result, "receivedAtMs": current_time_ms()
+                }
+            fetched = exit_books[coin]
+            result = fetched["result"]
+            if not isinstance(result, dict) or not result.get("ok") or not isinstance(result.get("data"), dict):
+                record.update(executionStatus="exit_pending", exitSkipReason="book_fetch_failed")
+                continue
+            if str(result["data"].get("coin") or "") != coin:
+                record.update(executionStatus="exit_pending", exitSkipReason="book_coin_mismatch")
+                continue
+            entry_quote = record.get("entryQuote")
+            if not isinstance(entry_quote, dict) or not entry_quote.get("ok"):
+                record.update(executionStatus="exit_pending", exitSkipReason="missing_entry_quote")
+                continue
+            quote = quote_book(
+                result["data"],
+                action="sell" if direction == 1 else "buy",
+                received_at_ms=fetched["receivedAtMs"],
+                detected_at_ms=int(to_float(record["exitDetectedAtMs"])),
+                base_size=to_float(entry_quote.get("baseSize")),
+                size_decimals=entry_quote.get("sizeDecimals"),
+            )
+            record["exitQuote"] = quote
+            if not quote.get("ok"):
+                record.update(
+                    executionStatus="exit_pending",
+                    exitSkipReason=quote.get("reason") or "invalid_book",
+                )
+                continue
+            record.update(
+                status="closed", executionStatus="closed_funding_unverified",
+                exitAtMs=quote["receivedAtMs"], exitPrice=quote["fillPrice"],
+                exitBook=result["data"],
+                exitReason="original_cohort_below_threshold",
+                exitLatencyMs=quote["latencyMs"],
+                executionResult={"complete": False, "reason": "funding_unverified"},
+            )
+        return records
+
+    def quote_delayed_paper_entries(
+        self, records: dict[str, Any], *, now_ms: int
+    ) -> dict[str, Any]:
+        """One-hour delayed entry is a fresh book quote, not a shifted mark."""
+        books: dict[str, dict[str, Any]] = {}
+        delay_ms = 60 * 60 * 1000
+        max_lag_ms = 30 * 60 * 1000
+        for record in records.values():
+            if not isinstance(record, dict) or record.get("delayedEntryStatus"):
+                continue
+            entry = record.get("entryQuote")
+            if not isinstance(entry, dict) or not entry.get("ok"):
+                continue
+            due_at = int(to_float(record.get("startedAt"))) + delay_ms
+            if now_ms < due_at:
+                continue
+            if record.get("status") == "closed" or record.get("executionStatus") == "exit_pending":
+                record["delayedEntryStatus"] = "closed_before_delay"
+                continue
+            if now_ms - due_at > max_lag_ms:
+                record["delayedEntryStatus"] = "missed_window"
+                continue
+            if record.get("executionStatus") != "entry_quoted":
+                continue
+            coin = str(record.get("marketCoin") or record.get("coin") or "")
+            if coin not in books:
+                books[coin] = {
+                    "result": self.fetch_paper_book_result(coin),
+                    "receivedAtMs": current_time_ms(),
+                }
+            fetched = books[coin]
+            result = fetched["result"]
+            if not isinstance(result, dict) or not result.get("ok") or not isinstance(result.get("data"), dict):
+                record["delayedEntrySkipReason"] = "book_fetch_failed"
+                continue
+            if str(result["data"].get("coin") or "") != coin:
+                record["delayedEntrySkipReason"] = "book_coin_mismatch"
+                continue
+            quote = quote_book(
+                result["data"],
+                action="buy" if record.get("side") == "long" else "sell",
+                received_at_ms=fetched["receivedAtMs"],
+                detected_at_ms=due_at,
+                notional_usd=PAPER_EXPERIMENT_NOTIONAL_USD,
+                size_decimals=entry.get("sizeDecimals"),
+            )
+            record["delayedEntryQuote"] = quote
+            if quote.get("ok"):
+                record["delayedEntryStatus"] = "quoted"
+            else:
+                record["delayedEntrySkipReason"] = quote.get("reason") or "invalid_book"
+        return records
+
+    def update_paper_execution_funding(
+        self,
+        records: dict[str, Any],
+        *,
+        journal: ExecutionJournal,
+        current_oracle_samples: list[dict[str, Any]],
+        now_ms: int,
+    ) -> dict[str, Any]:
+        for record in records.values():
+            if not isinstance(record, dict) or record.get("executionStatus") != "closed_funding_unverified":
+                continue
+            prior_attempt = int(to_float(record.get("lastFundingAttemptAtMs")))
+            if prior_attempt and now_ms - prior_attempt < 60 * 60 * 1000:
+                continue
+            record["lastFundingAttemptAtMs"] = now_ms
+            entry = record.get("entryQuote")
+            exit_quote = record.get("exitQuote")
+            if not isinstance(entry, dict) or not isinstance(exit_quote, dict):
+                record["fundingModel"] = {"complete": False, "reason": "missing_executable_quote"}
+                continue
+            coin = str(record.get("marketCoin") or record.get("coin") or "")
+            entered_at = int(to_float(entry.get("receivedAtMs")))
+            exited_at = int(to_float(exit_quote.get("receivedAtMs")))
+            history = self.cached_paper_funding_history(
+                journal, coin, start_ms=entered_at, end_ms=exited_at
+            )
+            samples = journal.load_oracle_samples(
+                coin,
+                start_ms=entered_at - 15 * 60 * 1000,
+                end_ms=exited_at + 15 * 60 * 1000,
+            )
+            samples.extend(
+                sample for sample in current_oracle_samples if sample.get("coin") == coin
+            )
+            model = modeled_funding_cashflow(
+                history.get("rows") or [], samples,
+                side=str(record.get("side") or ""),
+                base_size=to_float(entry.get("baseSize")),
+                entry_at_ms=entered_at, exit_at_ms=exited_at,
+                history_complete=bool(history.get("complete")),
+            )
+            record["fundingModel"] = model
+            if not model.get("complete"):
+                continue
+            trade_result = paper_trade_result(
+                entry, exit_quote, side=str(record.get("side") or ""),
+                funding_cashflow_usd=to_float(model.get("cashflowUsd")),
+                initial_notional_usd=PAPER_EXPERIMENT_NOTIONAL_USD,
+            )
+            record["executionResult"] = trade_result
+            if trade_result.get("complete"):
+                record["executionStatus"] = "closed_modeled_net"
+                record["doubleCostResult"] = stressed_trade_result(
+                    entry, exit_quote, side=str(record.get("side") or ""),
+                    funding_cashflow_usd=to_float(model.get("cashflowUsd")),
+                    initial_notional_usd=PAPER_EXPERIMENT_NOTIONAL_USD,
+                )
+                delayed = record.get("delayedEntryQuote")
+                exit_book = record.get("exitBook")
+                if isinstance(delayed, dict) and delayed.get("ok") and isinstance(exit_book, dict):
+                    delayed_exit = quote_book(
+                        exit_book,
+                        action="sell" if record.get("side") == "long" else "buy",
+                        received_at_ms=exited_at,
+                        detected_at_ms=int(to_float(record.get("exitDetectedAtMs"))),
+                        base_size=to_float(delayed.get("baseSize")),
+                        size_decimals=delayed.get("sizeDecimals"),
+                    )
+                    delayed_funding = modeled_funding_cashflow(
+                        history.get("rows") or [], samples,
+                        side=str(record.get("side") or ""),
+                        base_size=to_float(delayed.get("baseSize")),
+                        entry_at_ms=int(to_float(delayed.get("receivedAtMs"))),
+                        exit_at_ms=exited_at,
+                        history_complete=bool(history.get("complete")),
+                    )
+                    record["delayedExitQuote"] = delayed_exit
+                    record["delayedFundingModel"] = delayed_funding
+                    record["delayedEntryResult"] = paper_trade_result(
+                        delayed, delayed_exit,
+                        side=str(record.get("side") or ""),
+                        funding_cashflow_usd=(
+                            to_float(delayed_funding.get("cashflowUsd"))
+                            if delayed_funding.get("complete") else None
+                        ),
+                        initial_notional_usd=PAPER_EXPERIMENT_NOTIONAL_USD,
+                    )
+        return records
+
+    def paper_portfolio_snapshots(
+        self,
+        records: dict[str, Any],
+        *,
+        journal: ExecutionJournal,
+        current_oracle_samples: list[dict[str, Any]],
+        now_ms: int,
+    ) -> list[dict[str, Any]]:
+        """Prospective mark-to-close equity including open losses and costs."""
+        open_values: dict[str, float] = {}
+        double_cost_open_values: dict[str, float] = {}
+        delayed_open_values: dict[str, float] = {}
+        books: dict[str, dict[str, Any]] = {}
+        for key, record in records.items():
+            if not isinstance(record, dict) or record.get("executionStatus") not in {"entry_quoted", "exit_pending"}:
+                continue
+            if record.get("status") in {"closed", "skipped"}:
+                continue
+            entry = record.get("entryQuote")
+            if not isinstance(entry, dict) or not entry.get("ok"):
+                continue
+            coin = str(record.get("marketCoin") or record.get("coin") or "")
+            if coin not in books:
+                books[coin] = {
+                    "result": self.fetch_paper_book_result(coin),
+                    "receivedAtMs": current_time_ms(),
+                }
+            fetched = books[coin]
+            result = fetched["result"]
+            if not isinstance(result, dict) or not result.get("ok") or not isinstance(result.get("data"), dict):
+                continue
+            if str(result["data"].get("coin") or "") != coin:
+                continue
+            side = str(record.get("side") or "")
+            exit_quote = quote_book(
+                result["data"],
+                action="sell" if side == "long" else "buy",
+                received_at_ms=fetched["receivedAtMs"],
+                detected_at_ms=now_ms,
+                base_size=to_float(entry.get("baseSize")),
+                size_decimals=entry.get("sizeDecimals"),
+            )
+            if not exit_quote.get("ok"):
+                continue
+            entered_at = int(to_float(entry.get("receivedAtMs")))
+            history: dict[str, Any] = {"complete": True, "rows": []}
+            samples: list[dict[str, Any]] = []
+            if int(exit_quote["receivedAtMs"]) <= entered_at:
+                funding = {"complete": True, "cashflowUsd": 0.0}
+            else:
+                history = self.cached_paper_funding_history(
+                    journal, coin, start_ms=entered_at,
+                    end_ms=int(exit_quote["receivedAtMs"]),
+                )
+                samples = journal.load_oracle_samples(
+                    coin, start_ms=entered_at - 15 * 60 * 1000,
+                    end_ms=int(exit_quote["receivedAtMs"]) + 15 * 60 * 1000,
+                )
+                samples.extend(
+                    sample for sample in current_oracle_samples if sample.get("coin") == coin
+                )
+                funding = modeled_funding_cashflow(
+                    history.get("rows") or [], samples,
+                    side=side,
+                    base_size=to_float(entry.get("baseSize")),
+                    entry_at_ms=entered_at,
+                    exit_at_ms=int(exit_quote["receivedAtMs"]),
+                    history_complete=bool(history.get("complete")),
+                )
+            if funding.get("complete"):
+                funding_cashflow = to_float(funding.get("cashflowUsd"))
+                valuation = paper_trade_result(
+                    entry, exit_quote, side=side,
+                    funding_cashflow_usd=funding_cashflow,
+                    initial_notional_usd=PAPER_EXPERIMENT_NOTIONAL_USD,
+                )
+                if valuation.get("complete"):
+                    open_values[str(key)] = to_float(valuation.get("netUsd"))
+                stressed = stressed_trade_result(
+                    entry, exit_quote, side=side,
+                    funding_cashflow_usd=funding_cashflow,
+                    initial_notional_usd=PAPER_EXPERIMENT_NOTIONAL_USD,
+                )
+                if stressed.get("complete"):
+                    double_cost_open_values[str(key)] = to_float(stressed.get("netUsd"))
+            delayed_entry = record.get("delayedEntryQuote")
+            if isinstance(delayed_entry, dict) and delayed_entry.get("ok"):
+                delayed_at = int(to_float(delayed_entry.get("receivedAtMs")))
+                if delayed_at >= int(exit_quote["receivedAtMs"]):
+                    continue
+                delayed_exit = quote_book(
+                    result["data"],
+                    action="sell" if side == "long" else "buy",
+                    received_at_ms=fetched["receivedAtMs"],
+                    detected_at_ms=now_ms,
+                    base_size=to_float(delayed_entry.get("baseSize")),
+                    size_decimals=delayed_entry.get("sizeDecimals"),
+                )
+                if not delayed_exit.get("ok"):
+                    continue
+                delayed_funding = modeled_funding_cashflow(
+                    history.get("rows") or [], samples,
+                    side=side, base_size=to_float(delayed_entry.get("baseSize")),
+                    entry_at_ms=delayed_at,
+                    exit_at_ms=int(delayed_exit["receivedAtMs"]),
+                    history_complete=bool(history.get("complete")),
+                )
+                if not delayed_funding.get("complete"):
+                    continue
+                delayed_valuation = paper_trade_result(
+                    delayed_entry, delayed_exit, side=side,
+                    funding_cashflow_usd=to_float(delayed_funding.get("cashflowUsd")),
+                    initial_notional_usd=PAPER_EXPERIMENT_NOTIONAL_USD,
+                )
+                if delayed_valuation.get("complete"):
+                    delayed_open_values[str(key)] = to_float(delayed_valuation.get("netUsd"))
+        snapshots: list[dict[str, Any]] = []
+        for arm in ("ranked_consensus", "consensus_unranked", "fresh_entry"):
+            snapshots.append(portfolio_snapshot(
+                records, arm=arm, observed_at_ms=now_ms,
+                open_trade_values_usd=open_values,
+            ))
+            snapshots.append(scenario_portfolio_snapshot(
+                records, arm=arm, scenario="double_cost",
+                observed_at_ms=now_ms,
+                open_trade_values_usd=double_cost_open_values,
+            ))
+            snapshots.append(scenario_portfolio_snapshot(
+                records, arm=arm, scenario="delayed_entry",
+                observed_at_ms=now_ms,
+                open_trade_values_usd=delayed_open_values,
+            ))
+        return snapshots
+
+    def record_execution_experiment(
+        self,
+        *,
+        dashboard: dict[str, Any],
+        state: dict[str, Any],
+        summary: dict[str, Any],
+        position_lifecycle: dict[str, Any],
+        signal_outcomes: dict[str, Any],
+        shadow_outcomes: dict[str, Any],
+        candidate_outcomes: dict[str, Any],
+        now_ms: int,
+        alert_config: dict[str, Any] | None = None,
+    ) -> None:
+        """Durable prospective paper observations, isolated from alerts.
+
+        L2 depth and funding are modeled, not actual fills. Failures cannot
+        block Telegram, and no observation grants live-trading permission.
+        """
+        journal = ExecutionJournal(self.alerts_path.parent / EXECUTION_JOURNAL_FILE.name)
+        manifest = execution_rule_manifest()
+        config_hash = execution_config_hash(manifest)
+        alert_config_hash = hashlib.sha256(
+            json.dumps(alert_config or {}, sort_keys=True, separators=(",", ":"), default=str).encode()
+        ).hexdigest()
+        tracked_addresses = sorted({wallet.address.lower() for wallet in self.store.list_wallets()})
+        observed_addresses = sorted({
+            str(wallet.get("address") or "").lower()
+            for wallet in dashboard.get("wallets", [])
+            if isinstance(wallet, dict) and wallet.get("address")
+        })
+        freeze = journal.freeze_status(
+            config_hash=config_hash, alert_config_hash=alert_config_hash,
+            tracked_wallets=tracked_addresses, now_ms=now_ms,
+        )
+        wallet_rows = dashboard.get("wallets") if isinstance(dashboard, dict) else None
+        snapshot_complete = isinstance(wallet_rows, list) and (
+            not tracked_addresses or observed_addresses == tracked_addresses
+        ) and all(
+            isinstance(wallet, dict)
+            and not (
+                isinstance(wallet.get("dataQuality"), dict)
+                and wallet["dataQuality"].get("stateOk") is False
+            )
+            for wallet in wallet_rows
+        )
+        if not snapshot_complete and freeze.get("status") == "baseline":
+            # A failed or partial first sweep cannot start the enrollment
+            # clock. Nothing is written, so the next healthy sweep can be the
+            # actual baseline.
+            return
+        if not snapshot_complete:
+            freeze = {
+                **freeze,
+                "allowNewEntries": False,
+                "reasons": list(freeze.get("reasons") or []) + ["snapshot_incomplete"],
+            }
+        baseline_at = int(to_float(freeze.get("baselineAtMs")))
+        if baseline_at and now_ms >= baseline_at + PAPER_EXPERIMENT_ENROLLMENT_MS:
+            freeze = {
+                **freeze,
+                "allowNewEntries": False,
+                "reasons": list(freeze.get("reasons") or []) + ["enrollment_finished"],
+            }
+        consensus = self.paper_experiment_consensus(
+            dashboard, state, position_lifecycle=position_lifecycle
+        )
+        previous_paper = journal.load_stream("paper")
+        paper_outcomes = self.update_paper_experiment_outcomes(
+            previous_paper, summary, consensus, now_ms=now_ms,
+            allow_new_entries=bool(freeze.get("allowNewEntries")),
+            baseline_at_ms=int(to_float(freeze.get("baselineAtMs"))),
+        )
+        paper_outcomes = self.quote_new_paper_entries(paper_outcomes, now_ms=now_ms)
+        paper_outcomes = self.update_paper_execution_exits(
+            paper_outcomes, now_ms=now_ms, dashboard=dashboard,
+        )
+        paper_outcomes = self.quote_delayed_paper_entries(paper_outcomes, now_ms=now_ms)
+        oracle_coins = {
+            str(record.get("marketCoin") or record.get("coin") or "")
+            for record in paper_outcomes.values()
+            if isinstance(record, dict)
+            and (
+                record.get("executionStatus") in {"entry_quoted", "exit_pending"}
+                or (
+                    record.get("executionStatus") == "closed_funding_unverified"
+                    and int(to_float(record.get("exitAtMs"))) >= now_ms
+                )
+            )
+        }
+        oracle_samples = self.fetch_paper_oracle_samples(oracle_coins)
+        paper_outcomes = self.update_paper_execution_funding(
+            paper_outcomes, journal=journal,
+            current_oracle_samples=oracle_samples, now_ms=now_ms,
+        )
+        portfolio_snapshots = self.paper_portfolio_snapshots(
+            paper_outcomes, journal=journal,
+            current_oracle_samples=oracle_samples, now_ms=now_ms,
+        )
+        evaluations = self.paper_experiment_evaluations(consensus, now_ms=now_ms)
+        if not freeze.get("allowNewEntries"):
+            for evaluation in evaluations:
+                evaluation["eligible"] = False
+                evaluation.setdefault("reasons", []).extend(freeze.get("reasons") or ["experiment_paused"])
+                evaluation["evaluationId"] = hashlib.sha256(
+                    (str(evaluation["evaluationId"]) + "|paused|" + ",".join(evaluation["reasons"])).encode()
+                ).hexdigest()
+        journal.sync(
+            manifest=manifest,
+            config_hash=config_hash,
+            streams={
+                "published": signal_outcomes,
+                "candidate": candidate_outcomes,
+                "shadow": shadow_outcomes,
+                "paper": paper_outcomes,
+            },
+            evaluations=evaluations,
+            oracle_samples=oracle_samples,
+            portfolio_snapshots=portfolio_snapshots,
+            context={
+                "alertConfigHash": alert_config_hash,
+                "trackedWalletAddresses": tracked_addresses,
+                "observedWalletAddresses": observed_addresses,
+            },
+            now_ms=now_ms,
+        )
+
     def update_shadow_signal_outcomes(
         self,
         previous: dict[str, Any],
@@ -9605,6 +11011,7 @@ class WalletTrackerService:
                 # default to {} rather than requiring its presence.
                 "freshAddValuesByWindow": item.get("freshAddValuesByWindow") or {},
                 "rejectionReasons": self.signal_rejection_reasons(item, probability),
+                **execution_record_metadata(),
                 "shadow": True,
                 "published": False,
                 # Independence evidence. "periodic" means the consensus had not
@@ -11092,6 +12499,17 @@ class WalletTrackerService:
                 now_ms=dedupe_now_ms,
             )
         save_json_file(self.alerts_path, {"config": stored_config, "state": new_state})
+        if EXECUTION_JOURNAL_ENABLED:
+            try:
+                self.record_execution_experiment(
+                    dashboard=dashboard, state=state, summary=alert_summary,
+                    position_lifecycle=position_lifecycle,
+                    signal_outcomes=signal_outcomes, shadow_outcomes=shadow_signal_outcomes,
+                    candidate_outcomes=candidate_signal_outcomes, now_ms=dedupe_now_ms,
+                    alert_config=stored_config,
+                )
+            except Exception as exc:  # noqa: BLE001 - never block alert delivery
+                print(f"Execution observation journal error: {exc}")
 
         return {
             "enabled": bool(config.get("enabled")),
@@ -11274,6 +12692,17 @@ class WalletTrackerService:
                 now_ms=dedupe_now_ms,
             )
         save_json_file(self.alerts_path, {"config": stored_config, "state": new_state})
+        if EXECUTION_JOURNAL_ENABLED:
+            try:
+                self.record_execution_experiment(
+                    dashboard=dashboard, state=state, summary=alert_summary,
+                    position_lifecycle=position_lifecycle,
+                    signal_outcomes=signal_outcomes, shadow_outcomes=shadow_signal_outcomes,
+                    candidate_outcomes=candidate_signal_outcomes, now_ms=lifecycle_now_ms,
+                    alert_config=stored_config,
+                )
+            except Exception as exc:  # noqa: BLE001 - never block Telegram delivery
+                print(f"Execution observation journal error: {exc}")
         return {
             "sent": True,
             "positionAlertSent": position_alert_sent,

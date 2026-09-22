@@ -14,6 +14,9 @@ import server
 # suite sleep through every simulated page failure; what the tests care about
 # is how many attempts are made, which they assert directly.
 server.FILL_HISTORY_PAGE_RETRY_DELAY_SECONDS = 0.0
+# Alert tests exercise transient fixtures, not the on-disk production journal.
+# The journal itself is covered with isolated temporary databases below.
+server.EXECUTION_JOURNAL_ENABLED = False
 from coinmarketman import CoinMarketManApiError
 from server import (
     ALERTS_FILE,
@@ -47,6 +50,7 @@ from server import (
     build_risk_trend_quality_rank,
     cashflow_neutral_drawdown_pct,
     daily_equity_metrics_180d,
+    equity_curve_verification,
     episode_loss_metrics,
     collapse_twap_slice_fills,
     current_time_ms,
@@ -248,6 +252,38 @@ class SegmentTests(unittest.TestCase):
         self.assertIsNone(metrics["maxDrawdownUpperBoundPct"])
         self.assertEqual(metrics["cashflowAmbiguousIntervals"], 0)
         self.assertTrue(metrics["equityCurveComplete"])
+        verification = equity_curve_verification(
+            metrics, portfolio_ok=True, funding_complete=True
+        )
+        self.assertTrue(verification["verified"])
+        self.assertEqual(verification["reasons"], [])
+
+    def test_equity_curve_verification_rejects_incomplete_funding(self) -> None:
+        metrics = {
+            "equityCurveComplete": True,
+            "dailyReturnCount": 180,
+            "missingDayCount": 0,
+            "invalidDayCount": 0,
+            "cashflowAmbiguousIntervals": 0,
+        }
+        verification = equity_curve_verification(
+            metrics, portfolio_ok=True, funding_complete=False
+        )
+        self.assertFalse(verification["verified"])
+        self.assertEqual(verification["reasons"], ["funding_history_incomplete"])
+
+    def test_verified_status_requires_complete_twap_and_episode_history(self) -> None:
+        metrics = {
+            "equityCurveComplete": True, "dailyReturnCount": 180,
+            "missingDayCount": 0, "invalidDayCount": 0,
+            "cashflowAmbiguousIntervals": 0,
+        }
+        verification = equity_curve_verification(
+            metrics, portfolio_ok=True, funding_complete=True,
+            episode_history_complete=False,
+        )
+        self.assertEqual(verification["status"], "preliminary")
+        self.assertIn("episode_history_incomplete", verification["reasons"])
 
     def test_incomplete_curve_with_zero_downside_does_not_get_infinite_sortino(self) -> None:
         day_ms = 86_400_000
@@ -3542,6 +3578,9 @@ class AlertSummaryTests(unittest.TestCase):
             self.service, "fetch_open_orders_result", return_value={"ok": True, "data": [], "error": ""}
         ), patch.object(
             self.service, "fetch_portfolio_result", return_value={"ok": True, "data": {}, "error": ""}
+        ), patch.object(
+            self.service, "fetch_user_funding_paginated_result",
+            return_value={"ok": True, "data": [], "error": "", "truncated": False},
         ), patch.object(self.service, "fetch_wallet_role", return_value="user"):
             return self.service.fetch_wallet_snapshot(wallet)
 
@@ -3954,6 +3993,12 @@ class AlertSummaryTests(unittest.TestCase):
             self.service, "fetch_open_orders_result", return_value={"ok": True, "data": [], "error": ""}
         ), patch.object(
             self.service, "fetch_portfolio_result", return_value={"ok": True, "data": {}, "error": ""}
+        ), patch.object(
+            self.service, "fetch_twap_slice_fills_paginated_result",
+            return_value={"ok": True, "data": [], "error": "", "truncated": False},
+        ), patch.object(
+            self.service, "fetch_user_funding_paginated_result",
+            return_value={"ok": True, "data": [], "error": "", "truncated": False},
         ), patch.object(self.service, "fetch_wallet_role", return_value="user"):
             return self.service.fetch_wallet_snapshot(wallet)
 
@@ -8161,6 +8206,50 @@ class PositionEpisodeReconstructionTests(unittest.TestCase):
         self.assertEqual(len(episodes), 1)
         self.assertAlmostEqual(episodes[0]["pnl"], 105.0)
 
+    def test_funding_is_allocated_only_inside_the_closed_holding_interval(self) -> None:
+        fills = [
+            {"coin": "BTC", "dir": "Open Long", "sz": "1",
+             "startPosition": "0", "side": "B", "closedPnl": "0", "fee": "1", "time": 1000},
+            {"coin": "BTC", "dir": "Close Long", "sz": "1",
+             "startPosition": "1", "side": "A", "closedPnl": "100", "fee": "1", "time": 5000},
+        ]
+        funding = [
+            {"time": 500, "delta": {"type": "funding", "coin": "BTC", "usdc": "50"}},
+            {"time": 2000, "delta": {"type": "funding", "coin": "BTC", "usdc": "-7"}},
+            {"time": 3000, "delta": {"type": "funding", "coin": "ETH", "usdc": "99"}},
+            {"time": 6000, "delta": {"type": "funding", "coin": "BTC", "usdc": "50"}},
+        ]
+        episodes = reconstruct_position_episodes(fills, 0, funding)
+        self.assertEqual(len(episodes), 1)
+        self.assertAlmostEqual(episodes[0]["pnlBeforeFunding"], 98.0)
+        self.assertAlmostEqual(episodes[0]["fundingUsd"], -7.0)
+        self.assertEqual(episodes[0]["fundingEventCount"], 1)
+        self.assertAlmostEqual(episodes[0]["pnl"], 91.0)
+
+    def test_funding_at_a_flip_is_never_charged_to_both_episodes(self) -> None:
+        episodes = [
+            {"coin": "BTC", "startMs": 1000, "endMs": 3000, "pnl": 10},
+            {"coin": "BTC", "startMs": 3000, "endMs": 5000, "pnl": 20},
+        ]
+        funded = server.apply_funding_to_position_episodes(
+            episodes,
+            [{"time": 3000, "delta": {"type": "funding", "coin": "BTC", "usdc": "-3"}}],
+        )
+        self.assertEqual([row["fundingUsd"] for row in funded], [0, -3])
+        self.assertTrue(funded[0]["fundingAllocationAmbiguous"])
+
+    def test_funding_pager_reports_an_uncertain_full_timestamp_boundary(self) -> None:
+        service = WalletTrackerService(WalletStore(Path(ALERTS_FILE)), HyperliquidClient())
+        rows = [
+            {"time": 1000, "hash": str(i), "delta": {"type": "funding", "coin": "BTC", "usdc": "1"}}
+            for i in range(3)
+        ]
+        with patch.object(service, "fetch_page_with_retry", side_effect=lambda request: request()):
+            with patch.object(service, "fetch_user_funding_result", return_value={"ok": True, "data": rows}):
+                result = service.fetch_user_funding_paginated_result("0xabc", 0, page_size=3)
+        self.assertTrue(result["truncated"])
+        self.assertEqual(len(result["data"]), 3)
+
     def test_an_episode_whose_first_fill_has_a_nonzero_start_position_is_unanchored(self) -> None:
         # A nonzero startPosition on the first fill of an episode means the
         # position predates the scan window - its realized pnl is still exact
@@ -8770,6 +8859,552 @@ class ShadowSignalSamplingTests(unittest.TestCase):
         self.assertEqual(record["sampleIndex"], 1)
         self.assertEqual(record["consensusFingerprint"]["walletAddresses"], ["0xaaa", "0xbbb"])
         self.assertEqual(record["consensusFingerprint"]["totalValue"], 1_000_000.0)
+
+    def test_paper_evaluation_id_does_not_change_with_mark_to_market_notional(self) -> None:
+        first = self.consensus_item(totalSize=10.0, totalValue=1_000_000.0)
+        second = self.consensus_item(totalSize=10.0, totalValue=1_005_000.0, markPrice=100.5)
+        at_ms = self.started_at
+        ids_a = [row["evaluationId"] for row in self.service.paper_experiment_evaluations([first], now_ms=at_ms)]
+        ids_b = [row["evaluationId"] for row in self.service.paper_experiment_evaluations([second], now_ms=at_ms)]
+        self.assertEqual(ids_a, ids_b)
+
+    def test_unranked_and_fresh_controls_do_not_inherit_rank_score_veto(self) -> None:
+        item = self.consensus_item(
+            independentWalletCount=4, netIndependentWalletCount=3,
+            verifiedFreshIndependentWalletCount=3, netFreshIndependentWalletCount=3,
+            oppositeVerifiedFreshIndependentWalletCount=0,
+            independentTopWalletCount=0, netIndependentWeightedWalletCount=0.0,
+            freshAddVwap=100.0, candidateFreshAddVwap=100.0,
+            candidateFreshIndependentWalletCount=1,
+            oppositeCandidateFreshIndependentWalletCount=0,
+            maxEntryDistancePct=10.0, entryDistancePct=0.0,
+        )
+        ranked = self.service.paper_experiment_arm_reasons(item, "ranked_consensus")
+        self.assertIn("weak_qnet", ranked)
+        self.assertEqual(self.service.paper_experiment_arm_reasons(item, "consensus_unranked"), [])
+        self.assertEqual(self.service.paper_experiment_arm_reasons(item, "fresh_entry"), [])
+
+    def test_paper_arms_do_not_open_both_directions_of_one_coin(self) -> None:
+        long_item = self.consensus_item(
+            coin="ETH", side="long", markPrice=100, freshAddVwap=100,
+            candidateFreshAddVwap=100,
+        )
+        short_item = self.consensus_item(
+            coin="ETH", side="short", markPrice=100, freshAddVwap=100,
+            candidateFreshAddVwap=100,
+        )
+        with patch.object(self.service, "paper_experiment_arm_reasons", return_value=[]):
+            records = self.service.update_paper_experiment_outcomes(
+                {}, {"consensus": [], "positionMarks": []},
+                [long_item, short_item], now_ms=self.started_at,
+            )
+        self.assertEqual(len(records), 3)
+        self.assertTrue(all(record["side"] == "long" for record in records.values()))
+
+    def test_unfinished_paper_trade_is_not_evicted_after_180_days(self) -> None:
+        old = self.started_at - 181 * 86_400_000
+        prior = {"old": {
+            "coin": "ETH", "marketCoin": "ETH", "side": "long",
+            "signalKey": "ETH:long", "experimentArm": "ranked_consensus",
+            "startedAt": old, "entryPrice": 100.0,
+            "executionStatus": "entry_quoted", "status": "open", "outcomes": {},
+        }}
+        records = self.service.update_paper_experiment_outcomes(
+            prior, {"positionMarks": [{"coin": "ETH", "side": "long", "markPrice": 100.0}]},
+            [], now_ms=self.started_at,
+        )
+        self.assertIn("old", records)
+
+    def test_published_record_freezes_full_original_cohort_not_only_fresh_subset(self) -> None:
+        addresses = ["0x" + str(index) * 40 for index in range(1, 7)]
+        item = self.consensus_item(
+            wallets=[{"address": address, "value": 100_000} for address in addresses],
+            freshWalletAddresses=addresses[:2], markPrice=100.0,
+        )
+        with patch.object(self.service, "signal_rejection_reasons", return_value=[]):
+            signal = self.service.build_high_conviction_signals([item])[0]
+        self.assertEqual(signal["walletAddresses"], addresses)
+        signal["status"] = "NEW"
+        records = self.service.update_signal_outcomes(
+            {}, {"signals": [signal], "positionMarks": [], "consensus": []},
+            now_ms=self.started_at,
+        )
+        self.assertEqual(next(iter(records.values()))["initialWalletAddresses"], addresses)
+
+    def test_paper_observations_survive_restart_without_duplicate_entry(self) -> None:
+        from execution_journal import ExecutionJournal
+
+        item = self.consensus_item(totalSize=10.0, maxEntryDistancePct=10.0)
+        item["candidateFreshAddLatestTime"] = self.started_at - 60_000
+        with tempfile.TemporaryDirectory() as directory:
+            self.service.alerts_path = Path(directory) / "alerts.json"
+            journal = ExecutionJournal(Path(directory) / "execution_journal.sqlite3")
+            manifest = server.execution_rule_manifest()
+            journal.sync(
+                manifest=manifest,
+                config_hash=server.execution_config_hash(manifest),
+                streams={}, now_ms=self.started_at - 120_000,
+                context={
+                    "alertConfigHash": server.hashlib.sha256(b"{}").hexdigest(),
+                    "trackedWalletAddresses": [],
+                },
+            )
+            with patch.object(self.service.store, "list_wallets", return_value=[]), patch.object(
+                self.service, "paper_experiment_consensus", return_value=[item]
+            ), patch.object(
+                self.service, "paper_experiment_arm_reasons", return_value=[]
+            ), patch.object(
+                self.service, "fetch_paper_market_meta_result",
+                return_value={"ok": True, "data": {
+                    "universe": [{"name": "ETH", "szDecimals": 2}],
+                }},
+            ), patch.object(
+                self.service, "fetch_paper_book_result",
+                return_value={"ok": True, "data": {
+                    "coin": "ETH", "time": self.started_at + 500,
+                    "levels": [
+                        [{"px": "99", "sz": "30"}],
+                        [{"px": "101", "sz": "30"}],
+                    ],
+                }},
+            ), patch.object(
+                self.service, "fetch_paper_oracle_samples", return_value=[],
+            ), patch.object(
+                server, "current_time_ms", return_value=self.started_at + 1_000
+            ):
+                for _ in range(2):
+                    self.service.record_execution_experiment(
+                        dashboard={"wallets": []}, state={}, summary=self.summary(item), position_lifecycle={},
+                        signal_outcomes={}, shadow_outcomes={}, candidate_outcomes={},
+                        now_ms=self.started_at,
+                    )
+            self.assertEqual(len(journal.load_stream("paper")), 3)
+            self.assertTrue(all(
+                record.get("executionStatus") == "entry_quoted"
+                for record in journal.load_stream("paper").values()
+            ))
+            self.assertEqual(len({
+                record["executableEntryPrice"]
+                for record in journal.load_stream("paper").values()
+            }), 1)
+
+    def test_first_paper_cycle_sets_baseline_without_backfilling_open_positions(self) -> None:
+        from execution_journal import ExecutionJournal
+
+        item = self.consensus_item(totalSize=10.0)
+        with tempfile.TemporaryDirectory() as directory:
+            self.service.alerts_path = Path(directory) / "alerts.json"
+            with patch.object(self.service.store, "list_wallets", return_value=[]), patch.object(
+                self.service, "paper_experiment_consensus", return_value=[item]
+            ), patch.object(self.service, "fetch_paper_book_result") as book_fetch:
+                self.service.record_execution_experiment(
+                    dashboard={"wallets": []}, state={}, summary=self.summary(item), position_lifecycle={},
+                    signal_outcomes={}, shadow_outcomes={}, candidate_outcomes={},
+                    now_ms=self.started_at,
+                )
+            journal = ExecutionJournal(Path(directory) / "execution_journal.sqlite3")
+            self.assertEqual(journal.load_stream("paper"), {})
+            self.assertEqual(journal.paper_report()["baselineAtMs"], self.started_at)
+            book_fetch.assert_not_called()
+
+    def test_partial_first_sweep_does_not_start_paper_baseline(self) -> None:
+        from execution_journal import ExecutionJournal
+
+        with tempfile.TemporaryDirectory() as directory:
+            self.service.alerts_path = Path(directory) / "alerts.json"
+            with patch.object(self.service.store, "list_wallets", return_value=[]):
+                self.service.record_execution_experiment(
+                    dashboard={}, state={}, summary={}, position_lifecycle={},
+                    signal_outcomes={}, shadow_outcomes={}, candidate_outcomes={},
+                    now_ms=self.started_at,
+                )
+            journal = ExecutionJournal(Path(directory) / "execution_journal.sqlite3")
+            self.assertIsNone(journal.paper_report()["baselineAtMs"])
+
+    def test_enrollment_end_stops_new_entries_but_keeps_journal_cycle(self) -> None:
+        from execution_journal import ExecutionJournal
+
+        item = self.consensus_item(totalSize=10.0)
+        with tempfile.TemporaryDirectory() as directory:
+            self.service.alerts_path = Path(directory) / "alerts.json"
+            journal = ExecutionJournal(Path(directory) / "execution_journal.sqlite3")
+            manifest = server.execution_rule_manifest()
+            journal.sync(
+                manifest=manifest,
+                config_hash=server.execution_config_hash(manifest),
+                streams={}, now_ms=self.started_at - 26 * 86_400_000,
+                context={
+                    "alertConfigHash": server.hashlib.sha256(b"{}").hexdigest(),
+                    "trackedWalletAddresses": [],
+                },
+            )
+            with patch.object(self.service.store, "list_wallets", return_value=[]), patch.object(
+                self.service, "paper_experiment_consensus", return_value=[item]
+            ), patch.object(self.service, "fetch_paper_book_result") as book_fetch:
+                self.service.record_execution_experiment(
+                    dashboard={"wallets": []}, state={}, summary=self.summary(item),
+                    position_lifecycle={}, signal_outcomes={}, shadow_outcomes={},
+                    candidate_outcomes={}, now_ms=self.started_at,
+                )
+            self.assertEqual(journal.load_stream("paper"), {})
+            self.assertEqual(journal.paper_report()["lastObservedAtMs"], self.started_at)
+            book_fetch.assert_not_called()
+
+    def test_stale_paper_book_is_logged_as_skipped_entry(self) -> None:
+        records = {"one": {
+            "coin": "ETH", "marketCoin": "ETH", "side": "long",
+            "startedAt": self.started_at, "executionStatus": "mark_proxy_only",
+        }}
+        with patch.object(
+            self.service, "fetch_paper_market_meta_result",
+            return_value={"ok": True, "data": {
+                "universe": [{"name": "ETH", "szDecimals": 2}],
+            }},
+        ), patch.object(
+            self.service, "fetch_paper_book_result",
+            return_value={"ok": True, "data": {
+                "coin": "ETH", "time": self.started_at,
+                "levels": [[{"px": "99", "sz": "20"}], [{"px": "101", "sz": "20"}]],
+            }},
+        ), patch.object(server, "current_time_ms", return_value=self.started_at + 20_000):
+            quoted = self.service.quote_new_paper_entries(records, now_ms=self.started_at)
+        self.assertEqual(quoted["one"]["status"], "skipped")
+        self.assertEqual(quoted["one"]["entrySkipReason"], "stale_book")
+        self.assertNotIn("executableEntryPrice", quoted["one"])
+
+    def test_delayed_entry_uses_a_new_book_after_one_hour(self) -> None:
+        due = self.started_at + 3_600_000
+        observed = due + 5 * 60_000
+        records = {"one": {
+            "coin": "ETH", "marketCoin": "ETH", "side": "long",
+            "startedAt": self.started_at, "status": "open",
+            "executionStatus": "entry_quoted",
+            "entryQuote": {"ok": True, "sizeDecimals": 2},
+        }}
+        with patch.object(
+            self.service, "fetch_paper_book_result",
+            return_value={"ok": True, "data": {
+                "coin": "ETH", "time": observed + 500,
+                "levels": [[{"px": "109", "sz": "30"}], [{"px": "111", "sz": "30"}]],
+            }},
+        ), patch.object(server, "current_time_ms", return_value=observed + 1_000):
+            self.service.quote_delayed_paper_entries(records, now_ms=observed)
+        delayed = records["one"]["delayedEntryQuote"]
+        self.assertTrue(delayed["ok"])
+        self.assertGreater(delayed["fillPrice"], 111)
+        self.assertEqual(delayed["latencyMs"], 5 * 60_000 + 1_000)
+
+    def test_paper_exit_waits_for_confirmed_original_wallet_departures(self) -> None:
+        addresses = ["0x" + str(index) * 40 for index in range(1, 5)]
+        records = {"one": {
+            "coin": "ETH", "marketCoin": "ETH", "side": "long",
+            "startedAt": self.started_at, "status": "open",
+            "executionStatus": "entry_quoted",
+            "initialWalletAddresses": addresses,
+            "activeWalletAddresses": addresses[:],
+            "departedWalletAddresses": [], "exitThreshold": 3,
+            "entryQuote": {"ok": True, "baseSize": 10.0, "sizeDecimals": 2},
+        }}
+
+        def wallet_state(address):
+            if address == addresses[1]:
+                return {"ok": False, "data": {}}
+            size = "0" if address == addresses[0] else "1"
+            return {"ok": True, "data": {"assetPositions": [
+                {"position": {"coin": "ETH", "szi": size}}
+            ]}}
+
+        with patch.object(self.service, "fetch_paper_wallet_state_result", side_effect=wallet_state), patch.object(
+            self.service, "fetch_paper_book_result"
+        ) as book_fetch:
+            self.service.update_paper_execution_exits(records, now_ms=self.started_at + 300_000)
+        self.assertEqual(records["one"]["status"], "open")
+        self.assertEqual(records["one"]["unknownWalletAddresses"], [addresses[1]])
+        book_fetch.assert_not_called()
+
+        def second_state(address):
+            size = "0" if address in addresses[:2] else "1"
+            return {"ok": True, "data": {"assetPositions": [
+                {"position": {"coin": "ETH", "szi": size}}
+            ]}}
+
+        detected = self.started_at + 600_000
+        with patch.object(self.service, "fetch_paper_wallet_state_result", side_effect=second_state), patch.object(
+            self.service, "fetch_paper_book_result", return_value={"ok": True, "data": {
+                "coin": "ETH", "time": detected + 500,
+                "levels": [[{"px": "99", "sz": "30"}], [{"px": "101", "sz": "30"}]],
+            }},
+        ), patch.object(server, "current_time_ms", return_value=detected + 1_000):
+            self.service.update_paper_execution_exits(records, now_ms=detected)
+        row = records["one"]
+        self.assertEqual(row["status"], "closed")
+        self.assertEqual(row["executionStatus"], "closed_funding_unverified")
+        self.assertEqual(row["departedWalletAddresses"], addresses[:2])
+        self.assertEqual(row["exitReason"], "original_cohort_below_threshold")
+        self.assertEqual(row["executionResult"]["reason"], "funding_unverified")
+
+    def test_malformed_wallet_size_is_unknown_not_a_departure(self) -> None:
+        self.assertIsNone(server.paper_wallet_position_size(
+            {"assetPositions": [{"position": {"coin": "ETH", "szi": "bad"}}]}, "ETH"
+        ))
+        self.assertEqual(server.paper_wallet_position_size({"assetPositions": []}, "ETH"), 0.0)
+
+    def test_paper_exit_reuses_fresh_verified_dashboard_state(self) -> None:
+        addresses = ["0x" + "1" * 40, "0x" + "2" * 40]
+        observed = self.started_at + 300_000
+        fetched_at = server.datetime.fromtimestamp(
+            observed / 1000, tz=server.timezone.utc
+        ).isoformat().replace("+00:00", "Z")
+        dashboard = {"wallets": [
+            {"address": addresses[0], "fetchedAt": fetched_at,
+             "dataQuality": {"stateOk": True}, "positions": []},
+            {"address": addresses[1], "fetchedAt": fetched_at,
+             "dataQuality": {"stateOk": True},
+             "positions": [{"coin": "ETH", "size": 1.0}]},
+        ]}
+        records = {"one": {
+            "coin": "ETH", "marketCoin": "ETH", "side": "long",
+            "startedAt": self.started_at, "status": "open",
+            "executionStatus": "entry_quoted",
+            "activeWalletAddresses": addresses[:],
+            "departedWalletAddresses": [], "exitThreshold": 2,
+            "entryQuote": {"ok": True, "baseSize": 10.0, "sizeDecimals": 2},
+        }}
+        with patch.object(self.service, "fetch_paper_wallet_state_result") as fetch_state, patch.object(
+            self.service, "fetch_paper_book_result", return_value={"ok": True, "data": {
+                "coin": "ETH", "time": observed,
+                "levels": [[{"px": "99", "sz": "30"}], [{"px": "101", "sz": "30"}]],
+            }},
+        ), patch.object(server, "current_time_ms", return_value=observed):
+            self.service.update_paper_execution_exits(
+                records, now_ms=observed, dashboard=dashboard,
+            )
+        fetch_state.assert_not_called()
+        self.assertEqual(records["one"]["status"], "closed")
+        self.assertEqual(
+            records["one"]["walletStateSources"][addresses[0]],
+            "verified_dashboard_snapshot",
+        )
+        self.assertEqual(
+            server.paper_dashboard_clearinghouse_state(
+                {"fetchedAt": fetched_at, "dataQuality": {"stateOk": False},
+                 "positions": []}, now_ms=observed,
+            ),
+            None,
+        )
+
+    def test_closed_paper_trade_gets_net_only_after_complete_funding_model(self) -> None:
+        from unittest.mock import Mock
+        from paper_execution import quote_book
+
+        hour = 3_600_000
+        entered = hour // 2
+        exited = hour + hour // 2
+        book = lambda at: {"coin": "ETH", "time": at, "levels": [
+            [{"px": "99", "sz": "30"}], [{"px": "101", "sz": "30"}],
+        ]}
+        entry = quote_book(
+            book(entered), action="buy", received_at_ms=entered,
+            detected_at_ms=entered, notional_usd=1000, size_decimals=2,
+        )
+        exit_quote = quote_book(
+            book(exited), action="sell", received_at_ms=exited,
+            detected_at_ms=exited, base_size=entry["baseSize"], size_decimals=2,
+        )
+        records = {"one": {
+            "coin": "ETH", "marketCoin": "ETH", "side": "long",
+            "executionStatus": "closed_funding_unverified", "status": "closed",
+            "entryQuote": entry, "exitQuote": exit_quote,
+        }}
+        journal = Mock()
+        journal.load_oracle_samples.return_value = [
+            {"coin": "ETH", "observedAtMs": hour + 1000, "oraclePrice": 100}
+        ]
+        with patch.object(
+            self.service, "cached_paper_funding_history",
+            return_value={"complete": False, "rows": []},
+        ):
+            self.service.update_paper_execution_funding(
+                records, journal=journal, current_oracle_samples=[], now_ms=2 * hour,
+            )
+        self.assertEqual(records["one"]["executionStatus"], "closed_funding_unverified")
+        self.assertFalse(records["one"]["fundingModel"]["complete"])
+        records["one"]["lastFundingAttemptAtMs"] = 0
+        with patch.object(
+            self.service, "cached_paper_funding_history",
+            return_value={"complete": True, "rows": [
+                {"time": hour + 75, "fundingRate": "0.001"},
+            ]},
+        ):
+            self.service.update_paper_execution_funding(
+                records, journal=journal, current_oracle_samples=[], now_ms=2 * hour,
+            )
+        self.assertEqual(records["one"]["executionStatus"], "closed_modeled_net")
+        self.assertTrue(records["one"]["executionResult"]["complete"])
+        self.assertLess(records["one"]["executionResult"]["netUsd"], 0)
+
+    def test_oracle_snapshot_uses_matching_native_market_context(self) -> None:
+        with patch.object(
+            self.service.client, "safe_post_result",
+            return_value={"ok": True, "data": [
+                {"universe": [{"name": "BTC"}, {"name": "ETH"}]},
+                [{"oraclePx": "100"}, {"oraclePx": "200"}],
+            ]},
+        ), patch.object(server, "current_time_ms", return_value=self.started_at):
+            samples = self.service.fetch_paper_oracle_samples({"ETH"})
+        self.assertEqual(samples, [{
+            "coin": "ETH", "observedAtMs": self.started_at, "oraclePrice": 200.0,
+        }])
+
+    def test_paper_funding_cache_fetches_only_missing_hours_across_restarts(self) -> None:
+        from execution_journal import ExecutionJournal
+
+        hour = 3_600_000
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "funding.sqlite3"
+            journal = ExecutionJournal(path)
+            first = {"coin": "ETH", "time": hour, "fundingRate": "0.001"}
+            second = {"coin": "ETH", "time": 2 * hour, "fundingRate": "0.002"}
+            with patch.object(self.service, "fetch_paper_funding_history", side_effect=[
+                {"complete": True, "rows": [first]},
+                {"complete": True, "rows": [second]},
+            ]) as fetch:
+                initial = self.service.cached_paper_funding_history(
+                    journal, "ETH", start_ms=hour // 2, end_ms=hour + hour // 2,
+                )
+                repeat = self.service.cached_paper_funding_history(
+                    ExecutionJournal(path), "ETH",
+                    start_ms=hour // 2, end_ms=hour + hour // 2,
+                )
+                expanded = self.service.cached_paper_funding_history(
+                    journal, "ETH", start_ms=hour // 2, end_ms=2 * hour + hour // 2,
+                )
+            self.assertTrue(initial["complete"])
+            self.assertTrue(repeat["complete"])
+            self.assertTrue(expanded["complete"])
+            self.assertEqual(len(expanded["rows"]), 2)
+            self.assertEqual(fetch.call_count, 2)
+            self.assertGreater(fetch.call_args.kwargs["start_ms"], hour)
+
+    def test_paper_funding_cache_retries_unpublished_hour_instead_of_zero(self) -> None:
+        from execution_journal import ExecutionJournal
+
+        hour = 3_600_000
+        with tempfile.TemporaryDirectory() as directory:
+            journal = ExecutionJournal(Path(directory) / "funding.sqlite3")
+            with patch.object(self.service, "fetch_paper_funding_history", side_effect=[
+                {"complete": True, "rows": []},
+                {"complete": True, "rows": [
+                    {"coin": "ETH", "time": hour, "fundingRate": "0.001"},
+                ]},
+            ]) as fetch:
+                missing = self.service.cached_paper_funding_history(
+                    journal, "ETH", start_ms=hour // 2, end_ms=hour + hour // 2,
+                )
+                found = self.service.cached_paper_funding_history(
+                    journal, "ETH", start_ms=hour // 2, end_ms=hour + hour // 2,
+                )
+            self.assertFalse(missing["complete"])
+            self.assertEqual(missing["reason"], "funding_event_missing_or_delayed")
+            self.assertTrue(found["complete"])
+            self.assertEqual(fetch.call_count, 2)
+
+    def test_open_paper_portfolio_has_base_and_two_stress_curves(self) -> None:
+        from unittest.mock import Mock
+        from paper_execution import quote_book
+
+        hour = 3_600_000
+        book = lambda at: {"coin": "ETH", "time": at, "levels": [
+            [{"px": "99", "sz": "30"}], [{"px": "101", "sz": "30"}],
+        ]}
+        entry = quote_book(
+            book(hour // 2), action="buy", received_at_ms=hour // 2,
+            detected_at_ms=hour // 2, notional_usd=1000, size_decimals=2,
+        )
+        delayed = quote_book(
+            book(hour + hour // 2), action="buy",
+            received_at_ms=hour + hour // 2,
+            detected_at_ms=hour + hour // 2,
+            notional_usd=1000, size_decimals=2,
+        )
+        record = {
+            "experimentArm": "ranked_consensus", "status": "open",
+            "executionStatus": "entry_quoted", "startedAt": hour // 2,
+            "marketCoin": "ETH", "coin": "ETH", "side": "long",
+            "entryQuote": entry, "delayedEntryQuote": delayed,
+            "delayedEntryStatus": "quoted",
+        }
+        journal = Mock()
+        journal.load_oracle_samples.return_value = [
+            {"observedAtMs": hour + 1_000, "oraclePrice": 100},
+            {"observedAtMs": 2 * hour + 1_000, "oraclePrice": 100},
+        ]
+        at = 2 * hour + hour // 2
+        with patch.object(self.service, "fetch_paper_book_result", return_value={
+            "ok": True, "data": book(at),
+        }), patch.object(self.service, "cached_paper_funding_history", return_value={
+            "complete": True, "rows": [
+                {"time": hour, "fundingRate": "0.001"},
+                {"time": 2 * hour, "fundingRate": "0.001"},
+            ],
+        }), patch.object(server, "current_time_ms", return_value=at):
+            snapshots = self.service.paper_portfolio_snapshots(
+                {"one": record}, journal=journal,
+                current_oracle_samples=[], now_ms=at,
+            )
+        self.assertEqual(len(snapshots), 9)
+        by_arm = {row["arm"]: row for row in snapshots}
+        self.assertTrue(by_arm["ranked_consensus"]["complete"])
+        self.assertTrue(by_arm["ranked_consensus:double_cost"]["complete"])
+        self.assertTrue(by_arm["ranked_consensus:delayed_entry"]["complete"])
+        self.assertLess(
+            by_arm["ranked_consensus:double_cost"]["equityUsd"],
+            by_arm["ranked_consensus"]["equityUsd"],
+        )
+
+    def test_closed_paper_trade_can_price_one_hour_delay_on_same_exit_book(self) -> None:
+        from unittest.mock import Mock
+        from paper_execution import quote_book
+
+        hour = 3_600_000
+        book = lambda at, bid, ask: {"coin": "ETH", "time": at, "levels": [
+            [{"px": str(bid), "sz": "30"}], [{"px": str(ask), "sz": "30"}],
+        ]}
+        entry = quote_book(book(hour // 2, 99, 101), action="buy",
+                           received_at_ms=hour // 2, detected_at_ms=hour // 2,
+                           notional_usd=1000, size_decimals=2)
+        delayed = quote_book(book(hour + hour // 2, 104, 106), action="buy",
+                             received_at_ms=hour + hour // 2,
+                             detected_at_ms=hour + hour // 2,
+                             notional_usd=1000, size_decimals=2)
+        exit_book = book(2 * hour + hour // 2, 109, 111)
+        exit_quote = quote_book(exit_book, action="sell",
+                                received_at_ms=2 * hour + hour // 2,
+                                detected_at_ms=2 * hour + hour // 2,
+                                base_size=entry["baseSize"], size_decimals=2)
+        records = {"one": {
+            "coin": "ETH", "marketCoin": "ETH", "side": "long",
+            "executionStatus": "closed_funding_unverified", "status": "closed",
+            "entryQuote": entry, "delayedEntryQuote": delayed,
+            "exitQuote": exit_quote, "exitBook": exit_book,
+            "exitDetectedAtMs": 2 * hour + hour // 2,
+        }}
+        journal = Mock()
+        journal.load_oracle_samples.return_value = [
+            {"observedAtMs": hour + 1000, "oraclePrice": 100},
+            {"observedAtMs": 2 * hour + 1000, "oraclePrice": 110},
+        ]
+        with patch.object(self.service, "cached_paper_funding_history", return_value={
+            "complete": True, "rows": [
+                {"time": hour + 75, "fundingRate": "0.001"},
+                {"time": 2 * hour + 75, "fundingRate": "0.001"},
+            ],
+        }):
+            self.service.update_paper_execution_funding(
+                records, journal=journal, current_oracle_samples=[], now_ms=3 * hour,
+            )
+        self.assertTrue(records["one"]["delayedEntryResult"]["complete"])
+        self.assertEqual(records["one"]["delayedFundingModel"]["eventCount"], 1)
 
     def test_an_unchanged_position_is_not_resampled(self) -> None:
         item = self.consensus_item()
