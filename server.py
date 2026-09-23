@@ -2253,8 +2253,16 @@ def refreshed_quality_rank(
     """
     if not isinstance(rank, dict):
         return rank
-    if rank.get("metric") in {"risk_sortino_trend_180d", "calmar_sortino_adjusted_pf_trend_180d_v1"}:
+    if rank.get("metric") == "risk_sortino_trend_180d":
         return rank
+    if rank.get("metric") in {
+        "calmar_sortino_adjusted_pf_trend_180d_v1",
+        "calmar_sortino_adjusted_pf_trend_180d_v2",
+    }:
+        # Cache entries can outlive a scoring-code deploy. Reinterpret the
+        # stored components immediately instead of displaying an old numeric
+        # rank for up to a full quality-refresh TTL.
+        return finalize_risk_trend_quality_rank(rank)
     shrunk = shrunk_win_rate(hit_rate_90d, closed_trade_count_90d)
     if shrunk is None:
         # Too thin a 90d sample to score. The key must stay absent, because
@@ -2355,11 +2363,11 @@ def build_risk_trend_quality_rank(
     drawdown_invalid_days: int = 0,
     cashflow_ambiguous_intervals: int = 0,
 ) -> dict[str, Any]:
-    """V1 wallet score: Calmar/Sortino/adjusted-PF/trend = 35/25/20/20.
+    """Wallet score: Calmar/Sortino/adjusted-PF/trend = 35/25/20/20.
 
-    Sample and drawdown gates are deliberately evaluated after the numeric
-    score.  A high point estimate cannot override missing observations or a
-    measured risk failure.
+    A numeric score requires every component. Sample and drawdown gates still
+    override the point estimate; missing observations never earn a zero-quality
+    verdict or an Elite label.
     """
     drawdown_known = max_drawdown_pct is not None
     drawdown = max(0.0, to_float(max_drawdown_pct)) if drawdown_known else None
@@ -2485,7 +2493,7 @@ def build_risk_trend_quality_rank(
         label = "Weak"
     else:
         label = "Cold"
-    return {
+    rank = {
         "label": label,
         "score": round(score, 1),
         "convictionWeightScore": round(score, 1),
@@ -2535,7 +2543,72 @@ def build_risk_trend_quality_rank(
         "shadowReasons": shadow_reasons,
         "windowTrusted": bool(window_trusted),
         "riskWindowTrusted": risk_trusted,
-        "metric": "calmar_sortino_adjusted_pf_trend_180d_v1",
+        "metric": "calmar_sortino_adjusted_pf_trend_180d_v2",
+    }
+    return finalize_risk_trend_quality_rank(rank)
+
+
+def finalize_risk_trend_quality_rank(rank: dict[str, Any]) -> dict[str, Any]:
+    """Do not turn an unobserved risk component into a zero-quality verdict.
+
+    The four fixed weights remain 35/25/20/20. A point rank exists only when
+    all four components are measurable. Otherwise expose the arithmetic range
+    and keep confirmed Shadow risk vetoes, without inventing a midpoint.
+    """
+    curve_usable = bool(
+        rank.get("equityCurveComplete")
+        and rank.get("maxDrawdownPct") is not None
+        and not int(to_float(rank.get("drawdownInvalidDays")))
+    )
+    curve_verified = bool(rank.get("equityCurveVerified"))
+    component_values = (
+        ("calmar", 35.0, rank.get("calmar180d"), rank.get("calmarScore"), curve_usable),
+        ("sortino", 25.0, rank.get("sortino180d"), rank.get("sortinoScore"), curve_usable),
+        (
+            "adjustedProfitFactor", 20.0, rank.get("adjustedProfitFactor180d"),
+            rank.get("adjustedProfitFactorScore"), rank.get("pfHistoryComplete", True),
+        ),
+    )
+    lower_bound = clamp(to_float(rank.get("trendScore")), 0.0, 20.0)
+    missing_weight = 0.0
+    availability: dict[str, bool] = {"trend": True}
+    for name, weight, value, component_score, prerequisite in component_values:
+        is_infinite = value == "inf" or value == float("inf")
+        available = bool(prerequisite) and value is not None and (
+            not is_infinite or curve_verified or name == "adjustedProfitFactor"
+        )
+        availability[name] = available
+        if available:
+            lower_bound += weight * clamp(to_float(component_score)) / 100.0
+        else:
+            missing_weight += weight
+    rankable = missing_weight == 0.0
+    score = round(lower_bound, 1) if rankable else None
+    shadow_reasons = rank.get("shadowReasons") or []
+    if shadow_reasons:
+        label = "Shadow"
+    elif not rankable:
+        label = "Unranked"
+    elif score >= 85 and rank.get("eliteEligible"):
+        label = "Elite"
+    elif score >= 70:
+        label = "Strong"
+    elif score >= 55:
+        label = "Balanced"
+    elif score >= 40:
+        label = "Weak"
+    else:
+        label = "Cold"
+    return {
+        **rank,
+        "metric": "calmar_sortino_adjusted_pf_trend_180d_v2",
+        "label": label,
+        "score": score,
+        "convictionWeightScore": score if rankable else 0.0,
+        "scoreLowerBound": round(lower_bound, 1),
+        "scoreUpperBound": round(min(100.0, lower_bound + missing_weight), 1),
+        "scoreComponentsAvailable": availability,
+        "rankable": rankable,
     }
 
 
@@ -3022,25 +3095,25 @@ def daily_equity_metrics_180d(
     sortino: float | None = None
     cagr_pct: float | None = None
     calmar: float | None = None
-    if returns and invalid_days == 0:
+    if complete:
         mean_return = sum(returns) / observed_days
         downside_deviation = math.sqrt(
             sum(min(value, 0.0) ** 2 for value in returns) / observed_days
         )
         if downside_deviation > 0:
             sortino = mean_return / downside_deviation
-        elif complete:
+        else:
             sortino = float("inf") if mean_return > 0 else 0.0
         elapsed_days = max(1, (timestamps[-1] - timestamps[0]) / day_ms) if len(timestamps) > 1 else 1
         # CAGR, drawdown and Calmar describe a 180-day path only when the path
         # is complete. A partial peak/trough is retained below as an explicitly
         # observed diagnostic, never presented as the 180-day risk metric.
-        if equity_index >= 0 and complete:
+        if equity_index >= 0:
             cagr_pct = (equity_index ** (365.0 / elapsed_days) - 1.0) * 100.0
             drawdown_pct = worst_drawdown * 100.0
             if drawdown_pct > 0:
                 calmar = cagr_pct / drawdown_pct
-            elif complete:
+            else:
                 calmar = float("inf") if cagr_pct > 0 else 0.0
 
     return {
@@ -4848,6 +4921,18 @@ class WalletTrackerService:
                     snapshot.get("winRate90d"),
                     snapshot.get("closedTrades90d"),
                 )
+                if (
+                    isinstance(snapshot["recentWinRateRank"], dict)
+                    and snapshot["recentWinRateRank"].get("metric")
+                    == "calmar_sortino_adjusted_pf_trend_180d_v2"
+                    and not snapshot["recentWinRateRank"].get("equityCurveComplete")
+                ):
+                    # Older cached partial curves could carry a finite ratio
+                    # despite fewer than 180 days of returns. Do not keep
+                    # displaying that ratio after the rank is corrected.
+                    snapshot["sortino180d"] = None
+                    snapshot["calmar180d"] = None
+                    snapshot["cagr180dPct"] = None
         if recent_fills:
             latest_live_fill_ms = max(int(to_float(fill.get("time"))) for fill in recent_fills)
             snapshot["holdingOnly30d"] = False
@@ -12177,6 +12262,7 @@ class WalletTrackerService:
             wallet
             for wallet in wallets
             if str(wallet.get("recentWinRateRank", {}).get("label") or "Unranked") != "Unranked"
+            and wallet.get("recentWinRateRank", {}).get("score") is not None
         ]
         if ranked_wallets:
             for index, wallet in enumerate(ranked_wallets[: max(1, limit)], start=1):
@@ -12191,7 +12277,15 @@ class WalletTrackerService:
                     f'score {to_float(rank.get("score")):.1f}/100)'
                 )
         else:
-            lines.append("- Not enough recent closed trades yet")
+            lines.append("- No comparable numeric ranks available")
+
+        unscored_shadow_count = sum(
+            1 for wallet in wallets
+            if wallet.get("recentWinRateRank", {}).get("label") == "Shadow"
+            and wallet.get("recentWinRateRank", {}).get("score") is None
+        )
+        if unscored_shadow_count:
+            lines.append(f"- {unscored_shadow_count} Shadow risk vetoes remain in force")
 
         lines.append("")
         lines.append(f'Checked at: {dashboard.get("generatedAt", now_iso())}')

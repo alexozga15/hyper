@@ -39,6 +39,17 @@ function formatCompactMoney(value) {
   return `${numeric < 0 ? "-" : ""}$${compactFormatter.format(Math.abs(numeric))}`;
 }
 
+function formatWalletRank(rank, showRange = false) {
+  const label = rank?.label || "Unranked";
+  if (rank?.score == null) {
+    const range = showRange && rank?.scoreLowerBound != null && rank?.scoreUpperBound != null
+      ? ` · component range ${percentFormatter.format(rank.scoreLowerBound)}–${percentFormatter.format(rank.scoreUpperBound)}`
+      : "";
+    return `${label} (n/a${range})`;
+  }
+  return `${label} (${percentFormatter.format(rank.score)}/100)`;
+}
+
 function formatDate(value) {
   if (!value) return "n/a";
   const date = typeof value === "number" ? new Date(value) : new Date(String(value));
@@ -352,7 +363,7 @@ function renderWalletTable() {
                 <td>${wallet.openOrderCount}</td>
                 <td>${wallet.fills30d || 0}${wallet.holdingOnly30d ? " / holder" : ""}</td>
                 <td>${percentFormatter.format(wallet.hitRate)}%</td>
-                <td>${wallet.recentWinRateRank?.label || "Unranked"} (${percentFormatter.format(wallet.recentWinRateRank?.score || 0)})</td>
+                <td>${formatWalletRank(wallet.recentWinRateRank)}</td>
                 <td>${wallet.cohorts.walletSize} / ${wallet.cohorts.profitability}</td>
                 <td>${shortAddress(wallet.address)}</td>
               </tr>
@@ -432,7 +443,7 @@ function renderWalletDetails() {
     <div class="wallet-metrics">
       <div><span>Wallet Size</span><strong>${wallet.cohorts.walletSize}</strong></div>
       <div><span>Profitability</span><strong>${wallet.cohorts.profitability}</strong></div>
-      <div><span>Quality Rank</span><strong>${wallet.recentWinRateRank?.label || "Unranked"} (${percentFormatter.format(wallet.recentWinRateRank?.score || 0)}) · ${wallet.recentWinRateRank?.assessmentStatus || "Legacy"}</strong></div>
+      <div><span>Quality Rank</span><strong>${formatWalletRank(wallet.recentWinRateRank, true)} · ${wallet.recentWinRateRank?.assessmentStatus || "Legacy"}</strong></div>
       <div><span>180D Sortino</span><strong>${wallet.sortino180d == null ? "n/a" : (wallet.sortino180d === "inf" ? "∞" : Number(wallet.sortino180d).toFixed(2))} / ${wallet.dailyReturns180d || 0} daily returns</strong></div>
       <div><span>180D Calmar</span><strong>${wallet.calmar180d == null ? "n/a" : (wallet.calmar180d === "inf" ? "∞" : Number(wallet.calmar180d).toFixed(2))}</strong></div>
       <div><span>180D Adjusted PF</span><strong>${wallet.adjustedProfitFactor180d == null ? "n/a" : (wallet.adjustedProfitFactor180d === "inf" ? "∞" : Number(wallet.adjustedProfitFactor180d).toFixed(2))}</strong></div>

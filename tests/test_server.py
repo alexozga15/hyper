@@ -172,6 +172,46 @@ class SegmentTests(unittest.TestCase):
         self.assertEqual(rank["assessmentStatus"], "Preliminary")
         self.assertFalse(rank["eliteEligible"])
 
+    def test_missing_180d_curve_has_no_numeric_rank_or_false_cold_label(self) -> None:
+        common = dict(
+            pnl_7d=10, pnl_30d=30, pnl_180d=100, pnl_all_time=150,
+            sortino_180d=None, calmar_180d=None, adjusted_profit_factor_180d=2.5,
+            episode_count_180d=120, loss_count_180d=25,
+            daily_return_count_180d=4, downside_day_count_180d=1,
+            max_drawdown_pct=None, window_trusted=True,
+            equity_curve_complete=False, largest_loser_pct=3,
+            largest_loser_complete=True,
+        )
+        rank = build_risk_trend_quality_rank(**common)
+        self.assertIsNone(rank["score"])
+        self.assertEqual(rank["label"], "Unranked")
+        self.assertEqual(rank["assessmentStatus"], "Preliminary")
+        self.assertEqual((rank["scoreLowerBound"], rank["scoreUpperBound"]), (40.0, 100.0))
+        self.assertFalse(rank["rankable"])
+
+        shadow = build_risk_trend_quality_rank(**common, current_open_loss_pct=40)
+        self.assertIsNone(shadow["score"])
+        self.assertEqual(shadow["label"], "Shadow")
+        self.assertIn("current_open_loss", shadow["shadowReasons"])
+
+    def test_cached_old_partial_rank_is_reclassified_without_api_refresh(self) -> None:
+        old = {
+            "metric": "calmar_sortino_adjusted_pf_trend_180d_v1",
+            "label": "Cold", "score": 20.0, "convictionWeightScore": 20.0,
+            "trendScore": 20.0, "sortino180d": None, "calmar180d": None,
+            "adjustedProfitFactor180d": None, "maxDrawdownPct": None,
+            "equityCurveComplete": False, "shadowReasons": [],
+        }
+        refreshed = refreshed_quality_rank(old, 80, 200)
+        self.assertEqual(refreshed["label"], "Unranked")
+        self.assertIsNone(refreshed["score"])
+        self.assertEqual(refreshed["scoreUpperBound"], 100.0)
+        shadow = refreshed_quality_rank(
+            {**old, "label": "Shadow", "shadowReasons": ["current_open_loss"]}, 80, 200
+        )
+        self.assertEqual(shadow["label"], "Shadow")
+        self.assertIsNone(shadow["score"])
+
     def test_unverified_zero_downside_or_drawdown_does_not_get_maximum_component_scores(self) -> None:
         rank = build_risk_trend_quality_rank(
             pnl_7d=10, pnl_30d=30, pnl_180d=100, pnl_all_time=150,
@@ -292,6 +332,22 @@ class SegmentTests(unittest.TestCase):
         metrics = daily_equity_metrics_180d(pnl, account, 0, 180 * day_ms)
         self.assertIsNone(metrics["sortino"])
         self.assertFalse(metrics["equityCurveComplete"])
+
+    def test_incomplete_curve_with_negative_days_does_not_report_180d_sortino(self) -> None:
+        day_ms = 86_400_000
+        returns = [0.01 if day % 3 else -0.01 for day in range(1, 21)]
+        pnl = [[0, 0.0]]
+        account = [[0, 100.0]]
+        equity = 100.0
+        cumulative_pnl = 0.0
+        for day, daily_return in enumerate(returns, 1):
+            cumulative_pnl += equity * daily_return
+            equity *= 1.0 + daily_return
+            pnl.append([day * day_ms, cumulative_pnl])
+            account.append([day * day_ms, equity])
+        metrics = daily_equity_metrics_180d(pnl, account, 0, 180 * day_ms)
+        self.assertFalse(metrics["equityCurveComplete"])
+        self.assertIsNone(metrics["sortino"])
 
     def test_internal_daily_gap_makes_cagr_calmar_and_curve_completeness_unavailable(self) -> None:
         day_ms = 86_400_000
@@ -5801,6 +5857,18 @@ class AlertSummaryTests(unittest.TestCase):
         message = self.service.build_wallet_rankings_message(dashboard)
         self.assertIn("DD n/a (risk bound 60.0%)", message)
         self.assertNotIn("DD 0.0%", message)
+
+    def test_wallet_rankings_message_does_not_show_missing_score_as_zero(self) -> None:
+        dashboard = {
+            "wallets": [{
+                "address": "0x1111111111111111111111111111111111111111",
+                "recentWinRateRank": {"label": "Shadow", "score": None},
+            }],
+        }
+        message = self.service.build_wallet_rankings_message(dashboard)
+        self.assertIn("No comparable numeric ranks", message)
+        self.assertIn("1 Shadow risk vetoes remain in force", message)
+        self.assertNotIn("score 0.0/100", message)
 
     def test_build_elite_wallet_positions_message_lists_only_elite_wallet_positions(self) -> None:
         dashboard = {
