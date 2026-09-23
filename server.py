@@ -5000,8 +5000,6 @@ class WalletTrackerService:
         cached_wallets: dict[str, Any],
     ) -> set[str]:
         addresses = [wallet.address.lower() for wallet in wallets]
-        if not cached_wallets:
-            return set(addresses)
         ordered = sorted(
             addresses,
             key=lambda address: (

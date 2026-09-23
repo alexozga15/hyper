@@ -3470,6 +3470,14 @@ class AlertSummaryTests(unittest.TestCase):
 
         self.assertEqual(selected, {wallets[1].address, wallets[3].address, wallets[4].address})
 
+    def test_quality_refresh_cold_start_is_limited_to_three_wallets(self) -> None:
+        wallets = [
+            TrackedWallet(address=f"0x{index:040x}", alias="", notes="", created_at="")
+            for index in range(1, 6)
+        ]
+        selected = self.service.wallet_quality_refresh_addresses(wallets, {})
+        self.assertEqual(selected, {wallet.address for wallet in wallets[:3]})
+
     def test_failed_full_quality_refresh_preserves_last_good_metrics(self) -> None:
         wallet = TrackedWallet(address="0x1111111111111111111111111111111111111111", alias="", notes="", created_at="")
         cached = {
