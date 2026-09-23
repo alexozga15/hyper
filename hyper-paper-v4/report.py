@@ -11,7 +11,7 @@ from execution_journal import ExecutionJournal
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("journal", type=Path, help="Existing execution_journal.sqlite3")
+    parser.add_argument("journal", type=Path, help="Existing execution_journal_v4.sqlite3")
     args = parser.parse_args()
     if not args.journal.is_file():
         parser.error("journal file does not exist; refusing to create an empty report")

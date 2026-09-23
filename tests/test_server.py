@@ -8876,13 +8876,16 @@ class ShadowSignalSamplingTests(unittest.TestCase):
             independentTopWalletCount=0, netIndependentWeightedWalletCount=0.0,
             freshAddVwap=100.0, candidateFreshAddVwap=100.0,
             candidateFreshIndependentWalletCount=1,
+            candidateFreshWalletAddresses=["0xaaa"],
+            candidateFreshWalletMetrics=[{"address": "0xaaa", "vwap": 100.0, "latestTime": self.started_at - 60_000}],
             oppositeCandidateFreshIndependentWalletCount=0,
             maxEntryDistancePct=10.0, entryDistancePct=0.0,
         )
-        ranked = self.service.paper_experiment_arm_reasons(item, "ranked_consensus")
-        self.assertIn("weak_qnet", ranked)
-        self.assertEqual(self.service.paper_experiment_arm_reasons(item, "consensus_unranked"), [])
-        self.assertEqual(self.service.paper_experiment_arm_reasons(item, "fresh_entry"), [])
+        with patch.object(server, "paper_copyability_admitted_addresses", return_value={"0xaaa", "0xbbb"}):
+            ranked = self.service.paper_experiment_arm_reasons(item, "ranked_consensus")
+            self.assertIn("weak_qnet", ranked)
+            self.assertEqual(self.service.paper_experiment_arm_reasons(item, "consensus_unranked"), [])
+            self.assertEqual(self.service.paper_experiment_arm_reasons(item, "fresh_entry"), [])
 
     def test_paper_evaluations_record_rank_rejection_vs_control_entry(self) -> None:
         item = self.consensus_item(
@@ -8892,18 +8895,21 @@ class ShadowSignalSamplingTests(unittest.TestCase):
             independentTopWalletCount=0, netIndependentWeightedWalletCount=0.0,
             freshAddVwap=100.0, candidateFreshAddVwap=100.0,
             candidateFreshIndependentWalletCount=1,
+            candidateFreshWalletAddresses=["0xaaa"],
+            candidateFreshWalletMetrics=[{"address": "0xaaa", "vwap": 100.0, "latestTime": self.started_at - 60_000}],
             oppositeCandidateFreshIndependentWalletCount=0,
             maxEntryDistancePct=10.0, entryDistancePct=0.0,
         )
         decisions: dict[str, str] = {}
-        self.service.update_paper_experiment_outcomes(
-            {}, self.summary(item), [item], now_ms=self.started_at,
-            baseline_at_ms=self.started_at - 120_000,
-            entry_decisions=decisions,
-        )
-        evaluations = self.service.paper_experiment_evaluations(
-            [item], now_ms=self.started_at, entry_decisions=decisions,
-        )
+        with patch.object(server, "paper_copyability_admitted_addresses", return_value={"0xaaa", "0xbbb"}):
+            self.service.update_paper_experiment_outcomes(
+                {}, self.summary(item), [item], now_ms=self.started_at,
+                baseline_at_ms=self.started_at - 120_000,
+                entry_decisions=decisions,
+            )
+            evaluations = self.service.paper_experiment_evaluations(
+                [item], now_ms=self.started_at, entry_decisions=decisions,
+            )
         by_arm = {row["experimentArm"]: row for row in evaluations}
         self.assertEqual(
             by_arm["ranked_consensus"]["inputs"]["entryDecision"],
@@ -8913,6 +8919,105 @@ class ShadowSignalSamplingTests(unittest.TestCase):
             by_arm["consensus_unranked"]["inputs"]["entryDecision"],
             "selected_for_quote",
         )
+
+    def test_paper_decision_journal_uses_full_consensus_and_single_wallet_basis(self) -> None:
+        addresses = ["0xaaa", "0xbbb", "0xccc", "0xddd"]
+        selected_at = self.started_at - 60_000
+        item = self.consensus_item(
+            wallets=[{"address": address, "value": 250_000.0} for address in addresses],
+            walletCount=4, independentWalletCount=4,
+            netIndependentWalletCount=3, verifiedFreshIndependentWalletCount=3,
+            netFreshIndependentWalletCount=3,
+            oppositeVerifiedFreshIndependentWalletCount=0,
+            candidateFreshWalletAddresses=["0xbbb", "0xaaa"],
+            candidateFreshWalletMetrics=[
+                {"address": "0xbbb", "vwap": 110.0, "latestTime": self.started_at - 30_000},
+                {"address": "0xaaa", "vwap": 100.0, "latestTime": selected_at},
+            ],
+            candidateFreshIndependentWalletCount=2,
+            candidateFreshAddVwap=105.0,
+            candidateFreshAddLatestTime=self.started_at - 30_000,
+            markPrice=102.0,
+            freshAddVwap=99.0,
+            maxEntryDistancePct=10.0,
+        )
+        with patch.object(server, "paper_copyability_admitted_addresses", return_value=set(addresses)):
+            records = self.service.update_paper_experiment_outcomes(
+                {}, self.summary(item), [item], now_ms=self.started_at,
+            )
+            evaluations = self.service.paper_experiment_evaluations([item], now_ms=self.started_at)
+        by_arm = {row["experimentArm"]: row for row in evaluations}
+        for arm in ("ranked_consensus", "consensus_unranked"):
+            self.assertEqual(by_arm[arm]["walletAddresses"], addresses)
+        self.assertEqual(
+            next(row for row in records.values() if row["experimentArm"] == "consensus_unranked")["initialWalletAddresses"],
+            by_arm["consensus_unranked"]["walletAddresses"],
+        )
+        fresh = by_arm["fresh_entry"]
+        self.assertEqual(fresh["walletAddresses"], ["0xaaa"])
+        self.assertEqual(fresh["inputs"]["freshAddVwap"], 100.0)
+        self.assertEqual(fresh["inputs"]["freshAddLatestTime"], selected_at)
+        self.assertAlmostEqual(fresh["inputs"]["entryDistancePct"], 2.0)
+        self.assertEqual(
+            next(row for row in records.values() if row["experimentArm"] == "fresh_entry")["walletVwap"],
+            fresh["inputs"]["freshAddVwap"],
+        )
+
+    def test_empty_copyability_registry_blocks_all_paper_arms(self) -> None:
+        item = self.consensus_item(
+            candidateFreshWalletAddresses=["0xaaa"],
+            candidateFreshIndependentWalletCount=1,
+            candidateFreshAddVwap=100.0,
+            maxEntryDistancePct=10.0,
+        )
+        with patch.object(server, "paper_copyability_admitted_addresses", return_value=set()):
+            records = self.service.update_paper_experiment_outcomes(
+                {}, self.summary(item), [item], now_ms=self.started_at,
+            )
+        self.assertEqual(records, {})
+
+    def test_fresh_entry_tracks_exactly_one_wallet(self) -> None:
+        item = self.consensus_item(
+            candidateFreshWalletAddresses=["0xbbb", "0xaaa"],
+            candidateFreshWalletMetrics=[
+                {"address": "0xbbb", "vwap": 110.0, "latestTime": self.started_at - 30_000},
+                {"address": "0xaaa", "vwap": 100.0, "latestTime": self.started_at - 60_000},
+            ],
+            candidateFreshIndependentWalletCount=2,
+            oppositeCandidateFreshIndependentWalletCount=0,
+            candidateFreshAddVwap=100.0,
+            candidateFreshAddLatestTime=self.started_at - 60_000,
+            maxEntryDistancePct=10.0,
+        )
+        with patch.object(server, "paper_copyability_admitted_addresses", return_value={"0xaaa", "0xbbb"}):
+            records = self.service.update_paper_experiment_outcomes(
+                {}, self.summary(item), [item], now_ms=self.started_at,
+            )
+        fresh = [row for row in records.values() if row["experimentArm"] == "fresh_entry"]
+        self.assertEqual(len(fresh), 1)
+        self.assertEqual(fresh[0]["initialWalletAddresses"], ["0xaaa"])
+        self.assertEqual(fresh[0]["activeWalletAddresses"], ["0xaaa"])
+        self.assertEqual(fresh[0]["exitThreshold"], 1)
+        self.assertEqual(fresh[0]["walletVwap"], 100.0)
+        fresh[0]["executionStatus"] = "entry_quoted"
+        with patch.object(
+            self.service, "fetch_paper_wallet_state_result",
+            return_value={"ok": True, "data": {"assetPositions": []}},
+        ) as state_fetch, patch.object(
+            self.service, "fetch_paper_book_result",
+            return_value={"ok": False, "data": {}},
+        ):
+            self.service.update_paper_execution_exits(
+                {"fresh": fresh[0]}, now_ms=self.started_at + 1, dashboard={"wallets": []},
+            )
+        state_fetch.assert_called_once_with("0xaaa")
+        self.assertEqual(fresh[0]["activeWalletAddresses"], [])
+        self.assertEqual(fresh[0]["executionStatus"], "exit_pending")
+
+    def test_risk_gate_change_changes_frozen_config_hash(self) -> None:
+        baseline = server.execution_config_hash()
+        with patch.object(server, "SHADOW_MIN_180D_DRAWDOWN_PCT", 99.0):
+            self.assertNotEqual(server.execution_config_hash(), baseline)
 
     def test_paper_arms_do_not_open_both_directions_of_one_coin(self) -> None:
         long_item = self.consensus_item(
@@ -8966,9 +9071,13 @@ class ShadowSignalSamplingTests(unittest.TestCase):
 
         item = self.consensus_item(totalSize=10.0, maxEntryDistancePct=10.0)
         item["candidateFreshAddLatestTime"] = self.started_at - 60_000
+        item["candidateFreshWalletAddresses"] = ["0xaaa"]
+        item["candidateFreshWalletMetrics"] = [
+            {"address": "0xaaa", "vwap": 99.0, "latestTime": self.started_at - 60_000}
+        ]
         with tempfile.TemporaryDirectory() as directory:
             self.service.alerts_path = Path(directory) / "alerts.json"
-            journal = ExecutionJournal(Path(directory) / "execution_journal.sqlite3")
+            journal = ExecutionJournal(Path(directory) / server.EXECUTION_JOURNAL_FILE.name)
             manifest = server.execution_rule_manifest()
             journal.sync(
                 manifest=manifest,
@@ -9018,7 +9127,7 @@ class ShadowSignalSamplingTests(unittest.TestCase):
                 for record in journal.load_stream("paper").values()
             }), 1)
 
-    def test_first_paper_cycle_sets_baseline_without_backfilling_open_positions(self) -> None:
+    def test_first_paper_cycle_waits_for_copyability_before_baseline(self) -> None:
         from execution_journal import ExecutionJournal
 
         item = self.consensus_item(totalSize=10.0)
@@ -9032,10 +9141,28 @@ class ShadowSignalSamplingTests(unittest.TestCase):
                     signal_outcomes={}, shadow_outcomes={}, candidate_outcomes={},
                     now_ms=self.started_at,
                 )
-            journal = ExecutionJournal(Path(directory) / "execution_journal.sqlite3")
+            journal = ExecutionJournal(Path(directory) / server.EXECUTION_JOURNAL_FILE.name)
             self.assertEqual(journal.load_stream("paper"), {})
-            self.assertEqual(journal.paper_report()["baselineAtMs"], self.started_at)
+            self.assertIsNone(journal.paper_report()["baselineAtMs"])
             book_fetch.assert_not_called()
+
+    def test_paper_baseline_starts_with_four_admitted_tracked_wallets(self) -> None:
+        from execution_journal import ExecutionJournal
+
+        addresses = ["0x" + str(index) * 40 for index in range(1, 5)]
+        tracked = [TrackedWallet(address, "", "", "") for address in addresses]
+        with tempfile.TemporaryDirectory() as directory:
+            self.service.alerts_path = Path(directory) / "alerts.json"
+            with patch.object(self.service.store, "list_wallets", return_value=tracked), patch.object(
+                server, "paper_copyability_admitted_addresses", return_value=set(addresses)
+            ), patch.object(self.service, "paper_experiment_consensus", return_value=[]):
+                self.service.record_execution_experiment(
+                    dashboard={"wallets": [{"address": address} for address in addresses]},
+                    state={}, summary={}, position_lifecycle={}, signal_outcomes={},
+                    shadow_outcomes={}, candidate_outcomes={}, now_ms=self.started_at,
+                )
+            journal = ExecutionJournal(Path(directory) / server.EXECUTION_JOURNAL_FILE.name)
+            self.assertEqual(journal.paper_report()["baselineAtMs"], self.started_at)
 
     def test_partial_first_sweep_does_not_start_paper_baseline(self) -> None:
         from execution_journal import ExecutionJournal
@@ -9048,7 +9175,7 @@ class ShadowSignalSamplingTests(unittest.TestCase):
                     signal_outcomes={}, shadow_outcomes={}, candidate_outcomes={},
                     now_ms=self.started_at,
                 )
-            journal = ExecutionJournal(Path(directory) / "execution_journal.sqlite3")
+            journal = ExecutionJournal(Path(directory) / server.EXECUTION_JOURNAL_FILE.name)
             self.assertIsNone(journal.paper_report()["baselineAtMs"])
 
     def test_enrollment_end_stops_new_entries_but_keeps_journal_cycle(self) -> None:
@@ -9057,7 +9184,7 @@ class ShadowSignalSamplingTests(unittest.TestCase):
         item = self.consensus_item(totalSize=10.0)
         with tempfile.TemporaryDirectory() as directory:
             self.service.alerts_path = Path(directory) / "alerts.json"
-            journal = ExecutionJournal(Path(directory) / "execution_journal.sqlite3")
+            journal = ExecutionJournal(Path(directory) / server.EXECUTION_JOURNAL_FILE.name)
             manifest = server.execution_rule_manifest()
             journal.sync(
                 manifest=manifest,

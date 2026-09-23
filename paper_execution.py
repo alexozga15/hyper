@@ -245,6 +245,13 @@ def modeled_funding_cashflow(
         return {"complete": False, "reason": "invalid_oracle_buffer"}
     hour_ms = 60 * 60 * 1000
     margin_ms = 60_000
+    # The rate timestamp does not establish whether an entry/exit executed
+    # before or after the settlement at the same hour. This also catches an
+    # exit exactly on the boundary, which the exclusive range below omits.
+    for endpoint in (entry_at_ms, exit_at_ms):
+        distance = endpoint % hour_ms
+        if min(distance, hour_ms - distance) <= margin_ms:
+            return {"complete": False, "reason": "funding_boundary_ambiguous"}
     boundaries = range((entry_at_ms // hour_ms + 1) * hour_ms, exit_at_ms, hour_ms)
     direction = 1 if side == "long" else -1
     cashflows: list[dict[str, Any]] = []

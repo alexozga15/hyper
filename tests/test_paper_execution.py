@@ -164,6 +164,16 @@ class PaperExecutionTests(unittest.TestCase):
             "oracle_sample_missing",
         )
 
+    def test_exit_exactly_at_funding_hour_is_ambiguous(self):
+        hour = 3_600_000
+        result = modeled_funding_cashflow(
+            [], [], side="long", base_size=10,
+            entry_at_ms=hour // 2, exit_at_ms=hour,
+            history_complete=True,
+        )
+        self.assertFalse(result["complete"])
+        self.assertEqual(result["reason"], "funding_boundary_ambiguous")
+
 
 if __name__ == "__main__":
     unittest.main()

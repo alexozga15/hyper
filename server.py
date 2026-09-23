@@ -70,7 +70,7 @@ WALLET_COPYABILITY_FILE = DATA_DIR / "wallet_copyability.json"
 RUNTIME_HEALTH_FILE = DATA_DIR / "runtime_health.json"
 DASHBOARD_SNAPSHOT_FILE = DATA_DIR / "dashboard_snapshot.json"
 CMM_HEATMAP_HISTORY_FILE = DATA_DIR / "cmm_heatmap_history.json"
-EXECUTION_JOURNAL_FILE = DATA_DIR / "execution_journal.sqlite3"
+EXECUTION_JOURNAL_FILE = DATA_DIR / "execution_journal_v4.sqlite3"
 EXECUTION_JOURNAL_ENABLED = os.environ.get("EXECUTION_JOURNAL_ENABLED", "1") == "1"
 DASHBOARD_SNAPSHOT_VERSION = 1
 # The sentiment timer rebuilds the dashboard every 5 minutes. Three cadences of
@@ -102,8 +102,8 @@ MAX_IMPORT_BATCH = 100
 MAX_DISCOVERY_BATCH = 60
 DEFAULT_CONSENSUS_THRESHOLD = 3
 EXECUTION_RULE_VERSION = os.environ.get(
-    "EXECUTION_RULE_VERSION", "hyper-execution-v1-2026-09-21"
-).strip() or "hyper-execution-v1-2026-09-21"
+    "EXECUTION_RULE_VERSION", "hyper-execution-v4-2026-09-22"
+).strip() or "hyper-execution-v4-2026-09-22"
 SIGNAL_CONVICTION_ALERT_MIN_DELTA = 15.0
 SIGNAL_RE_ALERT_VWAP_DELTA_PCT = 1.0
 SIGNAL_LIFETIME_MS = 2 * 60 * 60 * 1000
@@ -140,6 +140,7 @@ ACTIONABLE_SIGNAL_MIN_QNET = 1.5
 # lowering publication to the display threshold would turn an observation rule
 # into an execution rule without evidence.
 ACTIONABLE_SIGNAL_MIN_INDEPENDENT_WALLETS = 4
+PAPER_EXPERIMENT_MIN_ADMITTED_WALLETS = ACTIONABLE_SIGNAL_MIN_INDEPENDENT_WALLETS
 ACTIONABLE_SIGNAL_MIN_INDEPENDENT_NET_WALLETS = 3
 ACTIONABLE_SIGNAL_MIN_VERIFIED_FRESH_WALLETS = int(
     os.environ.get("ACTIONABLE_SIGNAL_MIN_VERIFIED_FRESH_WALLETS", "3")
@@ -1262,6 +1263,14 @@ def load_wallet_copyability(path: Path | None = None) -> dict[str, dict[str, Any
     }
 
 
+def paper_copyability_admitted_addresses() -> set[str]:
+    """Only prospectively verified wallets may enter any paper-study arm."""
+    return {
+        address for address, record in load_wallet_copyability().items()
+        if copyability_assessment(record)["status"] == "pass"
+    }
+
+
 def wallet_quality_snapshot(
     wallet: dict[str, Any],
     weight: float,
@@ -1350,9 +1359,52 @@ def execution_rule_manifest() -> dict[str, Any]:
     hash identifies the rules the process actually executed rather than the
     defaults committed to Git.
     """
+    policy_prefixes = (
+        "ACTIONABLE_", "ASSET_QUALITY_", "CANDIDATE_", "CONVICTION_",
+        "COPYABILITY_", "COUNTED_", "DORMANT_", "ELITE_", "FILL_HISTORY_",
+        "FRESH_", "FUNDING_HISTORY_",
+        "LABEL_", "MIN_POSITION_", "MONTHLY_QUALITY_", "NON_TOP_",
+        "PAPER_EXPERIMENT_", "POSITION_GROUP_", "QUALITY_WINDOW_",
+        "RANKING_", "RISK_SCORE_", "SHADOW_", "SIGNAL_", "SORTINO_", "TOP_CONVICTION_",
+        "TOXIC_", "WALLET_CORRELATION_", "WALLET_QUALITY_",
+        "WALLET_QUARANTINE_", "WALLET_RECENT_", "WALLET_SIGNAL_",
+        "WALLET_WINDOW_", "WALLET_LIVE_", "WALLET_IDLE_",
+    )
+    resolved_thresholds = {
+        name: value for name, value in globals().items()
+        if name.startswith(policy_prefixes)
+        and isinstance(value, (str, int, float, bool))
+    }
     return {
         "ruleVersion": EXECUTION_RULE_VERSION,
         "sourceCodeHash": SOURCE_CODE_HASH,
+        "resolvedSelectionThresholds": resolved_thresholds,
+        "walletAdmission": {
+            "copyabilityMethod": COPYABILITY_METHOD,
+            "minIndependentCompletedEpisodes": COPYABILITY_MIN_INDEPENDENT_EPISODES,
+            "requirePositiveAfterCostReturnAndLowerBound": True,
+            "admittedAddresses": sorted(paper_copyability_admitted_addresses()),
+            "qualityHardTtlMs": WALLET_QUALITY_HARD_TTL_MS,
+            "qualityWindowMinCoverageMs": QUALITY_WINDOW_MIN_COVERAGE_MS,
+            "min90dClosedTrades": RANKING_MIN_90D_CLOSED_TRADES,
+            "min30dClosedEvents": MONTHLY_QUALITY_MIN_CLOSED_EVENTS,
+            "minProfitFactor": MONTHLY_QUALITY_MIN_PROFIT_FACTOR,
+            "maxWinConcentrationPct": MONTHLY_QUALITY_MAX_WIN_CONCENTRATION_PCT,
+            "toxicMax30dPnl": TOXIC_CONVICTION_WALLET_MAX_30D_PNL,
+            "toxicMaxPositionUnrealizedLoss": COUNTED_POSITION_MAX_UNREALIZED_LOSS,
+            "toxicOpenLossToEquityPct": TOXIC_UNREALIZED_LOSS_TO_ACCOUNT_PCT,
+            "toxicOpenLossMinUsd": TOXIC_UNREALIZED_LOSS_MIN_ABS,
+        },
+        "riskGates": {
+            "minCoverageMs": RISK_SCORE_MIN_COVERAGE_MS,
+            "minDailyReturns": RISK_SCORE_MIN_DAILY_RETURNS,
+            "eliteMinEpisodes": ELITE_MIN_180D_EPISODES,
+            "eliteMinLosses": ELITE_MIN_180D_LOSSES,
+            "eliteMaxDrawdownPct": ELITE_MAX_180D_DRAWDOWN_PCT,
+            "shadowMinDrawdownPct": SHADOW_MIN_180D_DRAWDOWN_PCT,
+            "eliteMaxLargestLoserPct": ELITE_MAX_LARGEST_LOSER_PCT,
+            "shadowMinLargestLoserPct": SHADOW_MIN_LARGEST_LOSER_PCT,
+        },
         "agreement": {
             "displayWallets": DEFAULT_CONSENSUS_THRESHOLD,
             "candidateIndependentWallets": CANDIDATE_SIGNAL_MIN_INDEPENDENT_WALLETS,
@@ -1383,8 +1435,11 @@ def execution_rule_manifest() -> dict[str, Any]:
             "arms": ["ranked_consensus", "consensus_unranked", "fresh_entry"],
             "status": "prospective_book_entry_exit_modeled_funding_and_portfolio_diagnostics",
             "hardRiskCohort": "common_admitted_wallets",
+            "freshWalletSelection": "lowest_normalized_admitted_address",
             "exitWalletState": "verified_current_dashboard_snapshot_then_direct_clearinghouse",
             "orderNotionalUsd": PAPER_EXPERIMENT_NOTIONAL_USD,
+            "minAdmittedWalletsAtBaseline": PAPER_EXPERIMENT_MIN_ADMITTED_WALLETS,
+            "minGapMs": PAPER_EXPERIMENT_MIN_GAP_MS,
             "enrollmentMs": PAPER_EXPERIMENT_ENROLLMENT_MS,
             "cycleBudgetMs": PAPER_EXPERIMENT_CYCLE_BUDGET_MS,
             "requestTimeoutSeconds": PAPER_EXPERIMENT_REQUEST_TIMEOUT_SECONDS,
@@ -6119,6 +6174,25 @@ class WalletTrackerService:
             reasons.append("low_probability")
         return reasons
 
+    @staticmethod
+    def paper_fresh_member(item: dict[str, Any]) -> dict[str, Any] | None:
+        """Deterministically select one wallet with its own verified add."""
+        addresses = sorted({
+            str(value).lower() for value in (item.get("candidateFreshWalletAddresses") or [])
+            if value
+        })
+        if not addresses:
+            return None
+        for row in item.get("candidateFreshWalletMetrics") or []:
+            if (
+                isinstance(row, dict)
+                and str(row.get("address") or "").lower() == addresses[0]
+                and to_float(row.get("vwap")) > 0
+                and int(to_float(row.get("latestTime"))) > 0
+            ):
+                return {**row, "address": addresses[0]}
+        return None
+
     def paper_experiment_arm_reasons(
         self, item: dict[str, Any], arm: str
     ) -> list[str]:
@@ -6126,6 +6200,16 @@ class WalletTrackerService:
         market_coin = str(item.get("marketCoin") or item.get("coin") or "")
         if ":" in market_coin or market_coin.startswith("@"):
             return ["unsupported_market"]
+        admitted = paper_copyability_admitted_addresses()
+        participants = (
+            item.get("candidateFreshWalletAddresses") if arm == "fresh_entry"
+            else [wallet.get("address") for wallet in item.get("wallets", []) if isinstance(wallet, dict)]
+        )
+        participant_addresses = {
+            str(address).lower() for address in (participants or []) if address
+        }
+        if not participant_addresses or not participant_addresses <= admitted:
+            return ["copyability_not_verified"]
         if arm == "ranked_consensus":
             return self.signal_rejection_reasons(item, self.signal_probability_score(item))
 
@@ -6144,13 +6228,17 @@ class WalletTrackerService:
         elif arm == "fresh_entry":
             if int(to_float(item.get("candidateFreshIndependentWalletCount"))) < 1:
                 reasons.append("no_fresh_wallet")
+            if self.paper_fresh_member(item) is None:
+                reasons.append("missing_single_wallet_fresh_metrics")
             if int(to_float(item.get("oppositeCandidateFreshIndependentWalletCount"))) > 0:
                 reasons.append("opposite_fresh_flow")
         else:
             return ["unknown_experiment_arm"]
 
+        fresh_member = self.paper_fresh_member(item) if arm == "fresh_entry" else None
         fresh_vwap = to_float(
-            item.get("candidateFreshAddVwap") if arm == "fresh_entry" else item.get("freshAddVwap")
+            (fresh_member or {}).get("vwap") if arm == "fresh_entry"
+            else item.get("freshAddVwap")
         )
         mark_price = to_float(item.get("markPrice"))
         if fresh_vwap <= 0 or mark_price <= 0:
@@ -6173,6 +6261,22 @@ class WalletTrackerService:
             fingerprint = self.shadow_consensus_fingerprint(item)
             for arm in ("ranked_consensus", "consensus_unranked", "fresh_entry"):
                 reasons = self.paper_experiment_arm_reasons(item, arm)
+                if arm == "fresh_entry":
+                    fresh_member = self.paper_fresh_member(item)
+                    wallets = [fresh_member["address"]] if fresh_member else []
+                    fresh_vwap = to_float((fresh_member or {}).get("vwap"))
+                    fresh_at = int(to_float((fresh_member or {}).get("latestTime")))
+                    mark_price = to_float(item.get("markPrice"))
+                    entry_distance_pct = (
+                        ((mark_price / fresh_vwap) - 1.0) * 100.0
+                        if mark_price > 0 and fresh_vwap > 0 else None
+                    )
+                else:
+                    fresh_member = None
+                    wallets = list(fingerprint.get("walletAddresses") or [])
+                    fresh_vwap = to_float(item.get("freshAddVwap"))
+                    fresh_at = int(to_float(item.get("freshAddLatestTime")))
+                    entry_distance_pct = to_float(item.get("entryDistancePct"))
                 decision_key = json.dumps(
                     [arm, signal_key, fingerprint],
                     sort_keys=True, separators=(",", ":"),
@@ -6186,8 +6290,9 @@ class WalletTrackerService:
                 # not once per price tick.
                 decision = {
                     "day": now_ms // (24 * 60 * 60 * 1000),
-                    "wallets": fingerprint.get("walletAddresses"),
-                    "freshAddLatestTime": fingerprint.get("freshAddLatestTime"),
+                    "wallets": wallets,
+                    "freshAddLatestTime": fresh_at,
+                    "freshAddVwap": fresh_vwap,
                     "eligible": not reasons,
                     "reasons": reasons,
                 }
@@ -6198,11 +6303,6 @@ class WalletTrackerService:
                     sort_keys=True, separators=(",", ":"),
                 )
                 evaluation_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()
-                wallets = (
-                    item.get("candidateFreshWalletAddresses")
-                    if arm == "fresh_entry"
-                    else fingerprint.get("walletAddresses")
-                )
                 evaluations.append(
                     {
                         "evaluationId": evaluation_id,
@@ -6212,7 +6312,7 @@ class WalletTrackerService:
                         "coin": item.get("coin", "Unknown"),
                         "side": item.get("side", ""),
                         "eligible": not reasons,
-                        "walletAddresses": list(wallets) if isinstance(wallets, list) else [],
+                        "walletAddresses": wallets,
                         "reasons": reasons,
                         "inputs": {
                             "independentWalletCount": int(to_float(item.get("independentWalletCount"))),
@@ -6221,12 +6321,12 @@ class WalletTrackerService:
                             "netFreshIndependentWalletCount": int(to_float(item.get("netFreshIndependentWalletCount"))),
                             "independentTopWalletCount": int(to_float(item.get("independentTopWalletCount"))),
                             "netIndependentWeightedWalletCount": to_float(item.get("netIndependentWeightedWalletCount")),
-                            "freshAddVwap": to_float(
-                                item.get("candidateFreshAddVwap") if arm == "fresh_entry"
-                                else item.get("freshAddVwap")
-                            ),
+                            "freshAddVwap": fresh_vwap,
+                            "freshAddLatestTime": fresh_at,
                             "markPrice": to_float(item.get("markPrice")),
-                            "entryDistancePct": to_float(item.get("entryDistancePct")),
+                            "entryDistancePct": entry_distance_pct,
+                            "maxEntryDistancePct": to_float(item.get("maxEntryDistancePct")),
+                            "selectedWalletAddress": fresh_member["address"] if fresh_member else None,
                             "probabilityScore": self.signal_probability_score(item),
                             "consensusFingerprint": fingerprint,
                             "entryDecision": entry_decision,
@@ -6286,8 +6386,9 @@ class WalletTrackerService:
                 if self.paper_experiment_arm_reasons(item, arm):
                     note("policy_rejected")
                     continue
+                fresh_member = self.paper_fresh_member(item) if arm == "fresh_entry" else None
                 fresh_at = int(to_float(
-                    item.get("candidateFreshAddLatestTime") if arm == "fresh_entry"
+                    (fresh_member or {}).get("latestTime") if arm == "fresh_entry"
                     else item.get("freshAddLatestTime")
                 ))
                 if baseline_at_ms and fresh_at <= baseline_at_ms:
@@ -6321,7 +6422,7 @@ class WalletTrackerService:
                     note("missing_mark_price")
                     continue
                 initial_wallets = (
-                    sorted({str(value).lower() for value in (item.get("candidateFreshWalletAddresses") or [])})
+                    [fresh_member["address"]] if fresh_member else []
                     if arm == "fresh_entry"
                     else list(fingerprint.get("walletAddresses") or [])
                 )
@@ -6334,7 +6435,7 @@ class WalletTrackerService:
                     "startedAt": now_ms,
                     "entryPrice": round(entry_price, 8),
                     "walletVwap": round(to_float(
-                        item.get("candidateFreshAddVwap") if arm == "fresh_entry"
+                        (fresh_member or {}).get("vwap") if arm == "fresh_entry"
                         else item.get("freshAddVwap")
                     ), 8),
                     "initialWalletAddresses": initial_wallets,
@@ -6555,6 +6656,7 @@ class WalletTrackerService:
                             label: {} for label in FRESH_ACTIVITY_DIAGNOSTIC_WINDOWS_MS
                         },
                         "candidateFreshWalletAddresses": set(),
+                        "candidateFreshWalletMetrics": {},
                         "candidateFreshWalletGroups": set(),
                         "candidateFreshTopWalletAddresses": set(),
                         "candidateFreshTopWalletGroups": set(),
@@ -6638,6 +6740,15 @@ class WalletTrackerService:
                         and to_float(fresh_add.get("size")) > 0
                     ):
                         bucket["candidateFreshWalletAddresses"].add(address)
+                        bucket["candidateFreshWalletMetrics"][address.lower()] = {
+                            "address": address.lower(),
+                            "value": round(to_float(fresh_add.get("value")), 2),
+                            "size": round(to_float(fresh_add.get("size")), 8),
+                            "latestTime": int(to_float(fresh_add.get("latestTime"))),
+                            "vwap": round(
+                                to_float(fresh_add.get("value")) / to_float(fresh_add.get("size")), 8
+                            ),
+                        }
                         bucket["candidateFreshWalletGroups"].add(correlation_group)
                         if address.lower() in active_top_wallet_addresses:
                             bucket["candidateFreshTopWalletAddresses"].add(address)
@@ -6708,6 +6819,10 @@ class WalletTrackerService:
                 # the ranked strategy's per-wallet $100K conviction floor.
                 "candidateFreshIndependentWalletCount": len(bucket["candidateFreshWalletGroups"]),
                 "candidateFreshWalletAddresses": sorted(bucket["candidateFreshWalletAddresses"]),
+                "candidateFreshWalletMetrics": [
+                    bucket["candidateFreshWalletMetrics"][address]
+                    for address in sorted(bucket["candidateFreshWalletMetrics"])
+                ],
                 "candidateFreshAddLatestTime": int(bucket["candidateFreshAddLatestTime"]),
                 "candidateFreshAddValue": round(bucket["candidateFreshAddValue"], 2),
                 "candidateFreshAddVwap": round(
@@ -10237,9 +10352,18 @@ class WalletTrackerService:
         *,
         position_lifecycle: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        """One-wallet observation surface shared by all three paper arms."""
+        """One copyability-admitted observation surface shared by all arms."""
+        admitted = paper_copyability_admitted_addresses()
+        admitted_dashboard = {
+            **dashboard,
+            "wallets": [
+                wallet for wallet in dashboard.get("wallets", [])
+                if isinstance(wallet, dict)
+                and str(wallet.get("address") or "").lower() in admitted
+            ],
+        }
         wider, _cohort = self.build_monthly_sentiment_summary(
-            dashboard,
+            admitted_dashboard,
             1,
             state,
             persist=False,
@@ -10901,6 +11025,12 @@ class WalletTrackerService:
             config_hash=config_hash, alert_config_hash=alert_config_hash,
             tracked_wallets=tracked_addresses, now_ms=now_ms,
         )
+        if freeze.get("status") == "baseline" and len(
+            set(tracked_addresses) & paper_copyability_admitted_addresses()
+        ) < PAPER_EXPERIMENT_MIN_ADMITTED_WALLETS:
+            # Do not spend the fixed enrollment window before a comparable
+            # admitted cohort exists. No baseline cycle is persisted.
+            return
         wallet_rows = dashboard.get("wallets") if isinstance(dashboard, dict) else None
         snapshot_complete = isinstance(wallet_rows, list) and (
             not tracked_addresses or observed_addresses == tracked_addresses
