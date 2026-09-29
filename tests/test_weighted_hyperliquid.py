@@ -23,6 +23,9 @@ def test_endpoint_weights_and_row_surcharges():
     assert hyperliquid_request_weight({"type": "userRole"}) == 60
     assert hyperliquid_request_weight({"type": "userFills"}) == 120
     assert hyperliquid_request_weight({"type": "userFills"}, [None] * 21) == 22
+    assert hyperliquid_request_weight({"type": "candleSnapshot", "req": {
+        "interval": "15m", "startTime": 0, "endTime": 3_600_000,
+    }}) == 21
 
 
 def test_processes_share_one_budget(tmp_path):
@@ -165,6 +168,26 @@ def test_incomplete_background_history_preserves_last_good_score():
         result = service.fetch_wallet_snapshot(TrackedWallet("0xabc", "", "", ""), cached_snapshot={"winRate90d": 80})
     assert not result["dataQuality"]["qualityRefreshSucceeded"]
     assert result["winRate90d"] == 80
+
+
+def test_unknown_outcome_symbols_have_bounded_single_attempt_budget():
+    service = WalletTrackerService(object(), HyperliquidClient(RequestRateLimiter(1000)))
+    with patch.object(service.client, "safe_post_result", return_value={"ok": False, "data": []}) as request:
+        for _ in range(2):
+            for index in range(30):
+                assert service.candidate_outcome_market_price(f"missing{index}", now_ms=1_000_000) == 0
+    assert request.call_count == 8
+    assert all(call.kwargs["attempts"] == 1 for call in request.call_args_list)
+    assert all(call.kwargs["max_rate_limit_wait_seconds"] <= 1 for call in request.call_args_list)
+
+
+def test_existing_due_cmm_history_requires_batched_prices_without_new_signals():
+    service = WalletTrackerService(object(), HyperliquidClient(RequestRateLimiter(1000)))
+    now = 2_000_000_000_000
+    records = {"old": {"startedAt": now - 7_200_000, "entryPrice": 100, "outcomes": {}}}
+    assert service.cmm_outcomes_need_prices(records, now_ms=now)
+    records["old"]["outcomes"] = {horizon: {} for horizon in __import__('server').SIGNAL_OUTCOME_HORIZONS_MS}
+    assert not service.cmm_outcomes_need_prices(records, now_ms=now)
 
 
 def test_older_live_snapshot_cannot_overwrite_new_background_quality(tmp_path):

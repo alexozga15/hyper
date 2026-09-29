@@ -10018,6 +10018,20 @@ class WalletTrackerService:
         }
 
     def candidate_outcome_market_price(self, market_coin: str, *, now_ms: int) -> float:
+        # One bounded fallback budget across all outcome streams in a cycle.
+        # Missing/delisted CMM symbols used to cause hundreds of candle retries
+        # after the live snapshot, preventing the alert state from being saved.
+        if getattr(self, "_outcome_price_at_ms", None) != now_ms:
+            self._outcome_price_at_ms = now_ms
+            self._outcome_price_cache: dict[str, float] = {}
+            self._outcome_price_requests = 0
+            self._outcome_price_deadline = time.monotonic() + 20.0
+        if market_coin in self._outcome_price_cache:
+            return self._outcome_price_cache[market_coin]
+        remaining = self._outcome_price_deadline - time.monotonic()
+        if self._outcome_price_requests >= 8 or remaining <= 0:
+            return 0.0  # Leave the outcome unmeasured; never fabricate a price.
+        self._outcome_price_requests += 1
         result = self.client.safe_post_result(
             {
                 "type": "candleSnapshot",
@@ -10029,11 +10043,17 @@ class WalletTrackerService:
                 },
             },
             [],
+            attempts=1, request_timeout_seconds=min(4.0, remaining),
+            max_rate_limit_wait_seconds=min(1.0, remaining),
         )
         candles = result.get("data") if result.get("ok") else []
-        if not isinstance(candles, list) or not candles:
-            return 0.0
-        return to_float(candles[-1].get("c")) if isinstance(candles[-1], dict) else 0.0
+        price = (
+            to_float(candles[-1].get("c"))
+            if isinstance(candles, list) and candles and isinstance(candles[-1], dict)
+            else 0.0
+        )
+        self._outcome_price_cache[market_coin] = price
+        return price
 
     def update_candidate_signal_outcomes(
         self,
@@ -10183,7 +10203,15 @@ class WalletTrackerService:
     ) -> dict[str, Any]:
         """Measure due outcomes, including setups that have left consensus."""
         fallback_prices: dict[str, float] = {}
-        for record in records.values():
+        def due_priority(record: dict[str, Any]) -> float:
+            elapsed = now_ms - int(to_float(record.get("startedAt")))
+            outcomes = record.get("outcomes") or {}
+            return min((elapsed - ms for label, ms in SIGNAL_OUTCOME_HORIZONS_MS.items()
+                        if label not in outcomes and elapsed >= ms), default=float("inf"))
+
+        # A limited fallback budget goes to the closest due horizons first;
+        # ancient unpriced symbols must not starve timely observations.
+        for record in sorted(records.values(), key=due_priority):
             started_at = int(to_float(record.get("startedAt")))
             entry_price = to_float(record.get("entryPrice"))
             if started_at <= 0 or entry_price <= 0:
@@ -11436,6 +11464,20 @@ class WalletTrackerService:
             and to_float(signal.get("probabilityScore")) >= CMM_SIGNAL_OUTCOME_MIN_PROBABILITY
         ]
 
+    def cmm_outcomes_need_prices(self, previous: Any, *, now_ms: int) -> bool:
+        if not isinstance(previous, dict):
+            return False
+        return any(
+            isinstance(record, dict)
+            and 0 < int(to_float(record.get("startedAt")))
+            and to_float(record.get("entryPrice")) > 0
+            and 0 <= now_ms - int(to_float(record.get("startedAt"))) <= CMM_SIGNAL_OUTCOME_RETENTION_MS
+            and any(label not in (record.get("outcomes") or {})
+                    and now_ms - int(to_float(record.get("startedAt"))) >= ms
+                    for label, ms in SIGNAL_OUTCOME_HORIZONS_MS.items())
+            for record in previous.values()
+        )
+
     def cmm_signal_outcome_sample_reason(
         self,
         signal: dict[str, Any],
@@ -12647,7 +12689,11 @@ class WalletTrackerService:
         # allMids calls in combined_mark_map() when there is actually a
         # watch-tier-or-above CMM signal to price this cycle.
         cmm_outcome_candidates = self.cmm_signal_outcome_candidates(cmm_summary)
-        cmm_mark_map = self.combined_mark_map() if cmm_outcome_candidates else {}
+        cmm_mark_map = self.combined_mark_map() if (
+            cmm_outcome_candidates or self.cmm_outcomes_need_prices(
+                state.get("cmmSignalOutcomes"), now_ms=dedupe_now_ms,
+            )
+        ) else {}
         cmm_signal_outcomes = self.update_cmm_signal_outcomes(
             state.get("cmmSignalOutcomes", {}),
             cmm_summary,
@@ -12934,7 +12980,11 @@ class WalletTrackerService:
         # allMids calls in combined_mark_map() when there is actually a
         # watch-tier-or-above CMM signal to price this cycle.
         cmm_outcome_candidates = self.cmm_signal_outcome_candidates(cmm_summary)
-        cmm_mark_map = self.combined_mark_map() if cmm_outcome_candidates else {}
+        cmm_mark_map = self.combined_mark_map() if (
+            cmm_outcome_candidates or self.cmm_outcomes_need_prices(
+                state.get("cmmSignalOutcomes"), now_ms=lifecycle_now_ms,
+            )
+        ) else {}
         cmm_signal_outcomes = self.update_cmm_signal_outcomes(
             state.get("cmmSignalOutcomes", {}),
             cmm_summary,

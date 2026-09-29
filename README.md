@@ -138,6 +138,11 @@ The supplied `api-budget.env` and `hyper-api-budget.conf` provide those settings
 without modifying the secrets file. Install the environment file under
 `/home/ubuntu/.config/hyper/` and the drop-in under each Hyper service's
 `/etc/systemd/system/<unit>.service.d/api-budget.conf` directory.
+Outcome measurements use batched prices for due historical CMM records even
+without new CMM candidates. Candle fallbacks share a per-cycle limit of eight
+requests and twenty seconds, cache failed symbols for that cycle, and prioritize
+the closest due horizons. Missing prices remain unmeasured. Candle reservations
+use the requested time span rather than assuming a 5,000-candle response.
 
 The GitHub `Sentiment Alerts` workflow remains available for manual recovery runs,
 but has no schedule once the EC2 timer is active. Do not schedule both runners at the

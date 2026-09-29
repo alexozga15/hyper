@@ -76,7 +76,19 @@ def hyperliquid_request_weight(payload: dict[str, Any], response: Any = None) ->
         count = len(response) if isinstance(response, list) else 2000
         return 20 + math.ceil(count / 20)
     if kind == "candleSnapshot":
-        count = len(response) if isinstance(response, list) else 5000
+        count = 5000
+        req = payload.get("req") or {}
+        interval = str(req.get("interval") or "")
+        units = {"m": 60_000, "h": 3_600_000, "d": 86_400_000, "w": 604_800_000, "M": 28 * 86_400_000}
+        try:
+            duration = int(interval[:-1]) * units[interval[-1]]
+            span = int(req["endTime"]) - int(req["startTime"])
+            if duration > 0 and span >= 0:
+                count = min(5000, math.ceil(span / duration) + 2)
+        except (KeyError, ValueError, TypeError, IndexError):
+            pass
+        if isinstance(response, list):
+            count = len(response)
         return 20 + math.ceil(count / 60)
     return 20
 
@@ -94,7 +106,7 @@ class HyperliquidRateLimiter(RequestRateLimiter):
                  requests_per_second: float = 6.0) -> None:
         super().__init__(requests_per_second)
         self.path = Path(path)
-        self.budget = max(120, min(int(weight_per_minute), 1100))
+        self.budget = max(240, min(int(weight_per_minute), 1100))
         self.history_budget = max(120, min(int(historical_weight_per_minute), self.budget - 120))
         self.reserved_weight = 0
         self.budget_wait_seconds = 0.0
