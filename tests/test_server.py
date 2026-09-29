@@ -3884,15 +3884,14 @@ class AlertSummaryTests(unittest.TestCase):
         self.assertFalse(snapshot["qualityWindowTruncated"])
 
     def test_a_failed_page_is_retried_before_the_walk_is_abandoned(self) -> None:
-        # The walk is all-or-nothing, so without this a single throttled page
-        # discards every page already collected - which is what starved the
-        # busiest wallets of their quality refresh entirely.
+        # Temporary server errors can recover on retry. Provider 429s instead
+        # stop the walk and defer it until the shared cooldown has passed.
         calls = {"n": 0}
 
         def flaky(address: str, cursor: int) -> dict[str, Any]:
             calls["n"] += 1
             if calls["n"] == 1:
-                return {"ok": False, "data": [], "error": "HTTP 429: Too Many Requests"}
+                return {"ok": False, "data": [], "error": "HTTP 503: Service Unavailable"}
             return {"ok": True, "data": [], "error": ""}
 
         with patch.object(self.service, "fetch_fills_result", flaky):
@@ -3905,7 +3904,7 @@ class AlertSummaryTests(unittest.TestCase):
 
         def always_failing(address: str, cursor: int) -> dict[str, Any]:
             calls["n"] += 1
-            return {"ok": False, "data": [], "error": "HTTP 429: Too Many Requests"}
+            return {"ok": False, "data": [], "error": "HTTP 503: Service Unavailable"}
 
         with patch.object(self.service, "fetch_fills_result", always_failing):
             result = self.service.fetch_fills_paginated_result("0xabc", 0)

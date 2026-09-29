@@ -16,3 +16,6 @@ data/alerts.json
 data/telegram_bot_state.json
 # flock sidecars created by locked_path(); pure runtime coordination state.
 data/*.lock
+data/*.sqlite3
+data/*.sqlite3-*
+data/quality_refresh_health.json

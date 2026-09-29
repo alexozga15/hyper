@@ -119,6 +119,26 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now hyper-sentiment.timer
 ```
 
+Hyperliquid REST calls share a SQLite-backed weighted budget across all local
+processes: 900 weight/minute by default, of which historical traffic may use at
+most 600. Response-page reservations account for row surcharges; 429 cooldowns
+are shared and historical requests stop retrying until a later run.
+
+For separate live and historical refreshes, set
+`WALLET_QUALITY_BACKGROUND_REFRESH=1` in the environment file, install
+`hyper-quality-refresh.service` and `hyper-quality-refresh.timer`, reload systemd,
+and enable the new timer. The live dashboard then reads cached quality while
+updating positions and recent fills. The background worker rotates three wallets,
+checkpoints four pages per history stream, and only updates quality after fills,
+TWAP fills, and funding have completed. Subsequent refreshes fetch only new rows
+with an inclusive overlap. Checkpoints reside in `wallet_history.sqlite3`; progress
+and throttling are reported in `quality_refresh_health.json`. Both workers merge
+cache updates under a file lock, preserving newer quality and recent-fill data.
+The supplied `api-budget.env` and `hyper-api-budget.conf` provide those settings
+without modifying the secrets file. Install the environment file under
+`/home/ubuntu/.config/hyper/` and the drop-in under each Hyper service's
+`/etc/systemd/system/<unit>.service.d/api-budget.conf` directory.
+
 The GitHub `Sentiment Alerts` workflow remains available for manual recovery runs,
 but has no schedule once the EC2 timer is active. Do not schedule both runners at the
 same time because they keep separate alert baselines and can send duplicate alerts.

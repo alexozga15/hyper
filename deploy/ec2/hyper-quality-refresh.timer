@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh Hyper wallet quality in the background every ten minutes
+
+[Timer]
+OnActiveSec=3min
+OnUnitInactiveSec=10min
+AccuracySec=10s
+Persistent=true
+Unit=hyper-quality-refresh.service
+
+[Install]
+WantedBy=timers.target

@@ -30,7 +30,8 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 # Re-exported: callers and tests import RequestRateLimiter from server.
-from ratelimit import RequestRateLimiter
+from ratelimit import HyperliquidRateLimiter, RequestRateLimiter
+from history_cache import ResumableHistoryCache
 
 try:
     import fcntl
@@ -55,7 +56,7 @@ SOURCE_CODE_HASH = hashlib.sha256(
             "server.py", "execution_journal.py", "paper_execution.py",
             "paper_portfolio.py", "paper_analysis.py",
             "hyper-paper-v4/RULES.md",
-            "coinmarketman.py", "moni.py", "ratelimit.py"
+            "coinmarketman.py", "moni.py", "ratelimit.py", "history_cache.py"
         )
     )
 ).hexdigest()
@@ -563,6 +564,7 @@ HYPERLIQUID_REQUESTS_PER_SECOND = max(
     float(os.environ.get("HYPERLIQUID_REQUESTS_PER_SECOND", "6")),
 )
 WALLET_QUALITY_REFRESH_BATCH_SIZE = 3
+WALLET_QUALITY_BACKGROUND_REFRESH = os.environ.get("WALLET_QUALITY_BACKGROUND_REFRESH", "0") == "1"
 # Calibrated for the 30-day quality window these once gated. The conviction
 # weight now rides on a 90-day win rate, which barely moves between refreshes:
 # measured across the 31 tracked wallets, the median wallet closes 0.21
@@ -3442,19 +3444,33 @@ class WalletStore:
         return True
 
 
-GLOBAL_HYPERLIQUID_RATE_LIMITER = RequestRateLimiter(HYPERLIQUID_REQUESTS_PER_SECOND)
+GLOBAL_HYPERLIQUID_RATE_LIMITER = HyperliquidRateLimiter(
+    DATA_DIR / "hyperliquid_rate_limit.sqlite3",
+    weight_per_minute=int(os.environ.get("HYPERLIQUID_WEIGHT_PER_MINUTE", "900")),
+    historical_weight_per_minute=int(os.environ.get("HYPERLIQUID_HISTORY_WEIGHT_PER_MINUTE", "600")),
+    requests_per_second=HYPERLIQUID_REQUESTS_PER_SECOND,
+)
 
 
 class HyperliquidClient:
-    def __init__(self, rate_limiter: RequestRateLimiter | None = None) -> None:
+    def __init__(self, rate_limiter: RequestRateLimiter | None = None, *, priority: str = "live") -> None:
         self.rate_limiter = rate_limiter or GLOBAL_HYPERLIQUID_RATE_LIMITER
+        self.priority = priority
 
     def post(
         self, payload: dict[str, Any], url: str = HYPERLIQUID_INFO_URL,
         *, timeout_seconds: float = 20.0,
         max_rate_limit_wait_seconds: float | None = None,
     ) -> Any:
-        if max_rate_limit_wait_seconds is None:
+        token = None
+        if isinstance(self.rate_limiter, HyperliquidRateLimiter):
+            token = self.rate_limiter.acquire(
+                payload, priority=self.priority,
+                max_wait_seconds=max_rate_limit_wait_seconds,
+            )
+            if token is None:
+                raise TimeoutError("weighted rate limiter wait exceeds request budget")
+        elif max_rate_limit_wait_seconds is None:
             self.rate_limiter.wait()
         elif not self.rate_limiter.wait(max_wait_seconds=max_rate_limit_wait_seconds):
             raise TimeoutError("rate limiter wait exceeds request budget")
@@ -3464,13 +3480,15 @@ class HyperliquidClient:
             headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-            return json.load(response)
+            data = json.load(response)
+        if token is not None:
+            self.rate_limiter.settle(token, payload, data)
+        return data
 
     def safe_post(self, payload: dict[str, Any], fallback: Any) -> Any:
-        try:
-            return self.post(payload)
-        except (urllib.error.URLError, TimeoutError, ValueError):
-            return fallback
+        # Single-attempt callers must still publish 429 cooldowns to the shared
+        # limiter rather than silently swallowing the provider's response.
+        return self.safe_post_result(payload, fallback, attempts=1)["data"]
 
     def safe_post_result(
         self,
@@ -3487,9 +3505,9 @@ class HyperliquidClient:
             try:
                 data = (
                     self.post(payload)
-                    if request_timeout_seconds is None
+                    if request_timeout_seconds is None and max_rate_limit_wait_seconds is None
                     else self.post(
-                        payload, timeout_seconds=request_timeout_seconds,
+                        payload, timeout_seconds=request_timeout_seconds or 20.0,
                         max_rate_limit_wait_seconds=max_rate_limit_wait_seconds,
                     )
                 )
@@ -3504,8 +3522,14 @@ class HyperliquidClient:
                         retry_after = 0.0
                     backoff = retry_after or retry_delay * (2 ** attempt) + random.uniform(0.05, 0.25)
                     self.rate_limiter.penalize(backoff)
+                    if self.priority == "history":
+                        # Keep the cursor and retry in a later background run;
+                        # do not amplify a provider cooldown with page retries.
+                        return {"ok": False, "data": fallback, "error": last_error}
             except (urllib.error.URLError, TimeoutError, ValueError) as exc:
                 last_error = str(exc)
+                if self.priority == "history":
+                    return {"ok": False, "data": fallback, "error": last_error}
             if attempt < max(1, attempts) - 1 and retry_delay > 0:
                 time.sleep(retry_delay * (attempt + 1))
         return {"ok": False, "data": fallback, "error": last_error or "request failed"}
@@ -3782,6 +3806,7 @@ class WalletTrackerService:
         self.client = client
         self.alerts_path = ALERTS_FILE
         self.wallet_quality_cache_path = WALLET_QUALITY_CACHE_FILE
+        self.history_cache: ResumableHistoryCache | None = None
         self.cmm_client = CoinMarketManClient()
         self.moni_client = MoniClient()
 
@@ -3838,6 +3863,16 @@ class WalletTrackerService:
         page_size: int = FUNDING_HISTORY_PAGE_SIZE,
     ) -> dict[str, Any]:
         """Fetch the complete userFunding window instead of its first 500 rows."""
+        if self.history_cache is not None:
+            return self.history_cache.walk(
+                address, "funding", start_time,
+                fetch=lambda cursor: self.fetch_user_funding_result(address, cursor),
+                page_size=page_size,
+                timestamp=lambda row: int(to_float(row.get("time"))),
+                identity=lambda row: (
+                    row.get("time"), row.get("hash"), row.get("delta"),
+                ),
+            )
         if max_pages is None:
             max_pages = FUNDING_HISTORY_MAX_PAGES
         collected: list[dict[str, Any]] = []
@@ -3950,6 +3985,14 @@ class WalletTrackerService:
             inner = row.get("fill")
             return int(to_float(inner.get("time"))) if isinstance(inner, dict) else 0
 
+        if self.history_cache is not None:
+            return self.history_cache.walk(
+                address, "twap", start_time,
+                fetch=lambda cursor: self.fetch_twap_slice_fills_result(address, cursor),
+                page_size=page_size, timestamp=slice_time,
+                identity=lambda row: (row.get("twapId"), raw_fill_identity(row.get("fill"))),
+            )
+
         collected: list[Any] = []
         seen: set[tuple[Any, ...]] = set()
         cursor = int(start_time)
@@ -3998,7 +4041,7 @@ class WalletTrackerService:
         """
         result = fetch()
         for attempt in range(1, max(1, FILL_HISTORY_PAGE_RETRY_ATTEMPTS)):
-            if result.get("ok"):
+            if result.get("ok") or "HTTP 429" in str(result.get("error", "")):
                 return result
             if FILL_HISTORY_PAGE_RETRY_DELAY_SECONDS > 0:
                 time.sleep(FILL_HISTORY_PAGE_RETRY_DELAY_SECONDS * attempt)
@@ -4038,6 +4081,14 @@ class WalletTrackerService:
             max_pages = FILL_HISTORY_MAX_PAGES
         if page_size is None:
             page_size = WALLET_WINDOW_FILL_CAP
+        if self.history_cache is not None:
+            return self.history_cache.walk(
+                address, "fills", start_time,
+                fetch=lambda cursor: self.fetch_fills_result(address, cursor),
+                page_size=page_size,
+                timestamp=lambda row: int(to_float(row.get("time"))),
+                identity=raw_fill_identity,
+            )
         collected: list[dict[str, Any]] = []
         seen: set[tuple[Any, ...]] = set()
         cursor = int(start_time)
@@ -4901,6 +4952,7 @@ class WalletTrackerService:
 
         quality_refresh_succeeded = (
             full_quality_refresh and fills_ok and twap_fills_ok and portfolio_ok and funding_complete
+            and not fills_paged_truncated and not twap_paged_truncated
         )
         has_cached_quality = any(field in cached for field in WALLET_CACHED_QUALITY_FIELDS)
         use_cached_quality = has_cached_quality and not quality_refresh_succeeded
@@ -4984,6 +5036,50 @@ class WalletTrackerService:
             "refreshedAtMs": refreshed_at_ms,
             "refreshAttemptedAtMs": refreshed_at_ms,
         }
+
+    def persist_wallet_snapshots(
+        self, snapshots: list[dict[str, Any]], tracked_addresses: set[str],
+    ) -> None:
+        """Merge live and background updates while holding the cache write lock."""
+        with locked_path(self.wallet_quality_cache_path, exclusive=True):
+            try:
+                raw = json.loads(self.wallet_quality_cache_path.read_text())
+            except (OSError, ValueError):
+                raw = {}
+            cached = raw.get("wallets", {}) if isinstance(raw, dict) else {}
+            cached = cached if isinstance(cached, dict) else {}
+            for snapshot in snapshots:
+                address = str(snapshot.get("address") or "").lower()
+                if not address or address not in tracked_addresses:
+                    continue
+                quality = snapshot.get("dataQuality") or {}
+                old = cached.get(address) or {}
+                old = old if isinstance(old, dict) else {}
+                entry = dict(old)
+                stamp = iso_to_ms(snapshot.get("fetchedAt")) or current_time_ms()
+                if quality.get("qualityRefreshSucceeded") and stamp >= int(to_float(old.get("refreshedAtMs"))):
+                    entry.update(self.cached_wallet_quality_snapshot(snapshot))
+                    entry["refreshedAtMs"] = stamp
+                if quality.get("qualityRefreshAttempted"):
+                    entry["refreshAttemptedAtMs"] = max(stamp, int(to_float(old.get("refreshAttemptedAtMs"))))
+                fills = [f for f in (old.get("recentFills") or []) + (snapshot.get("recentFills") or []) if isinstance(f, dict)]
+                if fills:
+                    unique = {
+                        (f.get("coin"), f.get("direction"), f.get("price"), f.get("size"), f.get("time")): f
+                        for f in fills
+                        if int(to_float(f.get("time"))) >= current_time_ms() - WALLET_RECENT_FILL_CACHE_RETENTION_MS
+                    }
+                    entry["recentFills"] = sorted(unique.values(), key=lambda f: int(to_float(f.get("time"))), reverse=True)[:WALLET_RECENT_FILL_CACHE_LIMIT]
+                if not self.wallet_fill_fetch_skipped(snapshot) and stamp >= int(to_float(old.get("fillFetchedAtMs"))):
+                    entry["fillFetchedAtMs"] = stamp
+                    count = quality.get("windowFillCount")
+                    if isinstance(count, int) and not isinstance(count, bool):
+                        entry["windowFillCount"] = count
+                cached[address] = entry
+            atomic_write_text(self.wallet_quality_cache_path, json.dumps({
+                "version": 1, "updatedAt": now_iso(),
+                "wallets": {a: v for a, v in cached.items() if a in tracked_addresses},
+            }, indent=2) + "\n")
 
     def wallet_quality_attempt_age_ms(self, entry: Any) -> int:
         """Last time a full refresh was *attempted*, successful or not."""
@@ -5131,7 +5227,10 @@ class WalletTrackerService:
             if isinstance(raw_quality_cache, dict) and isinstance(raw_quality_cache.get("wallets"), dict)
             else {}
         )
-        refresh_addresses = self.wallet_quality_refresh_addresses(wallets, cached_wallets)
+        refresh_addresses = (
+            set() if WALLET_QUALITY_BACKGROUND_REFRESH
+            else self.wallet_quality_refresh_addresses(wallets, cached_wallets)
+        )
         skip_fill_addresses = self.wallet_idle_fill_skip_addresses(
             wallets, cached_wallets, now_ms=current_time_ms()
         )
@@ -5154,58 +5253,7 @@ class WalletTrackerService:
             if isinstance(review, dict):
                 snapshot["reviewWeightMultiplier"] = max(0.0, min(to_float(review.get("weight", 1.0)), 1.0))
                 snapshot["reviewReasons"] = list(review.get("reasons", []))
-        cache_changed = False
-        for snapshot in snapshots:
-            address = str(snapshot.get("address") or "").lower()
-            quality = snapshot.get("dataQuality", {}) if isinstance(snapshot.get("dataQuality"), dict) else {}
-            if address and quality.get("qualityRefreshSucceeded"):
-                cached_wallets[address] = self.cached_wallet_quality_snapshot(snapshot)
-                cache_changed = True
-            elif address and quality.get("qualityRefreshAttempted"):
-                # A failed full refresh still counts as an attempt. Without this
-                # the wallet stays absent from the cache, sorts to the front of
-                # the rotation forever, permanently re-runs the expensive 30d
-                # fills fetch that is failing, and starves every other wallet of
-                # its refresh slot.
-                entry = cached_wallets.get(address)
-                if not isinstance(entry, dict):
-                    entry = {}
-                    cached_wallets[address] = entry
-                entry["refreshAttemptedAtMs"] = current_time_ms()
-                if snapshot.get("recentFills"):
-                    entry["recentFills"] = snapshot.get("recentFills", [])
-                cache_changed = True
-            elif address in cached_wallets and snapshot.get("recentFills"):
-                cached_wallets[address]["recentFills"] = snapshot.get("recentFills", [])
-                cache_changed = True
-            # Stamp only cycles that actually issued the request. Stamping a
-            # skipped cycle would keep pushing the next slow-poll slot forward
-            # and the wallet would never be fetched again.
-            if address and not self.wallet_fill_fetch_skipped(snapshot):
-                entry = cached_wallets.get(address)
-                if isinstance(entry, dict):
-                    entry["fillFetchedAtMs"] = current_time_ms()
-                    # Carried on the cache entry rather than left in the
-                    # snapshot because next cycle's skip decision is made
-                    # before any request goes out.
-                    window_fill_count = quality.get("windowFillCount")
-                    if isinstance(window_fill_count, int) and not isinstance(window_fill_count, bool):
-                        entry["windowFillCount"] = window_fill_count
-                    cache_changed = True
-        if cache_changed:
-            tracked_addresses = {wallet.address.lower() for wallet in wallets}
-            save_json_file(
-                self.wallet_quality_cache_path,
-                {
-                    "version": 1,
-                    "updatedAt": now_iso(),
-                    "wallets": {
-                        address: item
-                        for address, item in cached_wallets.items()
-                        if address in tracked_addresses and isinstance(item, dict)
-                    },
-                },
-            )
+        self.persist_wallet_snapshots(snapshots, {wallet.address.lower() for wallet in wallets})
         fill_ok_count = sum(1 for item in snapshots if item.get("dataQuality", {}).get("fillsOk"))
         fill_fetch_failed_count = sum(1 for item in snapshots if self.wallet_fill_fetch_failed(item))
         fill_fetch_skipped_count = sum(1 for item in snapshots if self.wallet_fill_fetch_skipped(item))
