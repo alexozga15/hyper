@@ -214,6 +214,10 @@ of the script, and the old non-zero exit made systemd mark the unit failed on ev
 unhealthy run — which is why real crashes were indistinguishable from a monitor doing
 its job.
 
+The sentiment worker waits up to 60 seconds for the shared alert-state lock.
+This lets a brief Telegram poll finish before the live refresh proceeds; command
+polling remains nonblocking while a refresh owns the lock.
+
 Alongside stale checks, cache coverage, degraded fills, disk space, and a persistent
 HTTP 429, it watches for a signal pipeline that has gone quiet:
 

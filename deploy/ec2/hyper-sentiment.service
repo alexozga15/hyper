@@ -13,7 +13,9 @@ Environment=DATA_DIR=/home/ubuntu/hyper-state
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
 ExecStartPre=-/usr/bin/git -C /home/ubuntu/hyper-alerts pull --ff-only --quiet
-ExecStart=/usr/bin/flock -n -E 0 /home/ubuntu/hyper-state/sentiment-alert.lock /usr/bin/python3 scripts/run_alert_check.py
+# Brief Telegram polling must not discard a whole ten-minute live cycle.
+# Keep the shared state lock and wait within the existing four-minute timeout.
+ExecStart=/usr/bin/flock -w 60 -E 0 /home/ubuntu/hyper-state/sentiment-alert.lock /usr/bin/python3 scripts/run_alert_check.py
 TimeoutStartSec=4min
 StandardOutput=null
 StandardError=journal
