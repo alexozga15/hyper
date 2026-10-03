@@ -27,6 +27,13 @@ class RecentFillTruncationMetadataTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.service = WalletTrackerService(WalletStore(self.tmp_path / "wallets.json"), HyperliquidClient())
+        self.service.wallet_quality_cache_path = self.tmp_path / "quality.json"
+        for method in ("fetch_user_funding_paginated_result", "fetch_twap_slice_fills_paginated_result"):
+            mocked = patch.object(self.service, method, return_value={
+                "ok": True, "data": [], "error": "", "truncated": False,
+            })
+            mocked.start()
+            self.addCleanup(mocked.stop)
 
     def _truncated_snapshot(self, *, fill_count: int, now_ms: int) -> dict:
         wallet = TrackedWallet(address="0x1111111111111111111111111111111111111111", alias="", notes="", created_at="")

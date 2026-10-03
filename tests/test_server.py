@@ -415,9 +415,9 @@ class SegmentTests(unittest.TestCase):
             largest_loser_pct=3, largest_loser_complete=True,
             cashflow_ambiguous_intervals=metrics["cashflowAmbiguousIntervals"],
         )
-        self.assertEqual(rank["label"], "Shadow")
+        self.assertEqual(rank["label"], "Unranked")
         self.assertEqual(rank["assessmentStatus"], "Preliminary")
-        self.assertIn("drawdown_upper_bound", rank["shadowReasons"])
+        self.assertNotIn("drawdown_upper_bound", rank["shadowReasons"])
         self.assertEqual(rank["cashflowAmbiguousIntervals"], 1)
 
     def test_ambiguous_deposit_and_small_loss_does_not_claim_exact_one_percent_drawdown(self) -> None:
@@ -498,8 +498,8 @@ class SegmentTests(unittest.TestCase):
             window_trusted=True, equity_curve_complete=False,
             largest_loser_pct=3, largest_loser_complete=True,
         )
-        self.assertEqual(rank["label"], "Shadow")
-        self.assertIn("drawdown_upper_bound", rank["shadowReasons"])
+        self.assertEqual(rank["label"], "Unranked")
+        self.assertNotIn("drawdown_upper_bound", rank["shadowReasons"])
 
     def test_unreconcilable_cashflow_interval_returns_unknown_not_zero_drawdown(self) -> None:
         day_ms = 86_400_000
@@ -519,7 +519,7 @@ class SegmentTests(unittest.TestCase):
             {"startMs": 2 * day_ms, "pnl": -20.0},
             {"startMs": 10 * day_ms, "pnl": -5.0},
         ]
-        metrics = episode_loss_metrics(episodes, [[day_ms, 100.0]])
+        metrics = episode_loss_metrics(episodes, [[2 * day_ms, 100.0]])
         self.assertEqual(metrics["largestLoserPct"], 20.0)
         self.assertEqual(metrics["largestLoserMissingCapitalEpisodes"], 1)
 
@@ -8440,7 +8440,7 @@ class TwapSliceFillTests(unittest.TestCase):
             "assetPositions": [],
         }
 
-    def test_twap_page_at_the_cap_still_truncates_the_quality_window_after_collapsing(self) -> None:
+    def test_twap_page_at_the_cap_still_truncates_the_quality_window_with_raw_slices(self) -> None:
         # This is the regression that matters most: a TWAP page hitting its own
         # WALLET_WINDOW_FILL_CAP truncates the 30-day quality window exactly as
         # a capped userFillsByTime page does, and collapsing thousands of
@@ -8476,9 +8476,9 @@ class TwapSliceFillTests(unittest.TestCase):
         ), patch.object(service, "fetch_wallet_role", return_value="user"):
             snapshot = service.fetch_wallet_snapshot(wallet)
 
-        # Collapsed down to one synthetic fill per twapId, far fewer than the
-        # capped page's raw row count.
-        self.assertEqual(snapshot["qualityWindowFillCount"], twap_id_count)
+        # Keep every slice in temporal order for position reconstruction.
+        # Execution rows are still not the unit used for win/loss counts.
+        self.assertEqual(snapshot["qualityWindowFillCount"], server.WALLET_WINDOW_FILL_CAP)
         self.assertTrue(snapshot["qualityWindowTruncated"])
         self.assertTrue(snapshot["dataQuality"]["twapFillsOk"])
         self.assertEqual(snapshot["dataQuality"]["twapSliceCount"], WALLET_WINDOW_FILL_CAP)

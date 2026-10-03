@@ -134,6 +134,14 @@ TWAP fills, and funding have completed. Subsequent refreshes fetch only new rows
 with an inclusive overlap. Checkpoints reside in `wallet_history.sqlite3`; progress
 and throttling are reported in `quality_refresh_health.json`. Both workers merge
 cache updates under a file lock, preserving newer quality and recent-fill data.
+The 180-day rank distinguishes a successful fetch from a verified assessment.
+The refresh health file exposes `fetchSucceeded`, `rankable`, assessment status,
+missing components, and fill retention limits. Observed perp equity/PnL points
+from compatible portfolio windows are preserved in `wallet_equity.sqlite3` under
+`DATA_DIR`; include this file in state backups. Missing days stay unknown.
+Unranked and Shadow wallets cannot enter the top cohort or pass trade admission.
+Current open losses reapply the risk gates between historical refreshes, and new
+fills invalidate the cached PF until the next complete refresh.
 The supplied `api-budget.env` and `hyper-api-budget.conf` provide those settings
 without modifying the secrets file. Install the environment file under
 `/home/ubuntu/.config/hyper/` and the drop-in under each Hyper service's

@@ -39,7 +39,14 @@ def main() -> int:
         # retains its previous quality score and rotates without starving others.
         service.persist_wallet_snapshots([snapshot], tracked)
         quality = snapshot.get("dataQuality") or {}
-        results.append({"address": wallet.address, "complete": bool(quality.get("qualityRefreshSucceeded")),
+        rank = snapshot.get("recentWinRateRank") or {}
+        results.append({"address": wallet.address,
+                        "fetchSucceeded": bool(quality.get("qualityRefreshSucceeded")),
+                        "complete": bool(rank.get("rankable") and rank.get("assessmentStatus") == "Verified"),
+                        "rankable": bool(rank.get("rankable")),
+                        "assessmentStatus": rank.get("assessmentStatus", "Preliminary"),
+                        "missingComponents": [name for name, available in rank.get("scoreComponentsAvailable", {}).items() if not available],
+                        "fillRetentionLimited": bool(quality.get("fillRetentionLimited")),
                         "fillsError": quality.get("fillsError"), "fundingError": quality.get("fundingError")})
         if service.client.rate_limiter.throttle_report().get("events"):
             break  # Resume later, after the shared provider cooldown.

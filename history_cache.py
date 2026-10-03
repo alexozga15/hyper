@@ -27,6 +27,7 @@ class ResumableHistoryCache:
         db.execute("PRAGMA busy_timeout=30000")
         db.execute("CREATE TABLE IF NOT EXISTS streams (address TEXT, kind TEXT, covered_from INTEGER, cursor INTEGER, complete_until INTEGER DEFAULT 0, pending INTEGER DEFAULT 1, PRIMARY KEY(address,kind))")
         db.execute("CREATE TABLE IF NOT EXISTS rows (address TEXT,kind TEXT,identity TEXT,at INTEGER,payload TEXT, PRIMARY KEY(address,kind,identity))")
+        db.execute("CREATE TABLE IF NOT EXISTS coverage_limits (address TEXT,kind TEXT,earliest INTEGER, PRIMARY KEY(address,kind))")
         return db
 
     def walk(self, address: str, kind: str, start: int, *,
@@ -42,11 +43,12 @@ class ResumableHistoryCache:
                 # Requesting an earlier interval requires a new backfill; a
                 # later complete window cannot prove coverage of earlier days.
                 db.execute("DELETE FROM rows WHERE address=? AND kind=?", (address, kind))
+                db.execute("DELETE FROM coverage_limits WHERE address=? AND kind=?", (address, kind))
                 cursor = start
                 db.execute("INSERT OR REPLACE INTO streams VALUES(?,?,?,?,0,1)", (address, kind, start, cursor))
             else:
-                cursor = previous[1] if previous[3] else max(start, previous[2] - 300_000)
-                db.execute("UPDATE streams SET cursor=?,pending=1 WHERE address=? AND kind=?", (cursor, address, kind))
+                cursor = max(start, previous[1]) if previous[3] else max(start, previous[2] - 300_000)
+                db.execute("UPDATE streams SET covered_from=?,cursor=?,pending=1 WHERE address=? AND kind=?", (start, cursor, address, kind))
             db.execute("DELETE FROM rows WHERE address=? AND kind=? AND at<?", (address, kind, start))
             db.commit()
         complete = False
@@ -78,6 +80,29 @@ class ResumableHistoryCache:
                 break
             cursor = newest  # Inclusive overlap preserves boundary records.
         with closing(self._connect()) as db:
-            data = [json.loads(row[0]) for row in db.execute("SELECT payload FROM rows WHERE address=? AND kind=? AND at>=? ORDER BY at,identity", (address, kind, start))]
+            # Re-identify legacy rows too: an upgraded identity must not double
+            # count the overlap between old checkpoints and fresh API pages.
+            unique = {}
+            for stored in db.execute("SELECT payload FROM rows WHERE address=? AND kind=? AND at>=? ORDER BY at,identity", (address, kind, start)):
+                row = json.loads(stored[0])
+                unique[json.dumps(identity(row), sort_keys=True)] = row
+            data = sorted(unique.values(), key=timestamp)
+            limit = db.execute("SELECT earliest FROM coverage_limits WHERE address=? AND kind=?", (address, kind)).fetchone()
+            # Ending the walk proves the right edge only. The provider retains
+            # at most 10,000 ordinary fills; a capped first backfill cannot
+            # prove that its left edge reaches the requested cutoff.
+            if kind == "fills" and limit is None and (complete or len(data) >= 10_000):
+                floor = min((timestamp(row) for row in data), default=start) if len(data) >= 10_000 else start
+                db.execute("INSERT OR REPLACE INTO coverage_limits VALUES(?,?,?)", (address, kind, floor))
+            elif kind == "fills" and previous and previous[2]:
+                # A long outage can also evict an unseen tail from the API.
+                # A previously verified left edge does not bridge that gap.
+                tail_from = max(start, previous[2] - 300_000)
+                tail_times = [timestamp(row) for row in data if timestamp(row) >= tail_from]
+                if len(tail_times) >= 10_000 and min(tail_times) > tail_from:
+                    floor = max(min(tail_times), limit[0] if limit else start)
+                    db.execute("INSERT OR REPLACE INTO coverage_limits VALUES(?,?,?)", (address, kind, floor))
+            limit = db.execute("SELECT earliest FROM coverage_limits WHERE address=? AND kind=?", (address, kind)).fetchone()
         return {"ok": not bool(error), "data": data, "error": error,
-                "truncated": not complete, "pages": pages, "resumable": True}
+                "truncated": not complete, "pages": pages, "resumable": True,
+                "retentionLimited": bool(limit and start < limit[0])}

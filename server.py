@@ -11,6 +11,7 @@ import os
 import random
 import re
 import socket
+import sqlite3
 import ssl
 import struct
 import tempfile
@@ -32,6 +33,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 # Re-exported: callers and tests import RequestRateLimiter from server.
 from ratelimit import HyperliquidRateLimiter, RequestRateLimiter
 from history_cache import ResumableHistoryCache
+from equity_history import EquityHistoryCache, observed_perp_history
 
 try:
     import fcntl
@@ -56,7 +58,7 @@ SOURCE_CODE_HASH = hashlib.sha256(
             "server.py", "execution_journal.py", "paper_execution.py",
             "paper_portfolio.py", "paper_analysis.py",
             "hyper-paper-v4/RULES.md",
-            "coinmarketman.py", "moni.py", "ratelimit.py", "history_cache.py"
+            "coinmarketman.py", "moni.py", "ratelimit.py", "history_cache.py", "equity_history.py"
         )
     )
 ).hexdigest()
@@ -1181,6 +1183,10 @@ def wallet_quality_dimensions(wallet: Any, copyability: Any = None) -> dict[str,
         and to_float(wallet.get("qualityTopWinConcentrationPct", 100.0))
         < MONTHLY_QUALITY_MAX_WIN_CONCENTRATION_PCT
     )
+    historical_rank = wallet.get("recentWinRateRank") or {}
+    is_180d_rank = isinstance(historical_rank, dict) and str(historical_rank.get("metric", "")).startswith("calmar_sortino_adjusted_pf_trend_")
+    if is_180d_rank:
+        evidence_pass = evidence_pass and wallet_rank_allows_promotion(wallet)
     sample_score = clamp(to_float(wallet.get("closedTrades90d")) / 50.0 * 100.0)
     coverage_score = (
         clamp(to_float(wallet.get("qualityWindowCoverageMs")) / (30 * 86_400_000) * 100.0)
@@ -1210,12 +1216,13 @@ def wallet_quality_dimensions(wallet: Any, copyability: Any = None) -> dict[str,
     total_notional = abs(to_float(wallet.get("totalNotional")))
     open_loss = wallet_open_loss(wallet)
     risk_known = account_value > 0
-    risk_pass = risk_known and not wallet_is_toxic(wallet)
+    rank_shadow = is_180d_rank and historical_rank.get("label") == "Shadow"
+    risk_pass = risk_known and not wallet_is_toxic(wallet) and not rank_shadow
     exposure_ratio = total_notional / account_value if risk_known else 0.0
     open_loss_pct = open_loss / account_value * 100.0 if risk_known else 0.0
     exposure_score = clamp(100.0 - max(0.0, exposure_ratio - 1.0) * 15.0)
     open_loss_score = clamp(100.0 - open_loss_pct)
-    risk_score = 0.0 if risk_known and wallet_is_toxic(wallet) else (
+    risk_score = 0.0 if rank_shadow or (risk_known and wallet_is_toxic(wallet)) else (
         0.4 * exposure_score + 0.6 * open_loss_score if risk_known else 50.0
     )
     risk = {
@@ -1225,6 +1232,7 @@ def wallet_quality_dimensions(wallet: Any, copyability: Any = None) -> dict[str,
         "notionalToEquity": round(exposure_ratio, 3) if risk_known else None,
         "openLossToEquityPct": round(open_loss_pct, 2) if risk_known else None,
         "toxic": wallet_is_toxic(wallet) if risk_known else None,
+        "shadowReasons": historical_rank.get("shadowReasons", []) if is_180d_rank else [],
     }
 
     copy = copyability_assessment(copyability)
@@ -1297,7 +1305,7 @@ def wallet_quality_snapshot(
         "address": str(wallet.get("address") or "").lower(),
         "realizedPnl30d": round(to_float(wallet.get("realizedPnl30d")), 2),
         "unrealizedPnl": round(to_float(wallet.get("unrealizedPnl")), 2),
-        "winRateScore": round(to_float(rank.get("score")), 3),
+        "winRateScore": round(to_float(rank.get("score")), 3) if rank.get("score") is not None else None,
         "convictionWeight": round(to_float(weight), 3),
         "qualityTrusted": bool(wallet_quality_window_trusted(wallet)),
         "qualityDimensions": dimension_status,
@@ -1568,11 +1576,11 @@ def raw_fill_identity(fill: Any) -> tuple[Any, ...]:
         return ("raw", repr(fill))
     trade_id = fill.get("tid")
     if trade_id not in (None, ""):
-        return ("tid", str(trade_id))
+        return ("tid", str(fill.get("coin") or "Unknown"), str(trade_id))
     return (
         "attrs",
         int(to_float(fill.get("time"))),
-        normalize_position_coin(fill.get("coin")),
+        str(fill.get("coin") or "Unknown"),
         to_float(fill.get("px")),
         to_float(fill.get("sz")),
         str(fill.get("dir") or ""),
@@ -1646,6 +1654,7 @@ def reconstruct_position_episodes(
     fills: list[dict[str, Any]],
     cutoff_ms: float,
     funding_events: list[dict[str, Any]] | None = None,
+    *, include_open: bool = False, diagnostics: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     """Rebuild per-coin position episodes from time-sorted fills at/after cutoff_ms.
 
@@ -1674,9 +1683,8 @@ def reconstruct_position_episodes(
 
     A disagreement away from zero means fills were dropped mid-position, which
     leaves the episode boundary intact and only understates its pnl by whatever
-    the missing fills realized. Those episodes are still returned; splitting on
-    them would rebuild the very fragmentation this unit exists to avoid, since
-    8.8% of episodes contain at least one such gap.
+    the missing fills realized. Those episodes remain diagnostic observations with historyComplete=False;
+    their incomplete PnL cannot prove a complete PF history.
 
     Episodes still open when the scan ends are not returned. An unfinished
     position is not a closed trade; the previous rule flushed 579 of them into
@@ -1695,25 +1703,42 @@ def reconstruct_position_episodes(
     """
     open_episodes: dict[str, dict[str, Any]] = {}
     finished_episodes: list[dict[str, Any]] = []
+    def note(key: str) -> None:
+        if diagnostics is not None:
+            diagnostics[key] = diagnostics.get(key, 0) + 1
     for fill in fills:
         fill_time = int(to_float(fill.get("time")))
         if fill_time < cutoff_ms:
             continue
         if str(fill.get("dir") or "") in SPOT_FILL_DIRECTIONS:
             continue
-        coin = normalize_position_coin(fill.get("coin"))
+        # Position state is venue-specific. Display aliases must never merge
+        # e.g. xyz:BTC with native BTC into a single trade.
+        coin = str(fill.get("coin") or "Unknown")
         try:
             start_position = decimal.Decimal(str(fill.get("startPosition")))
         except (decimal.InvalidOperation, TypeError, ValueError):
+            note("invalidFills")
             continue
         try:
             size = decimal.Decimal(str(fill.get("sz")))
         except (decimal.InvalidOperation, TypeError, ValueError):
+            note("invalidFills")
+            continue
+        if not start_position.is_finite() or not size.is_finite() or size <= 0 or fill.get("side") not in ("B", "A"):
+            note("invalidFills")
+            continue
+        if any(not math.isfinite(to_float(fill.get(key))) for key in ("closedPnl", "fee", "px")):
+            note("invalidFills")
             continue
         signed = size if fill.get("side") == "B" else -size
         end_position = start_position + signed
 
         episode = open_episodes.get(coin)
+        discontinuity = episode is not None and start_position != episode["expected"]
+        if discontinuity:
+            episode["historyComplete"] = False
+            note("positionGaps")
         if episode is not None and start_position == 0 and episode["expected"] != 0:
             # The exchange says this coin was flat before this fill, but the
             # episode we are holding was not. The closing fill that took it to
@@ -1737,6 +1762,7 @@ def reconstruct_position_episodes(
         if episode is None:
             episode = open_episodes[coin] = {
                 "coin": coin,
+                "historyComplete": not discontinuity,
                 "pnl": 0.0,
                 "fee": 0.0,
                 "startMs": fill_time,
@@ -1777,12 +1803,11 @@ def reconstruct_position_episodes(
         del finished["expected"]
         finished_episodes.append(finished)
         if flipped:
-            # The flip fill's own fee and pnl were just charged in full to the
-            # episode this closed, above, so the fresh episode it opens here
-            # starts empty rather than splitting that one fill's fee across
-            # both halves - a small approximation.
+            # Allocate opening fee/notional to the new side below. The realized
+            # closedPnl remains entirely with the position being closed.
             open_episodes[coin] = {
                 "coin": coin,
+                "historyComplete": True,
                 "pnl": 0.0,
                 "fee": 0.0,
                 "startMs": fill_time,
@@ -1792,6 +1817,24 @@ def reconstruct_position_episodes(
                 "grossNotional": 0.0,
                 "expected": end_position,
             }
+            # Allocate the flip fee by the closing and opening quantities.
+            opening_fraction = float(abs(end_position) / size)
+            opening_fee = to_float(fill.get("fee")) * opening_fraction
+            opening_notional = abs(to_float(fill.get("px")) * float(abs(end_position)))
+            finished["pnl"] += opening_fee
+            finished["notional"] -= opening_notional / 2.0
+            open_episodes[coin]["fee"] = opening_fee
+            open_episodes[coin]["grossNotional"] = opening_notional
+    if include_open:
+        for episode in open_episodes.values():
+            episode = dict(episode)
+            episode["pnl"] -= episode.pop("fee")
+            episode["notional"] = episode.pop("grossNotional")
+            episode.pop("expected")
+            episode["open"] = True
+            # Funding continues beyond the most recent fill.
+            episode["endMs"] = current_time_ms() + 1
+            finished_episodes.append(episode)
     if funding_events is None:
         return finished_episodes
     return apply_funding_to_position_episodes(finished_episodes, funding_events)
@@ -1814,7 +1857,7 @@ def apply_funding_to_position_episodes(
         delta = row.get("delta")
         if not isinstance(delta, dict) or str(delta.get("type") or "") != "funding":
             continue
-        coin = normalize_position_coin(delta.get("coin"))
+        coin = str(delta.get("coin") or "Unknown")
         event_time = int(to_float(row.get("time")))
         if not coin or event_time <= 0:
             continue
@@ -1830,7 +1873,7 @@ def apply_funding_to_position_episodes(
         rows = [
             amount
             for event_time, amount in normalized_events.get(
-                normalize_position_coin(episode.get("coin")), []
+                str(episode.get("coin") or "Unknown"), []
             )
             # A close and the next open can share a millisecond (a flip).
             # Half-open intervals assign such a cashflow at most once.
@@ -1842,7 +1885,7 @@ def apply_funding_to_position_episodes(
         episode["fundingAllocationAmbiguous"] = any(
             event_time == end_ms
             for event_time, _amount in normalized_events.get(
-                normalize_position_coin(episode.get("coin")), []
+                str(episode.get("coin") or "Unknown"), []
             )
         )
         funding_usd = sum(rows)
@@ -1879,7 +1922,7 @@ def normalize_fill_entry(fill: Any) -> dict[str, Any]:
         "price": to_float(fill.get("px")),
         "size": to_float(fill.get("sz")),
         "closedPnl": to_float(fill.get("closedPnl")),
-        "fee": abs(to_float(fill.get("fee"))),
+        "fee": to_float(fill.get("fee")),
         "time": fill.get("time"),
     }
 
@@ -2424,7 +2467,7 @@ def build_risk_trend_quality_rank(
         "Medium" if curve_usable and sample_gate_passed else "Low"
     )
     full_positive_trend = all(trend_checks.values())
-    all_time_control = to_float(pnl_all_time) > pnl_180d_value
+    all_time_control = to_float(pnl_all_time) >= pnl_180d_value
     risk_trusted = bool(window_trusted if risk_window_trusted is None else risk_window_trusted)
     largest_loser_known = largest_loser_pct is not None
     largest_loser = max(0.0, to_float(largest_loser_pct)) if largest_loser_known else None
@@ -2444,17 +2487,14 @@ def build_risk_trend_quality_rank(
         and largest_loser_known and largest_loser_complete and adjusted_pf is not None
     )
     shadow_reasons: list[str] = []
-    if drawdown is not None and drawdown >= SHADOW_MIN_180D_DRAWDOWN_PCT:
+    if drawdown is not None and drawdown > SHADOW_MIN_180D_DRAWDOWN_PCT:
         shadow_reasons.append("drawdown")
-    elif observed_drawdown is not None and observed_drawdown >= SHADOW_MIN_180D_DRAWDOWN_PCT:
+    elif observed_drawdown is not None and observed_drawdown > SHADOW_MIN_180D_DRAWDOWN_PCT:
         # An incomplete tail can widen uncertainty, but it cannot erase a
         # drawdown already present in the observed prefix.
         shadow_reasons.append("observed_drawdown")
-    elif (
-        drawdown_upper_bound is not None
-        and drawdown_upper_bound >= SHADOW_MIN_180D_DRAWDOWN_PCT
-    ):
-        shadow_reasons.append("drawdown_upper_bound")
+    # A worst-case bound describes uncertainty, not a measured drawdown.
+    # Incomplete curves already block Elite and positive promotion.
     if largest_loser is not None and largest_loser >= SHADOW_MIN_LARGEST_LOSER_PCT:
         shadow_reasons.append("largest_loser")
     if current_open_loss >= SHADOW_MIN_LARGEST_LOSER_PCT:
@@ -2468,7 +2508,7 @@ def build_risk_trend_quality_rank(
         data_complete
         and sample_gate_passed
         and drawdown is not None
-        and drawdown < ELITE_MAX_180D_DRAWDOWN_PCT
+        and drawdown <= ELITE_MAX_180D_DRAWDOWN_PCT
         and largest_loser is not None
         and largest_loser < ELITE_MAX_LARGEST_LOSER_PCT
         and current_open_loss < ELITE_MAX_LARGEST_LOSER_PCT
@@ -2481,6 +2521,7 @@ def build_risk_trend_quality_rank(
         and calmar is not None
         and calmar > 0
         and full_positive_trend
+        and all_time_control
         and not shadow_reasons
     )
     if shadow_reasons:
@@ -2612,6 +2653,56 @@ def finalize_risk_trend_quality_rank(rank: dict[str, Any]) -> dict[str, Any]:
         "scoreComponentsAvailable": availability,
         "rankable": rankable,
     }
+
+
+def refresh_current_rank_risk(rank: dict[str, Any], *, open_loss: float,
+                              account_value: float, state_ok: bool,
+                              latest_fill_ms: int = 0) -> dict[str, Any]:
+    """Reapply live risk to cached historical metrics, without renewing their TTL."""
+    if not str(rank.get("metric", "")).startswith("calmar_sortino_adjusted_pf_trend_"):
+        return rank
+    open_pct = open_loss / account_value * 100.0 if account_value > 0 else (100.0 if open_loss > 0 else 0.0)
+    pf_known = rank.get("pfHistoryComplete", False) and all(
+        rank.get(k) is not None for k in ("closedGrossProfit180d", "closedGrossLoss180d")
+    )
+    history_current = latest_fill_ms <= int(to_float(rank.get("historyThroughMs"))) if latest_fill_ms else True
+    loss = to_float(rank.get("closedGrossLoss180d")) + open_loss + to_float(rank.get("openCostsLoss180d"))
+    profit = to_float(rank.get("closedGrossProfit180d"))
+    pf = (profit / loss if loss > 0 else float("inf") if profit > 0 else 0.0) if pf_known and state_ok and history_current else None
+    capital_verified = rank.get("lossCapitalMethod") == "fresh_bracket_v1"
+    updated = build_risk_trend_quality_rank(
+        pnl_7d=rank.get("pnl"), pnl_30d=rank.get("pnl30d"),
+        pnl_180d=rank.get("pnl180d"), pnl_all_time=rank.get("pnlAllTime"),
+        sortino_180d=rank.get("sortino180d"), calmar_180d=rank.get("calmar180d"),
+        adjusted_profit_factor_180d=pf,
+        episode_count_180d=rank.get("episodes180d", 0), loss_count_180d=rank.get("losses180d", 0),
+        daily_return_count_180d=rank.get("dailyReturns180d", 0), downside_day_count_180d=rank.get("downsideDays180d", 0),
+        max_drawdown_pct=rank.get("maxDrawdownPct"), window_trusted=rank.get("windowTrusted", False),
+        equity_curve_complete=rank.get("equityCurveComplete", False),
+        equity_curve_verified=rank.get("equityCurveVerified", False) and state_ok,
+        observed_drawdown_pct=rank.get("observedDrawdownPct"), drawdown_upper_bound_pct=rank.get("drawdownUpperBoundPct"),
+        largest_loser_pct=rank.get("largestLoserPct") if capital_verified else None,
+        largest_loser_complete=rank.get("largestLoserComplete", False) and capital_verified,
+        current_open_loss_pct=open_pct if state_ok else to_float(rank.get("currentOpenLossPct")),
+        max_observed_position_drawdown_pct=rank.get("maxObservedPositionDrawdownPct"),
+        risk_window_trusted=rank.get("riskWindowTrusted", False),
+        drawdown_invalid_days=rank.get("drawdownInvalidDays", 0),
+        cashflow_ambiguous_intervals=rank.get("cashflowAmbiguousIntervals", 0),
+    )
+    return finalize_risk_trend_quality_rank({**rank, **updated,
+        "pfHistoryComplete": pf_known and state_ok and history_current,
+        "historyCurrent": history_current, "currentRiskKnown": state_ok})
+
+
+def wallet_rank_allows_promotion(wallet: dict[str, Any]) -> bool:
+    rank = wallet.get("recentWinRateRank") or {}
+    if not isinstance(rank, dict):
+        return False
+    if str(rank.get("label", "")).lower() in ("shadow", "unranked"):
+        return False
+    if str(rank.get("metric", "")).startswith("calmar_sortino_adjusted_pf_trend_"):
+        return bool(rank.get("rankable") and rank.get("assessmentStatus") == "Verified")
+    return True  # Compatibility for older snapshots without 180-day metrics.
 
 
 def build_wallet_quality_rank(
@@ -2951,8 +3042,8 @@ def daily_equity_metrics_180d(
     A flow and trading PnL between the same two snapshots have no identifiable
     order. Such an interval is excluded from the exact curve and makes the
     assessment preliminary. A second curve applies the worse of the two
-    possible endpoint orderings so confirmed cash-flow-order risk can still
-    trigger a gate. A separate snapshot after the flow removes the ambiguity.
+    possible endpoint orderings as an uncertainty diagnostic. Only an
+    observed drawdown can establish a risk veto. A separate snapshot after the flow removes the ambiguity.
 
     Sparse days are not interpolated. Inventing intermediate daily returns
     would make Sortino look more stable than the observations support.
@@ -3183,9 +3274,15 @@ def equity_curve_verification(
 
 
 def episode_loss_metrics(
-    episodes: list[dict[str, Any]], account_points: list[Any]
+    episodes: list[dict[str, Any]], account_points: list[Any],
+    pnl_points: list[Any] | None = None,
 ) -> dict[str, Any]:
-    """Largest closed loser as % of capital immediately before its episode."""
+    """Use only fresh, cash-flow-checked capital near an observed opening.
+
+    Sparse pre-deposit balances are not valid denominators for a risk veto.
+    Without an exact opening observation or a bracketing no-flow interval,
+    report the loss as unmeasurable rather than manufacture a percentage.
+    """
     valid_accounts = sorted(
         (int(to_float(point[0])), to_float(point[1]))
         for point in account_points or []
@@ -3194,16 +3291,29 @@ def episode_loss_metrics(
     losses = [episode for episode in episodes if to_float(episode.get("pnl")) < 0]
     loss_pcts: list[float] = []
     missing_capital = 0
-    max_age_ms = 2 * 24 * 60 * 60 * 1000
+    pnl_by_time = {int(to_float(p[0])): to_float(p[1]) for p in pnl_points or []
+                   if isinstance(p, (list, tuple)) and len(p) > 1}
+    max_age_ms = 5 * 60 * 1000
     for episode in losses:
         start_ms = int(to_float(episode.get("startMs")))
         prior = next(
             ((timestamp, value) for timestamp, value in reversed(valid_accounts) if timestamp <= start_ms),
             None,
         )
-        if prior is None or start_ms - prior[0] > max_age_ms:
+        if (episode.get("anchored") is False or episode.get("historyComplete") is False
+                or prior is None or start_ms - prior[0] > max_age_ms):
             missing_capital += 1
             continue
+        if prior[0] != start_ms:
+            after = next(((t, v) for t, v in valid_accounts if t >= start_ms), None)
+            if (after is None or after[0] - start_ms > max_age_ms
+                    or prior[0] not in pnl_by_time or after[0] not in pnl_by_time):
+                missing_capital += 1
+                continue
+            flow = after[1] - prior[1] - (pnl_by_time[after[0]] - pnl_by_time[prior[0]])
+            if abs(flow) > max(1e-5, max(after[1], prior[1]) * 1e-8):
+                missing_capital += 1
+                continue
         loss_pcts.append(abs(to_float(episode.get("pnl"))) / prior[1] * 100.0)
     return {
         "largestLoserPct": max(loss_pcts) if loss_pcts else (0.0 if not losses else None),
@@ -3925,7 +4035,7 @@ class WalletTrackerService:
                 "type": "userFillsByTime",
                 "user": address,
                 "startTime": start_time,
-                "aggregateByTime": True,
+                "aggregateByTime": False,
             },
             [],
         )
@@ -3963,12 +4073,10 @@ class WalletTrackerService:
 
         ``userTwapSliceFillsByTime`` caps the same way ``userFillsByTime`` does
         and ascends from ``startTime``, so a capped page is the *oldest* slices
-        and the wallet's newest TWAP orders are simply absent. Slices matter
-        here only through collapse_twap_slice_fills, which folds them to one
-        synthetic fill per order, so the cost of the cap is measured in orders
-        rather than rows: of 31 tracked wallets only two hit it, and for those
-        two the 4000 rows of first pages held 13 orders where the full 16734
-        hold 31 - one of them seeing 6 of its 21.
+        and the wallet's newest TWAP orders are simply absent. Preserve every
+        slice for chronological position reconstruction, including regular
+        executions interleaved with one TWAP order. Flat-to-flat episodes,
+        rather than individual execution rows, determine win/loss counts.
 
         Identity pairs the outer twapId with the inner fill, because slices of
         one order share nothing else stable and the overlap created by
@@ -4049,6 +4157,18 @@ class WalletTrackerService:
         return result
 
     def fetch_fills_paginated_result(
+        self, address: str, start_time: int, *, max_pages: int | None = None,
+        page_size: int | None = None,
+    ) -> dict[str, Any]:
+        result = self._fetch_fills_paginated_result(address, start_time, max_pages=max_pages, page_size=page_size)
+        rows = result.get("data") or []
+        if not result.get("resumable"):
+            result["retentionLimited"] = bool(len(rows) >= 10_000 and min(
+                (int(to_float(row.get("time"))) for row in rows), default=start_time
+            ) > start_time)
+        return result
+
+    def _fetch_fills_paginated_result(
         self,
         address: str,
         start_time: int,
@@ -4298,16 +4418,19 @@ class WalletTrackerService:
         twap_fills_ok = bool(isinstance(twap_fills_result, dict) and twap_fills_result.get("ok"))
         # userFillsByTime never returns TWAP slice fills at all (see
         # fetch_twap_slice_fills_result); one wallet showed 10 regular fills
-        # against 2000+ TWAP slices. Each TWAP order is one trading decision,
-        # so slices are collapsed to a single synthetic fill per order before
-        # joining the raw fills - otherwise execution mechanics would swamp
-        # the win/loss counts and quality_events buckets below. A failed TWAP
+        # against 2000+ TWAP slices. Raw slices are needed to reconstruct
+        # position continuity; win/loss counts use flat-to-flat episodes,
+        # independently of how many execution rows belong to each position. A failed TWAP
         # fetch must never fail the whole snapshot, so it just contributes
         # nothing here; twap_fills_ok still records whether it succeeded.
-        fills = sorted(
-            base_fills + collapse_twap_slice_fills(twap_slices),
-            key=lambda f: int(to_float(f.get("time"))),
-        )
+        # Keep slice chronology: a regular fill can occur between two slices
+        # of one TWAP. Collapsing first corrupts startPosition continuity.
+        raw_slices = [row["fill"] for row in twap_slices
+                      if isinstance(row, dict) and isinstance(row.get("fill"), dict)]
+        unique_fills = {raw_fill_identity(f): f for f in base_fills + raw_slices if isinstance(f, dict)}
+        fills = sorted(unique_fills.values(), key=lambda f: (
+            int(to_float(f.get("time"))), int(to_float(f.get("tid"))),
+        ))
         recent_fills_ok = bool(isinstance(recent_fills_result, dict) and recent_fills_result.get("ok"))
         live_fills = recent_fills_result.get("data", []) if recent_fills_ok else []
         if not isinstance(live_fills, list):
@@ -4365,7 +4488,7 @@ class WalletTrackerService:
         asset_pnl: dict[str, float] = {}
         for fill in fills:
             closed_pnl = to_float(fill.get("closedPnl"))
-            fee = abs(to_float(fill.get("fee")))
+            fee = to_float(fill.get("fee"))
             fill_time = int(to_float(fill.get("time")))
             last_fill_time = max(last_fill_time, fill_time)
             if fill_time >= cutoff_30d_ms:
@@ -4505,9 +4628,12 @@ class WalletTrackerService:
         # Reconstruct once from the oldest fetched fill, then filter on the
         # close timestamp. Reconstructing afresh at 30d/90d lost opening fees
         # and pre-window funding for positions that closed inside the window.
-        closed_runs_180d = reconstruct_position_episodes(
-            fills, cutoff_180d_ms, funding_events
+        episode_diagnostics: dict[str, int] = {}
+        all_runs_180d = reconstruct_position_episodes(
+            fills, cutoff_180d_ms, funding_events, include_open=True, diagnostics=episode_diagnostics
         )
+        closed_runs_180d = [run for run in all_runs_180d if not run.get("open")]
+        open_costs_loss = sum(max(0.0, -to_float(run.get("pnl"))) for run in all_runs_180d if run.get("open"))
         closed_runs = [
             run for run in closed_runs_180d if int(to_float(run.get("endMs"))) >= cutoff_30d_ms
         ]
@@ -4550,8 +4676,11 @@ class WalletTrackerService:
             funding_complete
             and twap_fills_ok
             and not quality_window_truncated
-            and all(bool(run.get("anchored")) for run in closed_runs_180d)
-            and not any(run.get("fundingAllocationAmbiguous") for run in closed_runs_180d)
+            and fills_ok
+            and not fills_result.get("retentionLimited", False)
+            and not any(episode_diagnostics.values())
+            and all(bool(run.get("anchored")) and run.get("historyComplete", True) for run in all_runs_180d)
+            and not any(run.get("fundingAllocationAmbiguous") for run in all_runs_180d)
         )
         loss_count_180d = sum(1 for run in closed_runs_180d if to_float(run.get("pnl")) < 0)
         gross_profit_180d = sum(
@@ -4565,7 +4694,7 @@ class WalletTrackerService:
         asset_trade_stats: dict[str, dict[str, float]] = {}
         for run in closed_runs:
             bucket = asset_trade_stats.setdefault(
-                str(run["coin"]), {"closedTrades": 0.0, "wins": 0.0, "losses": 0.0, "pnl": 0.0}
+                normalize_position_coin(run["coin"]), {"closedTrades": 0.0, "wins": 0.0, "losses": 0.0, "pnl": 0.0}
             )
             bucket["closedTrades"] += 1
             if run["pnl"] > 0:
@@ -4586,9 +4715,19 @@ class WalletTrackerService:
         pnl_180d_official = interpolated_window_pnl(
             perp_all_time.get("pnlHistory", []), cutoff_180d_ms
         )
+        equity_history = observed_perp_history(portfolio)
+        if full_quality_refresh and portfolio_ok and equity_history.get("pnlHistory"):
+            try:
+                equity_history = EquityHistoryCache(
+                    self.wallet_quality_cache_path.with_name("wallet_equity.sqlite3")
+                ).merge(wallet.address.lower(), equity_history, cutoff_ms=cutoff_180d_ms)
+            except (OSError, sqlite3.Error) as exc:
+                # The current official observations remain usable if storage
+                # is temporarily unavailable; expose the persistence failure.
+                equity_history["storageError"] = str(exc)
         equity_metrics_180d = daily_equity_metrics_180d(
-            perp_all_time.get("pnlHistory", []),
-            perp_all_time.get("accountValueHistory", []),
+            equity_history.get("pnlHistory", []),
+            equity_history.get("accountValueHistory", []),
             cutoff_180d_ms,
             now_ms,
         )
@@ -4599,7 +4738,8 @@ class WalletTrackerService:
             episode_history_complete=pf_history_complete,
         )
         loss_metrics_180d = episode_loss_metrics(
-            closed_runs_180d, perp_all_time.get("accountValueHistory", [])
+            closed_runs_180d, equity_history.get("accountValueHistory", []),
+            equity_history.get("pnlHistory", []),
         )
         recent_closed_trade_count = win_count + loss_count
         hit_rate = (win_count / max(recent_closed_trade_count, 1)) * 100
@@ -4631,10 +4771,10 @@ class WalletTrackerService:
             for position in positions
             if to_float(position.get("unrealizedPnl")) < 0
         )
-        current_open_loss_pct = current_open_loss / account_value * 100.0 if account_value > 0 else 0.0
+        current_open_loss_pct = current_open_loss / account_value * 100.0 if account_value > 0 else (100.0 if current_open_loss > 0 else 0.0)
         adjusted_profit_factor_180d_raw = (
-            gross_profit_180d / (gross_loss_180d + current_open_loss)
-            if gross_loss_180d + current_open_loss > 0
+            gross_profit_180d / (gross_loss_180d + current_open_loss + open_costs_loss)
+            if gross_loss_180d + current_open_loss + open_costs_loss > 0
             else (float("inf") if gross_profit_180d > 0 else 0.0)
         )
         adjusted_profit_factor_180d = (
@@ -4703,17 +4843,20 @@ class WalletTrackerService:
             "equityCurveVerification": equity_verification,
             "fundingIncluded": funding_complete,
             "pfHistoryComplete": pf_history_complete,
+            "closedGrossProfit180d": gross_profit_180d,
+            "closedGrossLoss180d": gross_loss_180d,
+            "openCostsLoss180d": open_costs_loss,
+            "lossCapitalMethod": "fresh_bracket_v1",
+            "historyThroughMs": now_ms,
         }
         if wallet.address.lower() in ELITE_WALLET_OVERRIDES:
-            # Overrides may break ties inside the eligible cohort, never bypass
-            # sample, completeness, largest-loser, or drawdown gates.
+            # Keep the old configuration visible for audit, but addresses no
+            # longer override the computed label or score.
             recent_win_rate_rank = {
                 **recent_win_rate_rank,
                 "eliteOverrideConfigured": True,
-                "eliteOverrideApplied": bool(recent_win_rate_rank.get("eliteEligible")),
+                "eliteOverrideApplied": False,
             }
-            if recent_win_rate_rank.get("eliteEligible"):
-                recent_win_rate_rank["label"] = "Elite"
 
         asset_quality = {
             coin: {
@@ -4823,6 +4966,10 @@ class WalletTrackerService:
             "recentWinRateRank": recent_win_rate_rank,
             "assetQuality": asset_quality,
             "dataQuality": {
+                "episodeDiagnostics": episode_diagnostics,
+                "fillRetentionLimited": bool(fills_result.get("retentionLimited")),
+                "equityHistoryStorageError": equity_history.get("storageError", ""),
+                "equityHistoryRejectedWindows": equity_history.get("rejectedWindows", []),
                 "stateOk": state_fetch_ok,
                 # Every flag in this block describes a request issued during the
                 # current cycle. Anything reused from the quality cache lives
@@ -4951,7 +5098,7 @@ class WalletTrackerService:
         )
 
         quality_refresh_succeeded = (
-            full_quality_refresh and fills_ok and twap_fills_ok and portfolio_ok and funding_complete
+            full_quality_refresh and state_fetch_ok and fills_ok and twap_fills_ok and portfolio_ok and funding_complete
             and not fills_paged_truncated and not twap_paged_truncated
         )
         has_cached_quality = any(field in cached for field in WALLET_CACHED_QUALITY_FIELDS)
@@ -5023,6 +5170,14 @@ class WalletTrackerService:
                 },
             }
         )
+        if isinstance(snapshot.get("recentWinRateRank"), dict):
+            snapshot["recentWinRateRank"] = refresh_current_rank_risk(
+                snapshot["recentWinRateRank"], open_loss=current_open_loss,
+                account_value=account_value, state_ok=state_fetch_ok,
+                latest_fill_ms=recent_fill_latest_ms,
+            )
+            for field in ("currentOpenLossPct", "largestLoserPct", "adjustedProfitFactor180d"):
+                snapshot[field] = snapshot["recentWinRateRank"].get(field)
         if window_fill_count is not None:
             snapshot["dataQuality"]["windowFillCount"] = window_fill_count
         return snapshot
@@ -5551,7 +5706,7 @@ class WalletTrackerService:
         return self.get_alert_settings()
 
     def top_conviction_wallet_addresses(self, wallets: list[dict[str, Any]], *, limit: int = TOP_CONVICTION_WALLET_COUNT) -> set[str]:
-        ranked = self.rank_top_conviction_wallets(wallets)
+        ranked = self.rank_top_conviction_wallets([w for w in wallets if wallet_rank_allows_promotion(w)])
         return {
             str(wallet.get("address") or "").lower()
             for wallet in ranked[:limit]
@@ -5581,6 +5736,8 @@ class WalletTrackerService:
         return wallet_is_toxic(wallet)
 
     def is_monthly_quality_eligible(self, wallet: dict[str, Any]) -> bool:
+        if not wallet_rank_allows_promotion(wallet):
+            return False
         if "qualityClosedEvents30d" not in wallet:
             return not self.is_toxic_conviction_wallet(wallet)
         # Deliberately asymmetric with wallet_conviction_weight/
