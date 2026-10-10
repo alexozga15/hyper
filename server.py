@@ -34,6 +34,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from ratelimit import HyperliquidRateLimiter, RequestRateLimiter
 from history_cache import ResumableHistoryCache
 from equity_history import EquityHistoryCache, observed_perp_history
+from fill_order import order_position_fills
 
 try:
     import fcntl
@@ -58,7 +59,7 @@ SOURCE_CODE_HASH = hashlib.sha256(
             "server.py", "execution_journal.py", "paper_execution.py",
             "paper_portfolio.py", "paper_analysis.py",
             "hyper-paper-v4/RULES.md",
-            "coinmarketman.py", "moni.py", "ratelimit.py", "history_cache.py", "equity_history.py"
+            "coinmarketman.py", "moni.py", "ratelimit.py", "history_cache.py", "equity_history.py", "fill_order.py"
         )
     )
 ).hexdigest()
@@ -1706,6 +1707,10 @@ def reconstruct_position_episodes(
     def note(key: str) -> None:
         if diagnostics is not None:
             diagnostics[key] = diagnostics.get(key, 0) + 1
+    fills, ordering_diagnostics = order_position_fills(fills)
+    if diagnostics is not None:
+        for key, count in ordering_diagnostics.items():
+            diagnostics[key] = diagnostics.get(key, 0) + count
     for fill in fills:
         fill_time = int(to_float(fill.get("time")))
         if fill_time < cutoff_ms:
@@ -1762,7 +1767,7 @@ def reconstruct_position_episodes(
         if episode is None:
             episode = open_episodes[coin] = {
                 "coin": coin,
-                "historyComplete": not discontinuity,
+                "historyComplete": not discontinuity and not fill.get("_positionOrderUnverified", False),
                 "pnl": 0.0,
                 "fee": 0.0,
                 "startMs": fill_time,
@@ -1775,6 +1780,8 @@ def reconstruct_position_episodes(
                 # means the feed skipped something in between.
                 "expected": start_position,
             }
+        if fill.get("_positionOrderUnverified"):
+            episode["historyComplete"] = False
         episode["pnl"] += to_float(fill.get("closedPnl"))
         episode["fee"] += to_float(fill.get("fee"))
         episode["grossNotional"] += abs(to_float(fill.get("px")) * to_float(fill.get("sz")))
@@ -1807,7 +1814,7 @@ def reconstruct_position_episodes(
             # closedPnl remains entirely with the position being closed.
             open_episodes[coin] = {
                 "coin": coin,
-                "historyComplete": True,
+                "historyComplete": not fill.get("_positionOrderUnverified", False),
                 "pnl": 0.0,
                 "fee": 0.0,
                 "startMs": fill_time,
@@ -1851,6 +1858,7 @@ def apply_funding_to_position_episodes(
     forced into PF: it belongs to an open or unobservable position.
     """
     normalized_events: dict[str, list[tuple[int, float]]] = {}
+    aggregate_intervals: dict[str, list[tuple[int, int, float]]] = {}
     for row in funding_events:
         if not isinstance(row, dict):
             continue
@@ -1861,7 +1869,13 @@ def apply_funding_to_position_episodes(
         event_time = int(to_float(row.get("time")))
         if not coin or event_time <= 0:
             continue
-        normalized_events.setdefault(coin, []).append((event_time, to_float(delta.get("usdc"))))
+        amount = to_float(delta.get("usdc"))
+        if delta.get("nSamples") is not None:
+            # Observed official summaries label the START of their UTC day.
+            # Even nSamples=1 can be an execution later in that day.
+            aggregate_intervals.setdefault(coin, []).append((event_time, event_time + 86_400_000, amount))
+        else:
+            normalized_events.setdefault(coin, []).append((event_time, amount))
     for rows in normalized_events.values():
         rows.sort(key=lambda item: item[0])
 
@@ -1888,11 +1902,21 @@ def apply_funding_to_position_episodes(
                 str(episode.get("coin") or "Unknown"), []
             )
         )
-        funding_usd = sum(rows)
+        # A whole daily bucket inside one episode has an exact cashflow sum.
+        # A bucket crossing an episode boundary cannot be assigned by the
+        # summary timestamp: keep it unallocated and veto a verified PF.
+        aggregates = aggregate_intervals.get(str(episode.get("coin") or ""), [])
+        episode["fundingAllocationAmbiguous"] = episode["fundingAllocationAmbiguous"] or any(
+            first < end_ms and last > start_ms and not (start_ms <= first and last <= end_ms)
+            for first, last, _amount in aggregates
+        )
+        full_aggregates = [amount for first, last, amount in aggregates
+                           if start_ms <= first and last <= end_ms]
+        funding_usd = sum(rows) + sum(full_aggregates)
         pnl_before_funding = to_float(episode.get("pnl"))
         episode["pnlBeforeFunding"] = pnl_before_funding
         episode["fundingUsd"] = funding_usd
-        episode["fundingEventCount"] = len(rows)
+        episode["fundingEventCount"] = len(rows) + len(full_aggregates)
         episode["pnl"] = pnl_before_funding + funding_usd
         funded.append(episode)
     return funded
