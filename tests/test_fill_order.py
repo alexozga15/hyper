@@ -82,3 +82,15 @@ def test_one_sample_daily_summary_is_still_not_a_precise_hourly_event():
     result = server.apply_funding_to_position_episodes([episode], [summary])[0]
     assert result['fundingUsd'] == 0
     assert result['fundingAllocationAmbiguous'] is True
+
+
+def test_zero_trade_id_does_not_merge_distinct_executions():
+    a, b = fill(1, 0, 0, 1, 'B'), fill(2, 0, 1, 1, 'B')
+    assert server.raw_fill_identity(a) != server.raw_fill_identity(b)
+
+
+def test_missing_trade_id_preserves_distinct_position_transitions():
+    a, b = fill(1, 0, 0, 1, 'B'), fill(1, 0, 1, 1, 'B')
+    del a['tid']
+    del b['tid']
+    assert server.raw_fill_identity(a) != server.raw_fill_identity(b)

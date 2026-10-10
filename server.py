@@ -1576,7 +1576,7 @@ def raw_fill_identity(fill: Any) -> tuple[Any, ...]:
     if not isinstance(fill, dict):
         return ("raw", repr(fill))
     trade_id = fill.get("tid")
-    if trade_id not in (None, ""):
+    if trade_id not in (None, "", 0, "0"):
         return ("tid", str(fill.get("coin") or "Unknown"), str(trade_id))
     return (
         "attrs",
@@ -1586,6 +1586,8 @@ def raw_fill_identity(fill: Any) -> tuple[Any, ...]:
         to_float(fill.get("sz")),
         str(fill.get("dir") or ""),
         str(fill.get("oid") or ""),
+        str(fill.get("hash") or ""),
+        str(fill.get("startPosition") or ""),
     )
 
 

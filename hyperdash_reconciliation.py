@@ -27,8 +27,8 @@ def compare_fill_groups(primary, external):
         return False, {'missingGroup': True}
     if len({fill_group_key(row) for row in primary + external}) != 1:
         return False, {'differentGroup': True}
-    primary_ids = {str(row['tid']) for row in primary if row.get('tid') is not None}
-    external_ids = {str(row['tid']) for row in external if row.get('tid') is not None}
+    primary_ids = {str(row['tid']) for row in primary if row.get('tid') not in (None, '', 0, '0')}
+    external_ids = {str(row['tid']) for row in external if row.get('tid') not in (None, '', 0, '0')}
     if not primary_ids or not primary_ids.intersection(external_ids):
         return False, {'missingIdentityAnchor': True}
     differences = {}
