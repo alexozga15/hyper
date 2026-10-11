@@ -5275,6 +5275,15 @@ class WalletTrackerService:
                 if quality.get("qualityRefreshSucceeded") and stamp >= int(to_float(old.get("refreshedAtMs"))):
                     entry.update(self.cached_wallet_quality_snapshot(snapshot))
                     entry["refreshedAtMs"] = stamp
+                live_rank = snapshot.get("recentWinRateRank")
+                old_rank = old.get("recentWinRateRank") or {}
+                if (isinstance(live_rank, dict)
+                    and (live_rank.get("metric") == AVAILABLE_RANK_METRIC or old_rank.get("metric") == AVAILABLE_RANK_METRIC)
+                    and stamp >= max(int(to_float(old.get("refreshedAtMs"))), int(to_float(old.get("rankAppliedAtMs"))))):
+                    # Persist risk/overlay updates without renewing historical
+                    # quality freshness or replacing independently newer data.
+                    entry["recentWinRateRank"] = live_rank
+                    entry["rankAppliedAtMs"] = stamp
                 if quality.get("qualityRefreshAttempted"):
                     entry["refreshAttemptedAtMs"] = max(stamp, int(to_float(old.get("refreshAttemptedAtMs"))))
                 fills = [f for f in (old.get("recentFills") or []) + (snapshot.get("recentFills") or []) if isinstance(f, dict)]
@@ -6030,7 +6039,8 @@ class WalletTrackerService:
         if quality_age_ms is not None and quality_age_ms > WALLET_QUALITY_SOFT_TTL_MS:
             multiplier *= 0.75
         weight = base_weight * multiplier
-        return round(max(CONVICTION_WALLET_WEIGHT_MIN, min(weight, CONVICTION_WALLET_WEIGHT_MAX)), 3)
+        cap = 1.0 if isinstance(rank, dict) and rank.get("metric") == AVAILABLE_RANK_METRIC else CONVICTION_WALLET_WEIGHT_MAX
+        return round(max(CONVICTION_WALLET_WEIGHT_MIN, min(weight, cap)), 3)
 
     def wallet_quality_age_ms(self, wallet: dict[str, Any], *, now_ms: int | None = None) -> int | None:
         quality = wallet.get("dataQuality", {})

@@ -1,4 +1,5 @@
 from unittest.mock import patch
+import json
 
 import server
 from available_info_rank import MAX_HISTORY_AGE_MS, METRIC, active_seed, apply_live_rank
@@ -117,3 +118,26 @@ def test_missing_position_pnl_cannot_be_interpreted_as_no_open_loss(tmp_path):
             cached_snapshot={'recentWinRateRank': healthy_rank(calmar_180d=None)})
     assert not snapshot['recentWinRateRank']['currentRiskKnown']
     assert snapshot['recentWinRateRank']['score'] is None
+
+
+def test_other_signal_multipliers_cannot_boost_provisional_above_neutral():
+    service = server.WalletTrackerService(object(), server.HyperliquidClient())
+    wallet = {**healthy_wallet(), 'recentWinRateRank': live(),
+              'assetQuality': {'BTC': {'closedTrades': 1000, 'winRate': 100}}}
+    with patch('server.current_time_ms', return_value=NOW):
+        assert service.wallet_conviction_weight(wallet, {wallet['address']}, coin='BTC') <= 1
+
+
+def test_overlay_cache_update_does_not_renew_quality_evidence(tmp_path):
+    service = server.WalletTrackerService(object(), server.HyperliquidClient())
+    service.wallet_quality_cache_path = tmp_path / 'quality.json'
+    original = {'qualityRefreshedAt': '1970-01-01T00:00:01+00:00', 'refreshedAtMs': 1000,
+                'recentWinRateRank': healthy_rank(calmar_180d=None)}
+    service.wallet_quality_cache_path.write_text(json.dumps({'wallets': {ADDRESS: original}}))
+    snapshot = {'address': ADDRESS, 'fetchedAt': server.now_iso(), 'recentWinRateRank': live(),
+                'dataQuality': {'qualityRefreshSucceeded': False}}
+    service.persist_wallet_snapshots([snapshot], {ADDRESS})
+    stored = json.loads(service.wallet_quality_cache_path.read_text())['wallets'][ADDRESS]
+    assert stored['recentWinRateRank']['metric'] == METRIC
+    assert stored['refreshedAtMs'] == 1000
+    assert stored['qualityRefreshedAt'] == original['qualityRefreshedAt']
