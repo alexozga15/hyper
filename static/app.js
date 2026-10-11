@@ -47,7 +47,8 @@ function formatWalletRank(rank, showRange = false) {
       : "";
     return `${label} (n/a${range})`;
   }
-  return `${label} (${percentFormatter.format(rank.score)}/100)`;
+  const provisional = rank?.metric === "available_pf_trend_v1" ? " · Provisional / Low" : "";
+  return `${label} (${percentFormatter.format(rank.score)}/100)${provisional}`;
 }
 
 function formatDate(value) {

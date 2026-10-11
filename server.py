@@ -35,6 +35,9 @@ from ratelimit import HyperliquidRateLimiter, RequestRateLimiter
 from history_cache import ResumableHistoryCache
 from equity_history import EquityHistoryCache, observed_perp_history
 from fill_order import order_position_fills
+from available_info_rank import (
+    METRIC as AVAILABLE_RANK_METRIC, active_seed, apply_live_rank, underlying_rank,
+)
 
 try:
     import fcntl
@@ -59,7 +62,7 @@ SOURCE_CODE_HASH = hashlib.sha256(
             "server.py", "execution_journal.py", "paper_execution.py",
             "paper_portfolio.py", "paper_analysis.py",
             "hyper-paper-v4/RULES.md",
-            "coinmarketman.py", "moni.py", "ratelimit.py", "history_cache.py", "equity_history.py", "fill_order.py"
+            "coinmarketman.py", "moni.py", "ratelimit.py", "history_cache.py", "equity_history.py", "fill_order.py", "available_info_rank.py"
         )
     )
 ).hexdigest()
@@ -1186,7 +1189,8 @@ def wallet_quality_dimensions(wallet: Any, copyability: Any = None) -> dict[str,
     )
     historical_rank = wallet.get("recentWinRateRank") or {}
     is_180d_rank = isinstance(historical_rank, dict) and str(historical_rank.get("metric", "")).startswith("calmar_sortino_adjusted_pf_trend_")
-    if is_180d_rank:
+    is_available_rank = isinstance(historical_rank, dict) and historical_rank.get("metric") == AVAILABLE_RANK_METRIC
+    if is_180d_rank or is_available_rank:
         evidence_pass = evidence_pass and wallet_rank_allows_promotion(wallet)
     sample_score = clamp(to_float(wallet.get("closedTrades90d")) / 50.0 * 100.0)
     coverage_score = (
@@ -1217,7 +1221,7 @@ def wallet_quality_dimensions(wallet: Any, copyability: Any = None) -> dict[str,
     total_notional = abs(to_float(wallet.get("totalNotional")))
     open_loss = wallet_open_loss(wallet)
     risk_known = account_value > 0
-    rank_shadow = is_180d_rank and historical_rank.get("label") == "Shadow"
+    rank_shadow = (is_180d_rank or is_available_rank) and historical_rank.get("label") == "Shadow"
     risk_pass = risk_known and not wallet_is_toxic(wallet) and not rank_shadow
     exposure_ratio = total_notional / account_value if risk_known else 0.0
     open_loss_pct = open_loss / account_value * 100.0 if risk_known else 0.0
@@ -1233,7 +1237,7 @@ def wallet_quality_dimensions(wallet: Any, copyability: Any = None) -> dict[str,
         "notionalToEquity": round(exposure_ratio, 3) if risk_known else None,
         "openLossToEquityPct": round(open_loss_pct, 2) if risk_known else None,
         "toxic": wallet_is_toxic(wallet) if risk_known else None,
-        "shadowReasons": historical_rank.get("shadowReasons", []) if is_180d_rank else [],
+        "shadowReasons": historical_rank.get("shadowReasons", []) if is_180d_rank or is_available_rank else [],
     }
 
     copy = copyability_assessment(copyability)
@@ -2324,6 +2328,8 @@ def refreshed_quality_rank(
     """
     if not isinstance(rank, dict):
         return rank
+    if rank.get("metric") == AVAILABLE_RANK_METRIC:
+        return underlying_rank(rank)
     if rank.get("metric") == "risk_sortino_trend_180d":
         return rank
     if rank.get("metric") in {
@@ -2723,6 +2729,8 @@ def refresh_current_rank_risk(rank: dict[str, Any], *, open_loss: float,
 def wallet_rank_allows_promotion(wallet: dict[str, Any]) -> bool:
     rank = wallet.get("recentWinRateRank") or {}
     if not isinstance(rank, dict):
+        return False
+    if rank.get("metric") == AVAILABLE_RANK_METRIC:
         return False
     if str(rank.get("label", "")).lower() in ("shadow", "unranked"):
         return False
@@ -4321,6 +4329,10 @@ class WalletTrackerService:
         skip_live_fill_fetch: bool = False,
     ) -> dict[str, Any]:
         now_ms = current_time_ms()
+        provisional_seed = active_seed(
+            load_json_file(self.wallet_quality_cache_path.with_name("provisional_rank_seed.json"), {}),
+            wallet.address, now_ms,
+        )
         cutoff_7d_ms = now_ms - RANKING_WINDOW_MS
         cutoff_30d_ms = now_ms - HOLDING_ONLY_WINDOW_MS
         cutoff_90d_ms = now_ms - (90 * 24 * 60 * 60 * 1000)
@@ -4391,6 +4403,10 @@ class WalletTrackerService:
                 futures["twapFills"] = executor.submit(
                     self.fetch_twap_slice_fills_paginated_result, wallet.address, fills_start_ms
                 )
+            elif provisional_seed:
+                # Reuse the portfolio request on full refresh; otherwise one
+                # live request supplies a fresh total-portfolio risk reference.
+                futures["portfolio"] = executor.submit(self.fetch_portfolio_result, wallet.address)
 
         state = futures["state"].result()
         state_fetch_ok = state.get("_fetchOk") is not False
@@ -5206,6 +5222,19 @@ class WalletTrackerService:
                 snapshot[field] = snapshot["recentWinRateRank"].get(field)
         if window_fill_count is not None:
             snapshot["dataQuality"]["windowFillCount"] = window_fill_count
+        if provisional_seed:
+            total_points = (portfolio.get("allTime") or {}).get("accountValueHistory") or []
+            last_point = total_points[-1] if total_points else []
+            capital_at = int(to_float(last_point[0])) if len(last_point) > 1 else 0
+            risk_now_ms = current_time_ms()
+            fresh_capital = portfolio_fetched and portfolio_ok and 0 <= risk_now_ms - capital_at <= 300_000
+            snapshot["recentWinRateRank"] = apply_live_rank(
+                snapshot.get("recentWinRateRank"), provisional_seed, now_ms=risk_now_ms,
+                open_loss=current_open_loss,
+                largest_open_loss=max((max(0, -to_float(p.get("unrealizedPnl"))) for p in positions), default=0),
+                total_portfolio_equity=to_float(last_point[1]) if len(last_point) > 1 else 0,
+                risk_ok=state_fetch_ok and fresh_capital,
+            )
         return snapshot
 
     def cached_wallet_quality_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -5915,7 +5944,13 @@ class WalletTrackerService:
         # should_count_wallet_for_conviction first.
         if isinstance(rank, dict) and str(rank.get("label") or "").lower() == "shadow":
             return 0.0
-        if not isinstance(rank, dict):
+        if isinstance(rank, dict) and rank.get("metric") == AVAILABLE_RANK_METRIC:
+            if not rank.get("currentRiskKnown") or current_time_ms() >= int(to_float(rank.get("expiresAtMs"))):
+                return 0.0
+            base_weight = max(0, min(1, to_float(rank.get("provisionalConvictionWeight"))))
+            if base_weight == 0:
+                return 0.0
+        elif not isinstance(rank, dict):
             base_weight = 1.0
         elif not wallet_quality_window_trusted(wallet):
             # The score in `rank` was computed from a capped-and-poorly-
@@ -6132,6 +6167,9 @@ class WalletTrackerService:
         rank = wallet.get("recentWinRateRank")
         if isinstance(rank, dict) and str(rank.get("label") or "").lower() == "shadow":
             return False
+        if isinstance(rank, dict) and rank.get("metric") == AVAILABLE_RANK_METRIC:
+            if not rank.get("currentRiskKnown") or current_time_ms() >= int(to_float(rank.get("expiresAtMs"))):
+                return False
         quality_age_ms = self.wallet_quality_age_ms(wallet)
         if quality_age_ms is not None and quality_age_ms > WALLET_QUALITY_HARD_TTL_MS:
             return False
@@ -12538,6 +12576,17 @@ class WalletTrackerService:
         if ranked_wallets:
             for index, wallet in enumerate(ranked_wallets[: max(1, limit)], start=1):
                 rank = wallet.get("recentWinRateRank", {})
+                if rank.get("metric") == AVAILABLE_RANK_METRIC:
+                    pf = rank.get("adjustedObservedPF")
+                    pf_text = "n/a" if pf is None else f"{pf:.3f}"
+                    lines.append(
+                        f'{index}. {wallet_label(wallet.get("alias", ""), wallet.get("address", ""))}: '
+                        f'{rank.get("label")} · Provisional / Low '
+                        f'({to_float(rank.get("score")):.1f}/100, PF {pf_text}, '
+                        f'trend {to_float(rank.get("trendScore")):.0f}/20, '
+                        f'{int(rank.get("episodesObserved") or 0)} observed episodes; PF/trend 50/50)'
+                    )
+                    continue
                 lines.append(
                     f'{index}. {wallet_label(wallet.get("alias", ""), wallet.get("address", ""))}: '
                     f'{rank.get("label", "Unranked")} '
