@@ -5228,12 +5228,17 @@ class WalletTrackerService:
             capital_at = int(to_float(last_point[0])) if len(last_point) > 1 else 0
             risk_now_ms = current_time_ms()
             fresh_capital = portfolio_fetched and portfolio_ok and 0 <= risk_now_ms - capital_at <= 300_000
+            try:
+                open_pnl_known = all(math.isfinite(float(r["position"]["unrealizedPnl"]))
+                                     for r in state.get("assetPositions", []))
+            except (KeyError, TypeError, ValueError, OverflowError):
+                open_pnl_known = False
             snapshot["recentWinRateRank"] = apply_live_rank(
                 snapshot.get("recentWinRateRank"), provisional_seed, now_ms=risk_now_ms,
                 open_loss=current_open_loss,
                 largest_open_loss=max((max(0, -to_float(p.get("unrealizedPnl"))) for p in positions), default=0),
                 total_portfolio_equity=to_float(last_point[1]) if len(last_point) > 1 else 0,
-                risk_ok=state_fetch_ok and fresh_capital,
+                risk_ok=state_fetch_ok and fresh_capital and open_pnl_known,
             )
         return snapshot
 
