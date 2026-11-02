@@ -9,7 +9,6 @@ WINDOW_INDEPENDENT_CACHE_FIELDS = frozenset({
     'winRate90d', 'closedTrades90d', 'qualityClosedEvents30d', 'qualityNetPnl30d',
     'qualityProfitFactor30d', 'fundingPnl30d', 'fundingEvents30d',
     'qualityTopWinConcentrationPct', 'qualityHoldout6dEvents', 'qualityHoldout6dNetPnl',
-    'qualityWindowTruncated', 'qualityWindowFillCount', 'qualityWindowCoverageMs',
     'fills30d', 'daysSinceLastFill', 'holdingOnly30d', 'assetQuality', 'hitRate',
 })
 

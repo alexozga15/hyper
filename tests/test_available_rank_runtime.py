@@ -96,11 +96,13 @@ def test_dashboard_snapshot_rejects_a_previous_period_overlay(tmp_path):
          patch.object(service, 'fetch_portfolio_result', return_value=good) as portfolio:
         snapshot = service.fetch_wallet_snapshot(server.TrackedWallet(ADDRESS, '', '', ''),
             full_quality_refresh=False, skip_fill_fetch=True,
-            cached_snapshot={'recentWinRateRank': healthy_rank(calmar_180d=None)})
+            cached_snapshot={'recentWinRateRank': healthy_rank(calmar_180d=None),
+                             'qualityWindowCoverageMs': 180 * 86_400_000})
     portfolio.assert_not_called()
     assert snapshot['recentWinRateRank']['periodDays'] == 90
     assert snapshot['recentWinRateRank']['score'] is None
     assert snapshot['dataQuality']['previousWindowCacheRejected']
+    assert snapshot['qualityWindowCoverageMs'] == 0
 
 
 def test_missing_position_pnl_cannot_be_interpreted_as_no_open_loss(tmp_path):
