@@ -134,14 +134,19 @@ TWAP fills, and funding have completed. Subsequent refreshes fetch only new rows
 with an inclusive overlap. Checkpoints reside in `wallet_history.sqlite3`; progress
 and throttling are reported in `quality_refresh_health.json`. Both workers merge
 cache updates under a file lock, preserving newer quality and recent-fill data.
-The 180-day rank distinguishes a successful fetch from a verified assessment.
+The 90-day rank uses completed UTC days for Sortino, Calmar, drawdown, PF
+and the PnL trend, with the existing 35/25/20/20 weights. It requires 90 daily
+returns for a complete curve and distinguishes a successful fetch from a verified
+assessment. Historical 180-day evidence is not reused as 90-day evidence;
+confirmed Shadow restrictions remain until a verified reassessment.
 The refresh health file exposes `fetchSucceeded`, `rankable`, assessment status,
 missing components, and fill retention limits. Observed perp equity/PnL points
 from compatible portfolio windows are preserved in `wallet_equity.sqlite3` under
 `DATA_DIR`; include this file in state backups. Missing days stay unknown.
 Unranked and Shadow wallets cannot enter the top cohort or pass trade admission.
 Current open losses reapply the risk gates between historical refreshes, and new
-fills invalidate the cached PF until the next complete refresh.
+fills within the assessment window invalidate the cached PF until the next
+complete refresh. Today's fills remain in live diagnostics.
 The supplied `api-budget.env` and `hyper-api-budget.conf` provide those settings
 without modifying the secrets file. Install the environment file under
 `/home/ubuntu/.config/hyper/` and the drop-in under each Hyper service's

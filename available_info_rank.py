@@ -148,6 +148,11 @@ def active_seed(payload, address, now_ms):
 def apply_live_rank(base, seed, *, now_ms, open_loss, largest_open_loss,
                     total_portfolio_equity, risk_ok):
     base = underlying_rank(base) or {}
+    # A frozen 180D seed is not evidence for a newly calculated 90D period.
+    if seed:
+        from quality_period import rank_period_days
+        if rank_period_days(base) != int(seed.get('periodDays', 180)):
+            return base
     if (not seed or now_ms >= seed['expiresAtMs'] or
             (base.get('rankable') and base.get('assessmentStatus') == 'Verified')):
         return base

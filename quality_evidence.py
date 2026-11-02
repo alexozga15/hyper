@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 from available_info_rank import METRIC, evidence_aware_rank
+from quality_period import QUALITY_PERIOD_DAYS, rank_period_days, period_key
 
 
 def quality_assessment(wallet: dict[str, Any], dimensions: dict[str, Any]) -> dict[str, Any]:
@@ -10,6 +11,7 @@ def quality_assessment(wallet: dict[str, Any], dimensions: dict[str, Any]) -> di
     if not isinstance(rank, dict):
         rank = {}
     underlying = rank.get("underlying180dRank") or rank
+    days = rank_period_days(underlying)
     verification = underlying.get("equityCurveVerification") or {}
     availability = underlying.get("scoreComponentsAvailable") or {}
     pf_verified = underlying.get("pfHistoryComplete") is True
@@ -17,7 +19,8 @@ def quality_assessment(wallet: dict[str, Any], dimensions: dict[str, Any]) -> di
     missing = [key for key in ("calmar", "sortino", "adjustedProfitFactor")
                if not availability.get(key) or (key == "adjustedProfitFactor" and not pf_verified)]
     sample_passed = underlying.get("sampleGatePassed") is True
-    verified = bool(underlying.get("rankable") and underlying.get("score") is not None
+    period_matches = int(wallet.get("qualityPeriodDays") or days) == days
+    verified = bool(period_matches and underlying.get("rankable") and underlying.get("score") is not None
                     and curve_verified and pf_verified and sample_passed
                     and underlying.get("largestLoserComplete")
                     and underlying.get("largestLoserPct") is not None)
@@ -47,7 +50,9 @@ def quality_assessment(wallet: dict[str, Any], dimensions: dict[str, Any]) -> di
         "quality": {
             "status": quality_status,
             "score": underlying.get("score") if verified else None,
-            "periodDays": 180,
+            "periodDays": days,
+            "windowStartMs": underlying.get("qualityWindowStartMs"),
+            "windowEndMs": underlying.get("qualityWindowEndMs"),
             "method": underlying.get("metric"),
             # A stress/available-info score is not a verified performance rank.
             "diagnosticScore": rank.get("score"),
@@ -61,9 +66,9 @@ def quality_assessment(wallet: dict[str, Any], dimensions: dict[str, Any]) -> di
             "equityVerified": curve_verified,
             "profitFactorVerified": pf_verified,
             "sampleGatePassed": sample_passed,
-            "dailyReturns": underlying.get("dailyReturns180d"),
+            "dailyReturns": underlying.get(period_key("dailyReturns180d", days)),
             "cashflowsComplete": wallet.get("cashflowHistoryComplete"),
-            "reasons": list(verification.get("reasons") or []),
+            "reasons": list(verification.get("reasons") or []) + ([] if period_matches else ["quality_period_mismatch"]),
             "verifiedWindows": [name for name, metrics in (wallet.get("equityMetricsByWindow") or {}).items()
                                 if (metrics.get("verification") or {}).get("verified")],
         },
@@ -81,7 +86,7 @@ def format_quality_assessment(assessment: dict[str, Any]) -> str:
     score = quality.get("score")
     value = "n/a" if score is None else f"{score:.1f}/100"
     return (
-        f"Quality {quality.get('periodDays', 180)}D: {quality.get('status', 'InsufficientData')} ({value})"
+        f"Quality {quality.get('periodDays', QUALITY_PERIOD_DAYS)}D: {quality.get('status', 'InsufficientData')} ({value})"
         f" | Data: {(assessment.get('data') or {}).get('status', 'Preliminary')}"
         f" | Risk: {(assessment.get('risk') or {}).get('status', 'unknown')}"
         f" | Copyability: {(assessment.get('copyability') or {}).get('status', 'pending')}"

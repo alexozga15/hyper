@@ -56,6 +56,9 @@ from paper_execution import (
     stressed_trade_result,
 )
 from paper_portfolio import portfolio_snapshot, scenario_portfolio_snapshot
+from quality_period import (QUALITY_PERIOD_DAYS, rank_period_days, period_key,
+                            period_fields, period_metric, cache_period_matches,
+                            hold_previous_window_risk, WINDOW_INDEPENDENT_CACHE_FIELDS)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -65,7 +68,7 @@ SOURCE_CODE_HASH = hashlib.sha256(
         for filename in (
             "server.py", "execution_journal.py", "paper_execution.py",
             "paper_portfolio.py", "paper_analysis.py",
-            "hyper-paper-v4/RULES.md", "capital_history.py", "quality_evidence.py",
+            "hyper-paper-v4/RULES.md", "capital_history.py", "quality_evidence.py", "quality_period.py",
             "coinmarketman.py", "moni.py", "ratelimit.py", "history_cache.py", "equity_history.py", "fill_order.py", "available_info_rank.py"
         )
     )
@@ -735,9 +738,9 @@ QUALITY_WINDOW_MIN_COVERAGE_MS = int(
     float(os.environ.get("QUALITY_WINDOW_MIN_COVERAGE_MS", 7 * 24 * 60 * 60 * 1000))
 )
 RISK_SCORE_MIN_COVERAGE_MS = int(
-    float(os.environ.get("RISK_SCORE_MIN_COVERAGE_MS", 150 * 24 * 60 * 60 * 1000))
+    float(os.environ.get("RISK_SCORE_MIN_COVERAGE_MS", QUALITY_PERIOD_DAYS * 24 * 60 * 60 * 1000))
 )
-RISK_SCORE_MIN_DAILY_RETURNS = int(os.environ.get("RISK_SCORE_MIN_DAILY_RETURNS", 150))
+RISK_SCORE_MIN_DAILY_RETURNS = int(os.environ.get("RISK_SCORE_MIN_DAILY_RETURNS", QUALITY_PERIOD_DAYS))
 ELITE_MIN_180D_EPISODES = int(os.environ.get("ELITE_MIN_180D_EPISODES", 40))
 ELITE_MIN_180D_LOSSES = int(os.environ.get("ELITE_MIN_180D_LOSSES", 10))
 ELITE_MAX_180D_DRAWDOWN_PCT = float(os.environ.get("ELITE_MAX_180D_DRAWDOWN_PCT", 30.0))
@@ -758,8 +761,7 @@ RANKING_FULL_CONFIDENCE_7D_CLOSED_TRADES = 20
 # unit left 7 of 31 wallets unrankable, this one leaves 6.
 RANKING_MIN_30D_CLOSED_TRADES = 10
 RANKING_FULL_CONFIDENCE_30D_CLOSED_TRADES = 30
-# The fills window the wallet quality refresh pulls. It is now at least 180
-# days for Sortino; the legacy 90d win-rate diagnostics still use their own
+# The quality refresh acquires the active period; the 90d win-rate diagnostics use their own
 # cutoff over the same fetched page. When it was widened from 30 to 90 days,
 # measured against actual position outcomes,
 # a raw 90d win rate predicts whether a position closes profitable (AUC 0.701)
@@ -777,11 +779,18 @@ RANKING_FULL_CONFIDENCE_30D_CLOSED_TRADES = 30
 # and the wallet-level rank correlation was rho +0.636 at p=0.054 on the ten
 # wallets with enough test positions to check. Treat the headline as the top of
 # a range, not a point estimate.
-SORTINO_WINDOW_DAYS = 180
+SORTINO_WINDOW_DAYS = QUALITY_PERIOD_DAYS
 WALLET_QUALITY_WINDOW_DAYS = max(
     SORTINO_WINDOW_DAYS,
     int(float(os.environ.get("WALLET_QUALITY_WINDOW_DAYS", SORTINO_WINDOW_DAYS))),
 )
+WALLET_CACHED_QUALITY_FIELDS = tuple(
+    period_key(field, SORTINO_WINDOW_DAYS) for field in WALLET_CACHED_QUALITY_FIELDS
+) + ("qualityPeriodDays", "qualityWindowStartMs", "qualityWindowEndMs")
+if not 2 <= RISK_SCORE_MIN_DAILY_RETURNS <= SORTINO_WINDOW_DAYS:
+    raise ValueError("RISK_SCORE_MIN_DAILY_RETURNS must fit the active quality period")
+if not 0 <= RISK_SCORE_MIN_COVERAGE_MS <= SORTINO_WINDOW_DAYS * 86_400_000:
+    raise ValueError("RISK_SCORE_MIN_COVERAGE_MS must fit the active quality period")
 # Minimum 90d closed-run count before convictionWinRateWeight is trusted enough
 # to emit. Mirrors RANKING_MIN_30D_CLOSED_TRADES's role for the 30d score.
 RANKING_MIN_90D_CLOSED_TRADES = int(os.environ.get("RANKING_MIN_90D_CLOSED_TRADES", 10))
@@ -1423,6 +1432,7 @@ def execution_rule_manifest() -> dict[str, Any]:
             "toxicOpenLossMinUsd": TOXIC_UNREALIZED_LOSS_MIN_ABS,
         },
         "riskGates": {
+            "periodDays": SORTINO_WINDOW_DAYS,
             "minCoverageMs": RISK_SCORE_MIN_COVERAGE_MS,
             "minDailyReturns": RISK_SCORE_MIN_DAILY_RETURNS,
             "eliteMinEpisodes": ELITE_MIN_180D_EPISODES,
@@ -1477,6 +1487,8 @@ def execution_rule_manifest() -> dict[str, Any]:
             "stressPortfolios": ["double_cost", "delayed_entry_1h"],
         },
         "equityCurveVerification": {
+            "periodDays": SORTINO_WINDOW_DAYS,
+            "windowEnd": "last_completed_utc_day",
             "minDailyReturns": RISK_SCORE_MIN_DAILY_RETURNS,
             "requireCompleteOfficialHistory": True,
             "requireNoMissingOrInvalidDays": True,
@@ -2344,10 +2356,7 @@ def refreshed_quality_rank(
         return underlying_rank(rank)
     if rank.get("metric") == "risk_sortino_trend_180d":
         return rank
-    if rank.get("metric") in {
-        "calmar_sortino_adjusted_pf_trend_180d_v1",
-        "calmar_sortino_adjusted_pf_trend_180d_v2",
-    }:
+    if str(rank.get("metric", "")).startswith("calmar_sortino_adjusted_pf_trend_"):
         # Cache entries can outlive a scoring-code deploy. Reinterpret the
         # stored components immediately instead of displaying an old numeric
         # rank for up to a full quality-refresh TTL.
@@ -2451,6 +2460,7 @@ def build_risk_trend_quality_rank(
     risk_window_trusted: bool | None = None,
     drawdown_invalid_days: int = 0,
     cashflow_ambiguous_intervals: int = 0,
+    period_days: int = 180,
 ) -> dict[str, Any]:
     """Wallet score: Calmar/Sortino/adjusted-PF/trend = 35/25/20/20.
 
@@ -2632,6 +2642,8 @@ def build_risk_trend_quality_rank(
         "riskWindowTrusted": risk_trusted,
         "metric": "calmar_sortino_adjusted_pf_trend_180d_v2",
     }
+    rank = period_fields(rank, period_days)
+    rank.update(periodDays=period_days, metric=period_metric(period_days))
     return finalize_risk_trend_quality_rank(rank)
 
 
@@ -2642,6 +2654,8 @@ def finalize_risk_trend_quality_rank(rank: dict[str, Any]) -> dict[str, Any]:
     all four components are measurable. Otherwise expose the arithmetic range
     and keep confirmed Shadow risk vetoes, without inventing a midpoint.
     """
+    days = rank_period_days(rank)
+    metric_value = lambda key: rank.get(period_key(key, days))
     curve_usable = bool(
         rank.get("equityCurveComplete")
         and rank.get("maxDrawdownPct") is not None
@@ -2649,10 +2663,10 @@ def finalize_risk_trend_quality_rank(rank: dict[str, Any]) -> dict[str, Any]:
     )
     curve_verified = bool(rank.get("equityCurveVerified"))
     component_values = (
-        ("calmar", 35.0, rank.get("calmar180d"), rank.get("calmarScore"), curve_usable),
-        ("sortino", 25.0, rank.get("sortino180d"), rank.get("sortinoScore"), curve_usable),
+        ("calmar", 35.0, metric_value("calmar180d"), rank.get("calmarScore"), curve_usable),
+        ("sortino", 25.0, metric_value("sortino180d"), rank.get("sortinoScore"), curve_usable),
         (
-            "adjustedProfitFactor", 20.0, rank.get("adjustedProfitFactor180d"),
+            "adjustedProfitFactor", 20.0, metric_value("adjustedProfitFactor180d"),
             rank.get("adjustedProfitFactorScore"), rank.get("pfHistoryComplete", True),
         ),
     )
@@ -2688,7 +2702,8 @@ def finalize_risk_trend_quality_rank(rank: dict[str, Any]) -> dict[str, Any]:
         label = "Cold"
     return {
         **rank,
-        "metric": "calmar_sortino_adjusted_pf_trend_180d_v2",
+        "metric": period_metric(days),
+        "periodDays": days,
         "label": label,
         "score": score,
         "convictionWeightScore": score if rankable else 0.0,
@@ -2705,22 +2720,26 @@ def refresh_current_rank_risk(rank: dict[str, Any], *, open_loss: float,
     """Reapply live risk to cached historical metrics, without renewing their TTL."""
     if not str(rank.get("metric", "")).startswith("calmar_sortino_adjusted_pf_trend_"):
         return rank
+    days = rank_period_days(rank)
+    value = lambda key, default=None: rank.get(period_key(key, days), default)
     open_pct = open_loss / account_value * 100.0 if account_value > 0 else (100.0 if open_loss > 0 else 0.0)
     pf_known = rank.get("pfHistoryComplete", False) and all(
-        rank.get(k) is not None for k in ("closedGrossProfit180d", "closedGrossLoss180d")
+        value(k) is not None for k in ("closedGrossProfit180d", "closedGrossLoss180d")
     )
-    history_current = latest_fill_ms <= int(to_float(rank.get("historyThroughMs"))) if latest_fill_ms else True
-    loss = to_float(rank.get("closedGrossLoss180d")) + open_loss + to_float(rank.get("openCostsLoss180d"))
-    profit = to_float(rank.get("closedGrossProfit180d"))
+    window_end = int(to_float(rank.get("qualityWindowEndMs")))
+    history_current = (not latest_fill_ms or latest_fill_ms <= int(to_float(rank.get("historyThroughMs")))
+                       or bool(window_end and latest_fill_ms > window_end))
+    loss = to_float(value("closedGrossLoss180d")) + open_loss + to_float(value("openCostsLoss180d"))
+    profit = to_float(value("closedGrossProfit180d"))
     pf = (profit / loss if loss > 0 else float("inf") if profit > 0 else 0.0) if pf_known and state_ok and history_current else None
     capital_verified = rank.get("lossCapitalMethod") == "fresh_bracket_v1"
     updated = build_risk_trend_quality_rank(
         pnl_7d=rank.get("pnl"), pnl_30d=rank.get("pnl30d"),
-        pnl_180d=rank.get("pnl180d"), pnl_all_time=rank.get("pnlAllTime"),
-        sortino_180d=rank.get("sortino180d"), calmar_180d=rank.get("calmar180d"),
+        pnl_180d=value("pnl180d"), pnl_all_time=rank.get("pnlAllTime"),
+        sortino_180d=value("sortino180d"), calmar_180d=value("calmar180d"),
         adjusted_profit_factor_180d=pf,
-        episode_count_180d=rank.get("episodes180d", 0), loss_count_180d=rank.get("losses180d", 0),
-        daily_return_count_180d=rank.get("dailyReturns180d", 0), downside_day_count_180d=rank.get("downsideDays180d", 0),
+        episode_count_180d=value("episodes180d", 0), loss_count_180d=value("losses180d", 0),
+        daily_return_count_180d=value("dailyReturns180d", 0), downside_day_count_180d=value("downsideDays180d", 0),
         max_drawdown_pct=rank.get("maxDrawdownPct"), window_trusted=rank.get("windowTrusted", False),
         equity_curve_complete=rank.get("equityCurveComplete", False),
         equity_curve_verified=rank.get("equityCurveVerified", False) and state_ok,
@@ -2732,6 +2751,7 @@ def refresh_current_rank_risk(rank: dict[str, Any], *, open_loss: float,
         risk_window_trusted=rank.get("riskWindowTrusted", False),
         drawdown_invalid_days=rank.get("drawdownInvalidDays", 0),
         cashflow_ambiguous_intervals=rank.get("cashflowAmbiguousIntervals", 0),
+        period_days=days,
     )
     return finalize_risk_trend_quality_rank({**rank, **updated,
         "pfHistoryComplete": pf_known and state_ok and history_current,
@@ -2741,6 +2761,8 @@ def refresh_current_rank_risk(rank: dict[str, Any], *, open_loss: float,
 def wallet_rank_allows_promotion(wallet: dict[str, Any]) -> bool:
     rank = wallet.get("recentWinRateRank") or {}
     if not isinstance(rank, dict):
+        return False
+    if wallet.get("qualityPeriodDays") and rank_period_days(rank) != int(wallet["qualityPeriodDays"]):
         return False
     if rank.get("metric") == AVAILABLE_RANK_METRIC:
         return False
@@ -2788,6 +2810,7 @@ def build_wallet_quality_rank(
     drawdown_invalid_days: int = 0,
     cashflow_ambiguous_intervals: int = 0,
     risk_window_trusted: bool | None = None,
+    period_days: int = 180,
 ) -> dict[str, Any]:
     if pnl_180d is not None and pnl_all_time is not None:
         return build_risk_trend_quality_rank(
@@ -2815,6 +2838,7 @@ def build_wallet_quality_rank(
             risk_window_trusted=risk_window_trusted,
             drawdown_invalid_days=drawdown_invalid_days,
             cashflow_ambiguous_intervals=cashflow_ambiguous_intervals,
+            period_days=period_days,
         )
     normalized_hit_rate = max(0.0, min(to_float(hit_rate), 100.0))
     sample_size_7d = max(0, int(to_float(closed_trade_count)))
@@ -4468,16 +4492,19 @@ class WalletTrackerService:
         cutoff_7d_ms = now_ms - RANKING_WINDOW_MS
         cutoff_30d_ms = now_ms - HOLDING_ONLY_WINDOW_MS
         cutoff_90d_ms = now_ms - (90 * 24 * 60 * 60 * 1000)
-        cutoff_180d_ms = now_ms - (SORTINO_WINDOW_DAYS * 24 * 60 * 60 * 1000)
+        quality_end_ms = (now_ms // 86_400_000) * 86_400_000
+        cutoff_180d_ms = quality_end_ms - (SORTINO_WINDOW_DAYS * 86_400_000)
+        if provisional_seed and int(provisional_seed.get("periodDays", 180)) != SORTINO_WINDOW_DAYS:
+            provisional_seed = None
         cutoff_holdout_ms = now_ms - MONTHLY_QUALITY_HOLDOUT_MS
-        # The quality path fetches at least 180 days of fills for Sortino.
+        # Primary quality uses one explicit window of completed UTC days.
         # winRate90d/closedTrades90d retain their own 90-day cutoff. Every 30d
         # aggregate below (closedTrades30d, grossProfit30d/grossLoss30d,
         # qualityClosedEvents30d, fills30d, ...) still applies its own
         # cutoff_30d_ms filter over whatever gets fetched, so widening this
         # start time does not change what those fields mean.
         fills_start_ms = cutoff_180d_ms if full_quality_refresh else now_ms - WALLET_LIVE_FILL_LOOKBACK_MS
-        # A full quality refresh needs the 180-day window, so it always fetches.
+        # A full quality refresh needs the active assessment window, so it always fetches.
         skip_fills = bool(skip_fill_fetch) and not full_quality_refresh
         skip_live_fills = bool(skip_live_fill_fetch) and not full_quality_refresh and not skip_fills
         with ThreadPoolExecutor(max_workers=HYPERLIQUID_SNAPSHOT_WORKERS) as executor:
@@ -4830,13 +4857,19 @@ class WalletTrackerService:
         # close timestamp. Reconstructing afresh at 30d/90d lost opening fees
         # and pre-window funding for positions that closed inside the window.
         episode_diagnostics: dict[str, int] = {}
+        diagnostic_runs = reconstruct_position_episodes(
+            fills, cutoff_180d_ms, funding_events, include_open=True,
+        )
+        diagnostic_closed_runs = [run for run in diagnostic_runs if not run.get("open")]
         all_runs_180d = reconstruct_position_episodes(
-            fills, cutoff_180d_ms, funding_events, include_open=True, diagnostics=episode_diagnostics
+            [r for r in fills if int(to_float(r.get("time"))) < quality_end_ms], cutoff_180d_ms,
+            [r for r in funding_events if int(to_float(r.get("time"))) < quality_end_ms],
+            include_open=True, diagnostics=episode_diagnostics,
         )
         closed_runs_180d = [run for run in all_runs_180d if not run.get("open")]
         open_costs_loss = sum(max(0.0, -to_float(run.get("pnl"))) for run in all_runs_180d if run.get("open"))
         closed_runs = [
-            run for run in closed_runs_180d if int(to_float(run.get("endMs"))) >= cutoff_30d_ms
+            run for run in diagnostic_closed_runs if int(to_float(run.get("endMs"))) >= cutoff_30d_ms
         ]
 
         def _run_wins_losses(window_start_ms: float | None) -> tuple[int, int]:
@@ -4858,10 +4891,10 @@ class WalletTrackerService:
         win_count, loss_count = _run_wins_losses(cutoff_7d_ms)
         # winRate90d/closedTrades90d use the same position-episode rule as the
         # 30d fields above (see reconstruct_position_episodes), just
-        # filtered from the same 180-day episode reconstruction. A laddered
+        # filtered from the same episode reconstruction. A laddered
         # exit collapses into one episode here exactly as it does for 30d.
         closed_runs_90d = [
-            run for run in closed_runs_180d if int(to_float(run.get("endMs"))) >= cutoff_90d_ms
+            run for run in diagnostic_closed_runs if int(to_float(run.get("endMs"))) >= cutoff_90d_ms
         ]
         win_count_90d = sum(1 for run in closed_runs_90d if run["pnl"] > 0)
         loss_count_90d = sum(1 for run in closed_runs_90d if run["pnl"] < 0)
@@ -4913,9 +4946,6 @@ class WalletTrackerService:
         pnl_7d_official = latest_series_value(perp_week.get("pnlHistory", []))
         pnl_30d_official = latest_series_value(perp_month.get("pnlHistory", []))
         pnl_all_time_official = latest_series_value(perp_all_time.get("pnlHistory", []))
-        pnl_180d_official = interpolated_window_pnl(
-            perp_all_time.get("pnlHistory", []), cutoff_180d_ms
-        )
         equity_history = observed_perp_history(portfolio)
         if full_quality_refresh and portfolio_ok:
             try:
@@ -4926,12 +4956,19 @@ class WalletTrackerService:
                 # The current official observations remain usable if storage
                 # is temporarily unavailable; expose the persistence failure.
                 equity_history["storageError"] = str(exc)
+        quality_pnl_points = [r for r in equity_history.get("pnlHistory", [])
+                              if int(to_float(r[0])) <= quality_end_ms]
+        pnl_7d_official = interpolated_window_pnl(quality_pnl_points, quality_end_ms - 7 * 86_400_000)
+        pnl_30d_official = interpolated_window_pnl(quality_pnl_points, quality_end_ms - 30 * 86_400_000)
+        pnl_180d_official = interpolated_window_pnl(quality_pnl_points, cutoff_180d_ms)
+        pnl_all_time_official = latest_series_value(quality_pnl_points)
         equity_metrics_180d = daily_equity_metrics_180d(
             equity_history.get("pnlHistory", []),
             equity_history.get("accountValueHistory", []),
             cutoff_180d_ms,
-            now_ms,
+            quality_end_ms,
             ledger_times=[row["time"] for row in ledger_events],
+            minimum_daily_returns=RISK_SCORE_MIN_DAILY_RETURNS,
         )
         if equity_history.get("historyConflict") or equity_history.get("historyInputMissing"):
             equity_metrics_180d.update(equityCurveComplete=False, sortino=None,
@@ -4962,7 +4999,8 @@ class WalletTrackerService:
             # its evidence date; otherwise the percentage is unknown.
             previous = underlying_rank(cached.get("recentWinRateRank") or {}) or {}
             previous_at = int(to_float(previous.get("largestLoserEvidenceAtMs", previous.get("historyThroughMs"))))
-            retain = (previous.get("lossCapitalMethod") == "fresh_bracket_v1"
+            retain = (rank_period_days(previous) == SORTINO_WINDOW_DAYS
+                      and previous.get("lossCapitalMethod") == "fresh_bracket_v1"
                       and previous.get("largestLoserPct") is not None
                       and cutoff_180d_ms <= previous_at <= now_ms)
             loss_metrics_180d.update(
@@ -5067,6 +5105,7 @@ class WalletTrackerService:
             cashflow_ambiguous_intervals=int(
                 to_float(equity_metrics_180d.get("cashflowAmbiguousIntervals"))
             ),
+            period_days=SORTINO_WINDOW_DAYS,
         )
         recent_win_rate_rank = {
             **recent_win_rate_rank,
@@ -5083,7 +5122,10 @@ class WalletTrackerService:
             "largestLoserEvidenceAtMs": largest_loser_evidence_at,
             "historyThroughMs": now_ms,
             "cashflowHistoryComplete": ledger_complete if ledger_fetched else None,
+            "qualityWindowStartMs": cutoff_180d_ms,
+            "qualityWindowEndMs": quality_end_ms,
         }
+        recent_win_rate_rank = period_fields(recent_win_rate_rank, SORTINO_WINDOW_DAYS)
         if wallet.address.lower() in ELITE_WALLET_OVERRIDES:
             # Keep the old configuration visible for audit, but addresses no
             # longer override the computed label or score.
@@ -5124,13 +5166,13 @@ class WalletTrackerService:
             "grossProfit30d": gross_profit_30d,
             "grossLoss30d": gross_loss_30d,
             "pnl180d": round(pnl_180d_official, 2),
-            "sortino180d": recent_win_rate_rank.get("sortino180d"),
-            "calmar180d": recent_win_rate_rank.get("calmar180d"),
+            "sortino180d": recent_win_rate_rank.get(period_key("sortino180d", SORTINO_WINDOW_DAYS)),
+            "calmar180d": recent_win_rate_rank.get(period_key("calmar180d", SORTINO_WINDOW_DAYS)),
             "cagr180dPct": (
                 None if equity_metrics_180d.get("cagrPct") is None
                 else round(to_float(equity_metrics_180d.get("cagrPct")), 2)
             ),
-            "adjustedProfitFactor180d": recent_win_rate_rank.get("adjustedProfitFactor180d"),
+            "adjustedProfitFactor180d": recent_win_rate_rank.get(period_key("adjustedProfitFactor180d", SORTINO_WINDOW_DAYS)),
             "fundingPnl180d": round(funding_180d, 2),
             "fundingEvents180d": funding_events_180d,
             "cashflowHistoryComplete": ledger_complete if ledger_fetched else None,
@@ -5281,6 +5323,9 @@ class WalletTrackerService:
             "hitRate": hit_rate,
         }
 
+        snapshot = period_fields(snapshot, SORTINO_WINDOW_DAYS)
+        snapshot.update(qualityPeriodDays=SORTINO_WINDOW_DAYS,
+                        qualityWindowStartMs=cutoff_180d_ms, qualityWindowEndMs=quality_end_ms)
         cached_recent_fills = cached.get("recentFills", []) if isinstance(cached.get("recentFills"), list) else []
         merged_recent_fills: dict[tuple[Any, ...], dict[str, Any]] = {}
         for fill in [*cached_recent_fills, *recent_fills]:
@@ -5350,11 +5395,12 @@ class WalletTrackerService:
             and not fills_paged_truncated and not twap_paged_truncated
         )
         has_cached_quality = any(field in cached for field in WALLET_CACHED_QUALITY_FIELDS)
+        cache_window_matches = cache_period_matches(cached, SORTINO_WINDOW_DAYS)
         use_cached_quality = has_cached_quality and not quality_refresh_succeeded
         cached_fields_used: list[str] = []
         if use_cached_quality:
             for field in WALLET_CACHED_QUALITY_FIELDS:
-                if field in cached:
+                if field in cached and (cache_window_matches or field in WINDOW_INDEPENDENT_CACHE_FIELDS):
                     snapshot[field] = cached[field]
                     cached_fields_used.append(field)
             # The rank is carried verbatim like every other cached field, but
@@ -5370,16 +5416,16 @@ class WalletTrackerService:
                 )
                 if (
                     isinstance(snapshot["recentWinRateRank"], dict)
-                    and snapshot["recentWinRateRank"].get("metric")
-                    == "calmar_sortino_adjusted_pf_trend_180d_v2"
+                    and str(snapshot["recentWinRateRank"].get("metric", ""))
+                    .startswith("calmar_sortino_adjusted_pf_trend_")
                     and not snapshot["recentWinRateRank"].get("equityCurveComplete")
                 ):
                     # Older cached partial curves could carry a finite ratio
-                    # despite fewer than 180 days of returns. Do not keep
+                    # despite insufficient daily returns. Do not keep
                     # displaying that ratio after the rank is corrected.
-                    snapshot["sortino180d"] = None
-                    snapshot["calmar180d"] = None
-                    snapshot["cagr180dPct"] = None
+                    snapshot[period_key("sortino180d", SORTINO_WINDOW_DAYS)] = None
+                    snapshot[period_key("calmar180d", SORTINO_WINDOW_DAYS)] = None
+                    snapshot[period_key("cagr180dPct", SORTINO_WINDOW_DAYS)] = None
         if recent_fills:
             latest_live_fill_ms = max(int(to_float(fill.get("time"))) for fill in recent_fills)
             snapshot["holdingOnly30d"] = False
@@ -5389,7 +5435,9 @@ class WalletTrackerService:
                 "qualityRefreshAttempted": full_quality_refresh,
                 "qualityRefreshSucceeded": quality_refresh_succeeded,
                 "qualityCacheHit": use_cached_quality,
-                "qualityRefreshedAt": cached.get("qualityRefreshedAt", "") if use_cached_quality else snapshot["fetchedAt"],
+                "qualityPeriodDays": SORTINO_WINDOW_DAYS,
+                "previousWindowCacheRejected": has_cached_quality and not cache_window_matches,
+                "qualityRefreshedAt": (cached.get("qualityRefreshedAt", "") if cache_window_matches else "") if use_cached_quality else snapshot["fetchedAt"],
                 # Currency proof for the flags above: they belong to this fetch.
                 "fillsCheckedAt": snapshot["fetchedAt"],
                 # Did every fill request issued this cycle succeed? Purely a
@@ -5419,13 +5467,21 @@ class WalletTrackerService:
             }
         )
         if isinstance(snapshot.get("recentWinRateRank"), dict):
+            try:
+                open_pnl_known = all(math.isfinite(float(r["position"]["unrealizedPnl"]))
+                                     for r in state.get("assetPositions", []))
+            except (KeyError, TypeError, ValueError, OverflowError):
+                open_pnl_known = False
             snapshot["recentWinRateRank"] = refresh_current_rank_risk(
                 snapshot["recentWinRateRank"], open_loss=current_open_loss,
-                account_value=account_value, state_ok=state_fetch_ok,
+                account_value=account_value, state_ok=state_fetch_ok and open_pnl_known,
                 latest_fill_ms=recent_fill_latest_ms,
             )
-            for field in ("currentOpenLossPct", "largestLoserPct", "adjustedProfitFactor180d"):
+            for field in ("currentOpenLossPct", "largestLoserPct", period_key("adjustedProfitFactor180d", SORTINO_WINDOW_DAYS)):
                 snapshot[field] = snapshot["recentWinRateRank"].get(field)
+            snapshot["recentWinRateRank"] = hold_previous_window_risk(
+                snapshot["recentWinRateRank"], cached.get("recentWinRateRank"), SORTINO_WINDOW_DAYS,
+            )
         if window_fill_count is not None:
             snapshot["dataQuality"]["windowFillCount"] = window_fill_count
         if provisional_seed:

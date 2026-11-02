@@ -67,6 +67,11 @@ function formatDate(value) {
   }).format(date);
 }
 
+function formatPeriodMetric(wallet, metric, keySuffix = "", valueSuffix = "") {
+  const value = wallet[`${metric}${wallet.qualityPeriodDays || 180}d${keySuffix}`];
+  return value == null ? "n/a" : value === "inf" ? "∞" : `${Number(value).toFixed(2)}${valueSuffix}`;
+}
+
 function formatWindowSortino(metrics) {
   if (!metrics) return "n/a · not collected";
   const value = metrics.sortino;
@@ -456,22 +461,21 @@ function renderWalletDetails() {
     <div class="wallet-metrics">
       <div><span>Wallet Size</span><strong>${wallet.cohorts.walletSize}</strong></div>
       <div><span>Profitability</span><strong>${wallet.cohorts.profitability}</strong></div>
-      <div><span>Quality Rank · 180D</span><strong>${formatWalletRank(wallet.recentWinRateRank, true, wallet.qualityAssessment)}</strong></div>
+      <div><span>Quality Rank · ${wallet.qualityAssessment?.quality?.periodDays || wallet.qualityPeriodDays || 180}D</span><strong>${formatWalletRank(wallet.recentWinRateRank, true, wallet.qualityAssessment)}</strong></div>
       <div><span>Risk status</span><strong>${wallet.qualityAssessment?.risk?.status || "unknown"}</strong></div>
       <div><span>Data completeness</span><strong>${wallet.qualityAssessment?.data?.status || "Preliminary"} · ${(wallet.qualityAssessment?.data?.missingComponents || []).join(", ") || "see metric details"}</strong></div>
       <div><span>Copyability</span><strong>${wallet.qualityAssessment?.copyability?.status || "pending"}</strong></div>
       <div><span>30D Sortino · separate window</span><strong>${formatWindowSortino(wallet.equityMetricsByWindow?.["30d"])}</strong></div>
-      <div><span>90D Sortino · separate window</span><strong>${formatWindowSortino(wallet.equityMetricsByWindow?.["90d"])}</strong></div>
-      <div><span>180D Sortino</span><strong>${wallet.sortino180d == null ? "n/a" : (wallet.sortino180d === "inf" ? "∞" : Number(wallet.sortino180d).toFixed(2))} / ${wallet.dailyReturns180d || 0} daily returns</strong></div>
-      <div><span>180D Calmar</span><strong>${wallet.calmar180d == null ? "n/a" : (wallet.calmar180d === "inf" ? "∞" : Number(wallet.calmar180d).toFixed(2))}</strong></div>
-      <div><span>180D Adjusted PF</span><strong>${wallet.adjustedProfitFactor180d == null ? "n/a" : (wallet.adjustedProfitFactor180d === "inf" ? "∞" : Number(wallet.adjustedProfitFactor180d).toFixed(2))}</strong></div>
-      <div><span>180D Drawdown</span><strong>${wallet.maxDrawdown180dPct == null ? (wallet.maxDrawdownUpperBoundPct == null ? "n/a" : `n/a · risk bound ${Number(wallet.maxDrawdownUpperBoundPct).toFixed(2)}%`) : `${Number(wallet.maxDrawdown180dPct).toFixed(2)}%`}</strong></div>
+      <div><span>${wallet.qualityPeriodDays || 180}D Sortino</span><strong>${formatPeriodMetric(wallet, "sortino")} / ${wallet[`dailyReturns${wallet.qualityPeriodDays || 180}d`] || 0} daily returns</strong></div>
+      <div><span>${wallet.qualityPeriodDays || 180}D Calmar</span><strong>${formatPeriodMetric(wallet, "calmar")}</strong></div>
+      <div><span>${wallet.qualityPeriodDays || 180}D Adjusted PF</span><strong>${formatPeriodMetric(wallet, "adjustedProfitFactor")}</strong></div>
+      <div><span>${wallet.qualityPeriodDays || 180}D Drawdown</span><strong>${formatPeriodMetric(wallet, "maxDrawdown", "Pct", "%")}</strong></div>
       <div><span>Largest loser</span><strong>${wallet.largestLoserPct == null ? "n/a" : `${Number(wallet.largestLoserPct).toFixed(2)}%`}</strong></div>
       <div><span>Current open loss</span><strong>${Number(wallet.currentOpenLossPct || 0).toFixed(2)}%</strong></div>
       <div><span>Positive Trend</span><strong>${wallet.recentWinRateRank?.positiveTrend ? "Yes" : "No"}</strong></div>
       <div><span>7D Hit Rate</span><strong>${percentFormatter.format(wallet.hitRate)}% / ${wallet.recentClosedTrades || 0} closes</strong></div>
       <div><span>30D PnL</span><strong class="${(wallet.recentWinRateRank?.pnl30d || 0) >= 0 ? "positive" : "negative"}">${formatMoney(wallet.recentWinRateRank?.pnl30d || 0)}</strong></div>
-      <div><span>180D PnL</span><strong class="${(wallet.pnl180d || 0) >= 0 ? "positive" : "negative"}">${formatMoney(wallet.pnl180d || 0)}</strong></div>
+      <div><span>${wallet.qualityPeriodDays || 180}D PnL</span><strong>${wallet[`pnl${wallet.qualityPeriodDays || 180}d`] == null ? "n/a" : formatMoney(wallet[`pnl${wallet.qualityPeriodDays || 180}d`])}</strong></div>
       <div><span>30D Activity</span><strong>${wallet.holdingOnly30d ? "Holding only" : `${wallet.fills30d || 0} fills`}</strong></div>
       <div><span>7D PnL</span><strong class="${(wallet.recentWinRateRank?.pnl || 0) >= 0 ? "positive" : "negative"}">${formatMoney(wallet.recentWinRateRank?.pnl || 0)}</strong></div>
       <div><span>Day PnL</span><strong class="${wallet.performance.day.pnl >= 0 ? "positive" : "negative"}">${formatMoney(wallet.performance.day.pnl)}</strong></div>

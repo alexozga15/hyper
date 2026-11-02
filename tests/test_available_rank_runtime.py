@@ -85,7 +85,7 @@ def test_malformed_seed_never_applies():
     assert active_seed({'wallets': []}, ADDRESS, NOW) is None
 
 
-def test_dashboard_snapshot_fetch_uses_fresh_capital_and_overlay(tmp_path):
+def test_dashboard_snapshot_rejects_a_previous_period_overlay(tmp_path):
     service = server.WalletTrackerService(object(), server.HyperliquidClient())
     service.wallet_quality_cache_path = tmp_path / 'quality.json'
     good = {'ok': True, 'data': {'allTime': {'accountValueHistory': [[NOW, 1000]]}}}
@@ -97,10 +97,10 @@ def test_dashboard_snapshot_fetch_uses_fresh_capital_and_overlay(tmp_path):
         snapshot = service.fetch_wallet_snapshot(server.TrackedWallet(ADDRESS, '', '', ''),
             full_quality_refresh=False, skip_fill_fetch=True,
             cached_snapshot={'recentWinRateRank': healthy_rank(calmar_180d=None)})
-    portfolio.assert_called_once()
-    assert snapshot['recentWinRateRank']['metric'] == METRIC
-    assert snapshot['recentWinRateRank']['score'] == 100
-    assert snapshot['recentWinRateRank']['riskCapitalMethod'] == 'fresh_total_portfolio_indicator'
+    portfolio.assert_not_called()
+    assert snapshot['recentWinRateRank']['periodDays'] == 90
+    assert snapshot['recentWinRateRank']['score'] is None
+    assert snapshot['dataQuality']['previousWindowCacheRejected']
 
 
 def test_missing_position_pnl_cannot_be_interpreted_as_no_open_loss(tmp_path):

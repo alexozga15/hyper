@@ -3484,6 +3484,7 @@ class AlertSummaryTests(unittest.TestCase):
         wallet = TrackedWallet(address="0x1111111111111111111111111111111111111111", alias="", notes="", created_at="")
         cached = {
             "realizedPnl30d": 123_456.0,
+            "qualityPeriodDays": 90,
             "recentWinRateRank": {"label": "Elite", "score": 81.0},
             "performance": {"month": {"pnl": 123_456.0}},
             "recentFills": [],

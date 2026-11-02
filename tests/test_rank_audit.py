@@ -186,10 +186,10 @@ def test_interleaved_twap_and_regular_fills_produce_actual_round_trips(tmp_path)
          patch.object(service, "fetch_portfolio_result", return_value={**good, "data": {}}), \
          patch.object(service, "fetch_wallet_role", return_value="user"):
         snapshot = service.fetch_wallet_snapshot(server.TrackedWallet("a", "", "", ""))
-    assert snapshot["episodes180d"] == 2
+    assert snapshot["episodes90d"] == 2
     assert snapshot["qualityNetPnl30d"] == -4
-    assert snapshot["recentWinRateRank"]["closedGrossProfit180d"] == 8
-    assert snapshot["recentWinRateRank"]["closedGrossLoss180d"] == 12
+    assert snapshot["recentWinRateRank"]["closedGrossProfit90d"] == 8
+    assert snapshot["recentWinRateRank"]["closedGrossLoss90d"] == 12
 
 
 def test_history_identity_upgrade_does_not_duplicate_existing_rows(tmp_path):
