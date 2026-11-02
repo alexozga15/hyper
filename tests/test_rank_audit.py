@@ -131,13 +131,15 @@ def test_different_window_pnl_origins_are_aligned_without_inventing_points():
     assert observed_perp_history(portfolio)["rejectedWindows"] == ["perpMonth"]
 
 
-def test_equity_archive_survives_restart_and_resets_changed_pnl_origin(tmp_path):
+def test_equity_archive_survives_restart_and_quarantines_changed_pnl_origin(tmp_path):
     path = tmp_path / "equity.sqlite3"
     EquityHistoryCache(path).merge("a", block([[0, 100], [DAY, 90]], [[0, 0], [DAY, -10]]), cutoff_ms=0)
     merged = EquityHistoryCache(path).merge("a", block([[DAY, 90], [2 * DAY, 95]], [[DAY, -10], [2 * DAY, -5]]), cutoff_ms=0)
     assert len(merged["pnlHistory"]) == 3
     merged = EquityHistoryCache(path).merge("a", block([[DAY, 90], [2 * DAY, 95]], [[DAY, 0], [2 * DAY, 5]]), cutoff_ms=0)
-    assert merged["pnlHistory"] == [[DAY, 0], [2 * DAY, 5]]
+    assert merged["pnlHistory"] == [[0, 0], [DAY, -10], [2 * DAY, -5]]
+    assert merged["historyConflict"]
+    assert merged["incomingObservationsQuarantined"] == 2
 
 
 def fill(t, start, size, side, pnl=0, fee=0, coin="BTC", tid=None):

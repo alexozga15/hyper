@@ -39,7 +39,12 @@ function formatCompactMoney(value) {
   return `${numeric < 0 ? "-" : ""}$${compactFormatter.format(Math.abs(numeric))}`;
 }
 
-function formatWalletRank(rank, showRange = false) {
+function formatWalletRank(rank, showRange = false, assessment = null) {
+  if (assessment?.quality) {
+    const quality = assessment.quality;
+    const score = quality.score == null ? "n/a" : `${percentFormatter.format(quality.score)}/100`;
+    return `${quality.status} (${score}) · ${assessment.data?.status || "Preliminary"}`;
+  }
   const label = rank?.label || "Unranked";
   if (rank?.score == null) {
     const range = showRange && rank?.scoreLowerBound != null && rank?.scoreUpperBound != null
@@ -60,6 +65,13 @@ function formatDate(value) {
     hour: "2-digit",
     minute: "2-digit",
   }).format(date);
+}
+
+function formatWindowSortino(metrics) {
+  if (!metrics) return "n/a · not collected";
+  const value = metrics.sortino;
+  const text = value == null ? "n/a" : value === "inf" ? "∞" : Number(value).toFixed(2);
+  return `${text} · ${metrics.verification?.verified ? "Verified" : "Preliminary"} · ${metrics.dailyReturnCount || 0} daily returns`;
 }
 
 function shortAddress(address) {
@@ -364,7 +376,7 @@ function renderWalletTable() {
                 <td>${wallet.openOrderCount}</td>
                 <td>${wallet.fills30d || 0}${wallet.holdingOnly30d ? " / holder" : ""}</td>
                 <td>${percentFormatter.format(wallet.hitRate)}%</td>
-                <td>${formatWalletRank(wallet.recentWinRateRank)}</td>
+                <td>${formatWalletRank(wallet.recentWinRateRank, false, wallet.qualityAssessment)}</td>
                 <td>${wallet.cohorts.walletSize} / ${wallet.cohorts.profitability}</td>
                 <td>${shortAddress(wallet.address)}</td>
               </tr>
@@ -444,7 +456,12 @@ function renderWalletDetails() {
     <div class="wallet-metrics">
       <div><span>Wallet Size</span><strong>${wallet.cohorts.walletSize}</strong></div>
       <div><span>Profitability</span><strong>${wallet.cohorts.profitability}</strong></div>
-      <div><span>Quality Rank</span><strong>${formatWalletRank(wallet.recentWinRateRank, true)} · ${wallet.recentWinRateRank?.assessmentStatus || "Legacy"}</strong></div>
+      <div><span>Quality Rank · 180D</span><strong>${formatWalletRank(wallet.recentWinRateRank, true, wallet.qualityAssessment)}</strong></div>
+      <div><span>Risk status</span><strong>${wallet.qualityAssessment?.risk?.status || "unknown"}</strong></div>
+      <div><span>Data completeness</span><strong>${wallet.qualityAssessment?.data?.status || "Preliminary"} · ${(wallet.qualityAssessment?.data?.missingComponents || []).join(", ") || "see metric details"}</strong></div>
+      <div><span>Copyability</span><strong>${wallet.qualityAssessment?.copyability?.status || "pending"}</strong></div>
+      <div><span>30D Sortino · separate window</span><strong>${formatWindowSortino(wallet.equityMetricsByWindow?.["30d"])}</strong></div>
+      <div><span>90D Sortino · separate window</span><strong>${formatWindowSortino(wallet.equityMetricsByWindow?.["90d"])}</strong></div>
       <div><span>180D Sortino</span><strong>${wallet.sortino180d == null ? "n/a" : (wallet.sortino180d === "inf" ? "∞" : Number(wallet.sortino180d).toFixed(2))} / ${wallet.dailyReturns180d || 0} daily returns</strong></div>
       <div><span>180D Calmar</span><strong>${wallet.calmar180d == null ? "n/a" : (wallet.calmar180d === "inf" ? "∞" : Number(wallet.calmar180d).toFixed(2))}</strong></div>
       <div><span>180D Adjusted PF</span><strong>${wallet.adjustedProfitFactor180d == null ? "n/a" : (wallet.adjustedProfitFactor180d === "inf" ? "∞" : Number(wallet.adjustedProfitFactor180d).toFixed(2))}</strong></div>

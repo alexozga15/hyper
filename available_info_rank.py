@@ -3,6 +3,7 @@ import math
 
 METRIC = 'available_pf_trend_v1'
 MAX_HISTORY_AGE_MS = 72 * 60 * 60 * 1000
+EVIDENCE_METRIC = 'available_pf_trend_evidence_v2'
 
 
 def provisional_rank(*, profit_factor, trend_points, episodes, losses,
@@ -59,6 +60,35 @@ def provisional_rank(*, profit_factor, trend_points, episodes, losses,
                 sampleGatePassed=episodes >= 40 and losses >= 10,
                 sampleWarning=episodes < 40 or losses < 10,
                 metric=METRIC)
+
+
+def evidence_aware_rank(*, profit_factor_verified=False, window_coverage_verified=False, **inputs):
+    """Keep v1 reproducible, but never call missing PF bad performance.
+
+    A conservative ratio on an incomplete/selected subset is a stress
+    diagnostic. Only a complete, independently verified observation window
+    and sufficient sample support a point quality rank.
+    """
+    diagnostic = provisional_rank(**inputs)
+    available = bool(profit_factor_verified and window_coverage_verified
+                     and diagnostic['sampleGatePassed']
+                     and inputs.get('profit_factor') is not None
+                     and inputs.get('trend_points') is not None)
+    label = diagnostic['label'] if available or diagnostic['label'] == 'Shadow' else 'InsufficientData'
+    reasons = []
+    if not profit_factor_verified:
+        reasons.append('profit_factor_unverified')
+    if not window_coverage_verified:
+        reasons.append('history_window_incomplete')
+    if not diagnostic['sampleGatePassed']:
+        reasons.append('insufficient_sample')
+    return {**diagnostic, 'metric': EVIDENCE_METRIC, 'label': label,
+            'availableInfoScore': diagnostic['availableInfoScore'] if available else None,
+            'diagnosticScore': diagnostic['availableInfoScore'],
+            'diagnosticProfitFactor': inputs.get('profit_factor'),
+            'qualityVerified': available, 'dataReasons': reasons,
+            'profitFactorVerified': bool(profit_factor_verified),
+            'windowCoverageVerified': bool(window_coverage_verified)}
 
 
 def underlying_rank(rank):

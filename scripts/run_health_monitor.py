@@ -118,6 +118,8 @@ def detect_health_issues(
         issues.append(Issue("quality_cache_coverage", "wallet quality cache coverage <80%"))
     if runtime.get("fillsGloballyDegraded"):
         issues.append(Issue("fills_degraded", "wallet fills globally degraded"))
+    if int(runtime.get("rawArchiveFailedWallets", 0)):
+        issues.append(Issue("raw_archive_failed", "wallet raw-history archival failed"))
     if disk_free_pct < 10:
         issues.append(Issue("disk_low", "disk free space <10%"))
     untrusted_quality_window_wallets = int(runtime.get("untrustedQualityWindowWallets", 0))

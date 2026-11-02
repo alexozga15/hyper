@@ -30,26 +30,50 @@ class ResumableHistoryCache:
         db.execute("CREATE TABLE IF NOT EXISTS coverage_limits (address TEXT,kind TEXT,earliest INTEGER, PRIMARY KEY(address,kind))")
         return db
 
+    def record_observations(self, address: str, kind: str, rows: list[dict[str, Any]], *,
+                            timestamp: Callable[[dict[str, Any]], int],
+                            identity: Callable[[dict[str, Any]], Any]) -> int:
+        """Archive a live response without claiming interval coverage.
+
+        A live response can fill holes in a later historical walk, but its
+        presence alone proves neither a left edge nor a gap-free stream.
+        """
+        values = [(address.lower(), kind, json.dumps(identity(row), sort_keys=True),
+                   timestamp(row), json.dumps(row, sort_keys=True))
+                  for row in rows if isinstance(row, dict)]
+        if not values:
+            return 0
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            before = db.total_changes
+            db.executemany("INSERT OR IGNORE INTO rows VALUES(?,?,?,?,?)", values)
+            inserted = db.total_changes - before
+            db.commit()
+        return inserted
+
     def walk(self, address: str, kind: str, start: int, *,
              fetch: Callable[[int], dict[str, Any]], page_size: int,
              timestamp: Callable[[dict[str, Any]], int],
-             identity: Callable[[dict[str, Any]], Any]) -> dict[str, Any]:
+             identity: Callable[[dict[str, Any]], Any],
+             complete_on_empty: bool = False,
+             complete_through_ms: int | None = None) -> dict[str, Any]:
         address = address.lower()
         checked_at = int(time.time() * 1000)
+        if complete_through_ms is not None:
+            checked_at = min(checked_at, int(complete_through_ms))
         with closing(self._connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             previous = db.execute("SELECT covered_from,cursor,complete_until,pending FROM streams WHERE address=? AND kind=?", (address, kind)).fetchone()
             if previous is None or start < previous[0]:
                 # Requesting an earlier interval requires a new backfill; a
                 # later complete window cannot prove coverage of earlier days.
-                db.execute("DELETE FROM rows WHERE address=? AND kind=?", (address, kind))
-                db.execute("DELETE FROM coverage_limits WHERE address=? AND kind=?", (address, kind))
+                # Restart the acquisition cursor, not the archive. A request
+                # for an earlier window must not destroy the observed tail.
                 cursor = start
                 db.execute("INSERT OR REPLACE INTO streams VALUES(?,?,?,?,0,1)", (address, kind, start, cursor))
             else:
                 cursor = max(start, previous[1]) if previous[3] else max(start, previous[2] - 300_000)
                 db.execute("UPDATE streams SET covered_from=?,cursor=?,pending=1 WHERE address=? AND kind=?", (start, cursor, address, kind))
-            db.execute("DELETE FROM rows WHERE address=? AND kind=? AND at<?", (address, kind, start))
             db.commit()
         complete = False
         error = ""
@@ -62,7 +86,7 @@ class ResumableHistoryCache:
             page = result["data"]
             pages += 1
             newest = max((timestamp(row) for row in page if isinstance(row, dict)), default=cursor)
-            complete = len(page) < page_size
+            complete = not page if complete_on_empty else len(page) < page_size
             with closing(self._connect()) as db:
                 db.execute("BEGIN IMMEDIATE")
                 for row in page:
@@ -75,6 +99,13 @@ class ResumableHistoryCache:
                 db.commit()
             if complete:
                 break
+            if newest <= cursor and complete_on_empty and len(page) < page_size:
+                # The inclusive boundary was exhausted. A full timestamp must
+                # never be skipped, but a short repeated boundary can advance.
+                cursor += 1
+                with closing(self._connect()) as db:
+                    db.execute("UPDATE streams SET cursor=? WHERE address=? AND kind=?", (cursor, address, kind))
+                continue
             if newest <= cursor:
                 error = "history page saturated at one timestamp; coverage unverified"
                 break

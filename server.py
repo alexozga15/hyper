@@ -11,6 +11,7 @@ import os
 import random
 import re
 import socket
+import shutil
 import sqlite3
 import ssl
 import struct
@@ -20,6 +21,7 @@ import time
 import urllib.parse
 import urllib.error
 import urllib.request
+from bisect import bisect_left, bisect_right
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -33,6 +35,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 # Re-exported: callers and tests import RequestRateLimiter from server.
 from ratelimit import HyperliquidRateLimiter, RequestRateLimiter
 from history_cache import ResumableHistoryCache
+from capital_history import walk_ledger
+from quality_evidence import quality_assessment, format_quality_assessment
 from equity_history import EquityHistoryCache, observed_perp_history
 from fill_order import order_position_fills
 from available_info_rank import (
@@ -61,7 +65,7 @@ SOURCE_CODE_HASH = hashlib.sha256(
         for filename in (
             "server.py", "execution_journal.py", "paper_execution.py",
             "paper_portfolio.py", "paper_analysis.py",
-            "hyper-paper-v4/RULES.md",
+            "hyper-paper-v4/RULES.md", "capital_history.py", "quality_evidence.py",
             "coinmarketman.py", "moni.py", "ratelimit.py", "history_cache.py", "equity_history.py", "fill_order.py", "available_info_rank.py"
         )
     )
@@ -593,6 +597,8 @@ WALLET_QUALITY_SOFT_TTL_MS = int(
 WALLET_QUALITY_HARD_TTL_MS = int(
     float(os.environ.get("WALLET_QUALITY_HARD_TTL_MS", 24 * 60 * 60 * 1000))
 )
+WALLET_RAW_ARCHIVE_ENABLED = os.environ.get("WALLET_RAW_ARCHIVE_ENABLED", "1") == "1"
+WALLET_RAW_ARCHIVE_MIN_FREE_BYTES = int(os.environ.get("WALLET_RAW_ARCHIVE_MIN_FREE_BYTES", 2 * 1024**3))
 WALLET_RECENT_FILL_CACHE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 # Measured on production against the 41 tracked wallets: 13 wallets sit
 # exactly at this cap, and their retained history spans a median of 7.8h -
@@ -678,6 +684,7 @@ WALLET_CACHED_QUALITY_FIELDS = (
     "fundingHistoryComplete",
     "pfHistoryComplete",
     "equityCurveVerification",
+    "equityMetricsByWindow",
     "episodes180d",
     "losses180d",
     "dailyReturns180d",
@@ -687,9 +694,12 @@ WALLET_CACHED_QUALITY_FIELDS = (
     "observedMaxDrawdownPct",
     "maxDrawdownUpperBoundPct",
     "cashflowAmbiguousIntervals",
+    "cashflowHistoryComplete",
+    "cashflowEventCount180d",
     "largestLoserPct",
     "largestLoserMeasuredEpisodes",
     "largestLoserMissingCapitalEpisodes",
+    "largestLoserEvidenceAtMs",
     "currentOpenLossPct",
     "maxObservedPositionDrawdownPct",
     "winRate90d",
@@ -1147,8 +1157,9 @@ def wallet_quality_dimensions(wallet: Any, copyability: Any = None) -> dict[str,
         wallet = {}
     profit_factor_raw = wallet.get("qualityProfitFactor30d")
     profit_factor = float("inf") if profit_factor_raw == "inf" else to_float(profit_factor_raw)
+    # A missing PF is not a measured PF of zero and cannot establish failure.
     has_performance = all(
-        key in wallet for key in ("qualityNetPnl30d", "qualityProfitFactor30d")
+        wallet.get(key) is not None for key in ("qualityNetPnl30d", "qualityProfitFactor30d")
     )
     performance_pass = (
         has_performance
@@ -1169,8 +1180,8 @@ def wallet_quality_dimensions(wallet: Any, copyability: Any = None) -> dict[str,
         "score": round(clamp(performance_score), 1),
         "netPnl30d": round(to_float(wallet.get("qualityNetPnl30d")), 2)
         if "qualityNetPnl30d" in wallet else None,
-        "profitFactor30d": "inf" if profit_factor == float("inf") else round(profit_factor, 3)
-        if "qualityProfitFactor30d" in wallet else None,
+        "profitFactor30d": ("inf" if profit_factor == float("inf") else round(profit_factor, 3))
+        if profit_factor_raw is not None else None,
         "returnOnEquity30dPct": round(pnl_return_pct, 3) if has_performance else None,
     }
 
@@ -1384,6 +1395,7 @@ def execution_rule_manifest() -> dict[str, Any]:
         "TOXIC_", "WALLET_CORRELATION_", "WALLET_QUALITY_",
         "WALLET_QUARANTINE_", "WALLET_RECENT_", "WALLET_SIGNAL_",
         "WALLET_WINDOW_", "WALLET_LIVE_", "WALLET_IDLE_",
+        "WALLET_RAW_",
     )
     resolved_thresholds = {
         name: value for name, value in globals().items()
@@ -3070,6 +3082,8 @@ def daily_equity_metrics_180d(
     account_points: list[Any],
     cutoff_ms: int,
     end_ms: int,
+    *, ledger_times: list[int] | None = None,
+    minimum_daily_returns: int | None = None,
 ) -> dict[str, Any]:
     """Return 180d metrics from a cash-flow-neutral daily return series.
 
@@ -3093,7 +3107,7 @@ def daily_equity_metrics_180d(
                 continue
             timestamp = int(to_float(point[0]))
             day = timestamp // day_ms
-            if day < cutoff_day or day > end_day:
+            if day < cutoff_day or day > end_day or timestamp > end_ms:
                 continue
             values[timestamp] = to_float(point[1])
         return values
@@ -3108,6 +3122,8 @@ def daily_equity_metrics_180d(
     missing_days = 0
     cashflow_ambiguous_intervals = 0
     cashflow_bound_valid = True
+    flow_times = sorted(set(ledger_times or []))
+    ledger_guarded_intervals = 0
 
     def add_factor(bucket: dict[int, float], day: int, interval_return: float) -> None:
         bucket[day] = bucket.get(day, 1.0) * (1.0 + interval_return)
@@ -3134,8 +3150,14 @@ def daily_equity_metrics_180d(
         )
         has_flow = abs(inferred_flow) > tolerance
         has_pnl = abs(pnl_change) > tolerance
+        # Equal and opposite transfers can have zero inferred net flow while
+        # changing the capital on which PnL was earned. Boundary timestamps
+        # do not establish before/after order, so guard both boundaries.
+        ledger_inside = bisect_right(flow_times, timestamp) > bisect_left(flow_times, previous_time)
+        if ledger_inside:
+            ledger_guarded_intervals += 1
 
-        if has_flow and has_pnl:
+        if (has_flow or ledger_inside) and has_pnl:
             # Endpoints alone cannot distinguish flow→PnL from PnL→flow.
             # Preserve that uncertainty in the exact metrics. For the risk
             # gate, choose the lower possible return. For losses that uses the
@@ -3145,6 +3167,10 @@ def daily_equity_metrics_180d(
             cashflow_ambiguous_intervals += 1
             invalid_days += 1
             break_observed_segment()
+            if ledger_inside:
+                # Net endpoints cannot bound unknown gross transfers. This is
+                # uncertainty, never a confirmed risk breach or exact return.
+                cashflow_bound_valid = False
             possible_capital = [
                 value
                 for value in (starting_equity, starting_equity + inferred_flow)
@@ -3211,8 +3237,10 @@ def daily_equity_metrics_180d(
 
     observed_days = len(returns)
     downside_days = sum(1 for value in returns if value < 0)
+    required_returns = (RISK_SCORE_MIN_DAILY_RETURNS if minimum_daily_returns is None
+                        else max(2, int(minimum_daily_returns)))
     complete = bool(
-        observed_days >= RISK_SCORE_MIN_DAILY_RETURNS
+        observed_days >= required_returns
         and invalid_days == 0
         and missing_days == 0
         and timestamps
@@ -3267,6 +3295,7 @@ def daily_equity_metrics_180d(
         "invalidDayCount": invalid_days,
         "missingDayCount": missing_days,
         "cashflowAmbiguousIntervals": cashflow_ambiguous_intervals,
+        "ledgerGuardedIntervals": ledger_guarded_intervals,
         "equityCurveComplete": complete,
     }
 
@@ -3274,6 +3303,10 @@ def daily_equity_metrics_180d(
 def equity_curve_verification(
     metrics: dict[str, Any], *, portfolio_ok: bool, funding_complete: bool,
     episode_history_complete: bool = True,
+    cashflow_complete: bool | None = None,
+    history_conflict: bool = False,
+    history_input_missing: bool = False,
+    minimum_daily_returns: int | None = None,
 ) -> dict[str, Any]:
     """Deterministic confirmation gate for the official 180-day curve.
 
@@ -3287,7 +3320,9 @@ def equity_curve_verification(
         reasons.append("portfolio_fetch_failed")
     if not bool(metrics.get("equityCurveComplete")):
         reasons.append("official_history_incomplete")
-    if int(to_float(metrics.get("dailyReturnCount"))) < RISK_SCORE_MIN_DAILY_RETURNS:
+    required_returns = (RISK_SCORE_MIN_DAILY_RETURNS if minimum_daily_returns is None
+                        else max(2, int(minimum_daily_returns)))
+    if int(to_float(metrics.get("dailyReturnCount"))) < required_returns:
         reasons.append("insufficient_daily_returns")
     if int(to_float(metrics.get("missingDayCount"))) > 0:
         reasons.append("missing_days")
@@ -3297,14 +3332,68 @@ def equity_curve_verification(
         reasons.append("cashflow_order_ambiguous")
     if not funding_complete:
         reasons.append("funding_history_incomplete")
+    if cashflow_complete is False:
+        reasons.append("cashflow_history_incomplete")
+    if history_conflict:
+        reasons.append("equity_history_conflict")
+    if history_input_missing:
+        reasons.append("equity_history_input_missing")
+    # A separately reconciled equity/PnL curve does not need reconstructed
+    # trade episodes. PF still needs them; keep its verdict independent.
+    pf_reasons = []
     if not episode_history_complete:
-        reasons.append("episode_history_incomplete")
+        pf_reasons.append("episode_history_incomplete")
+    if not funding_complete:
+        pf_reasons.append("funding_history_incomplete")
     return {
         "verified": not reasons,
         "status": "verified_official_history" if not reasons else "preliminary",
         "reasons": reasons,
+        "profitFactorVerified": not pf_reasons,
+        "profitFactorReasons": pf_reasons,
         "ruleVersion": EXECUTION_RULE_VERSION,
     }
+
+
+def shorter_equity_metrics(
+    history: dict[str, Any], end_ms: int, *, funding_complete: bool,
+    ledger_times: list[int], ledger_complete: bool | None,
+    portfolio_ok: bool,
+) -> dict[str, Any]:
+    """Explicit 30D/90D observations, never a substitute for a 180D rank."""
+    windows = {}
+    # Compare complete UTC days. A current partial day must not be treated as
+    # another daily observation merely because the collector ran at midday.
+    closed_end_ms = end_ms // 86_400_000 * 86_400_000
+    for days in (30, 90):
+        minimum = days
+        metrics = daily_equity_metrics_180d(
+            history.get("pnlHistory", []), history.get("accountValueHistory", []),
+            closed_end_ms - days * 86_400_000, closed_end_ms,
+            ledger_times=ledger_times, minimum_daily_returns=minimum,
+        )
+        conflict = bool(history.get("historyConflict") or history.get("historyInputMissing"))
+        if conflict:
+            metrics.update(equityCurveComplete=False, sortino=None, calmar=None,
+                           cagrPct=None, maxDrawdownPct=None)
+        verification = equity_curve_verification(
+            metrics, portfolio_ok=portfolio_ok, funding_complete=funding_complete,
+            cashflow_complete=ledger_complete, history_conflict=bool(history.get("historyConflict")),
+            history_input_missing=bool(history.get("historyInputMissing")),
+            minimum_daily_returns=minimum,
+        )
+        # Without a ledger acquisition no short-window claim is verified.
+        if ledger_complete is None:
+            verification.update(verified=False, status="preliminary")
+            verification["reasons"].append("cashflow_history_unknown")
+        safe_metrics = {key: ("inf" if value > 0 else "-inf")
+                        if isinstance(value, float) and math.isinf(value) else value
+                        for key, value in metrics.items()}
+        windows[f"{days}d"] = {**safe_metrics, "periodDays": days,
+                               "asOfMs": closed_end_ms, "includesPartialDay": False,
+                               "verification": verification,
+                               "qualityRank": None}
+    return windows
 
 
 def episode_loss_metrics(
@@ -3998,6 +4087,47 @@ class WalletTrackerService:
         ok = bool(result.get("ok")) and isinstance(rows, list)
         return {"ok": ok, "data": rows if isinstance(rows, list) else [], "error": result.get("error", "")}
 
+    def fetch_user_ledger_result(self, address: str, start_time: int, end_time: int) -> dict[str, Any]:
+        if start_time > end_time:
+            return {"ok": True, "data": [], "error": ""}
+        result = self.client.safe_post_result(
+            {"type": "userNonFundingLedgerUpdates", "user": address,
+             "startTime": int(start_time), "endTime": int(end_time)}, [],
+        )
+        rows = result.get("data")
+        valid = isinstance(rows, list) and all(
+            isinstance(row, dict) and isinstance(row.get("time"), int)
+            and not isinstance(row.get("time"), bool)
+            and start_time <= row["time"] <= end_time for row in rows
+        )
+        ok = bool(result.get("ok")) and valid
+        return {"ok": ok, "data": rows if ok else [],
+                "error": result.get("error") or ("invalid ledger response" if not valid else "")}
+
+    def fetch_user_ledger_paginated_result(self, address: str, start_time: int) -> dict[str, Any]:
+        end_time = current_time_ms()
+        if self.history_cache is not None:
+            return self.history_cache.walk(
+                address, "ledger", start_time,
+                fetch=lambda cursor: self.fetch_user_ledger_result(address, cursor, end_time),
+                page_size=500, timestamp=lambda row: row["time"],
+                identity=lambda row: (row.get("time"), row.get("hash"), row.get("delta")),
+                complete_on_empty=True,
+                complete_through_ms=end_time,
+            )
+        def request(payload: dict[str, Any]) -> list[dict[str, Any]]:
+            response = self.fetch_user_ledger_result(address, payload["startTime"], end_time)
+            if not response["ok"]:
+                raise ValueError(response["error"] or "ledger unavailable")
+            return response["data"]
+        result = walk_ledger(request, address, start_time, end_time,
+                             max_pages=FUNDING_HISTORY_MAX_PAGES)
+        complete = result["paginationStatus"] == "empty_final_page"
+        return {"ok": result["error"] is None, "data": result["rows"],
+                "truncated": not complete, "error": result["error"] or "",
+                "paginationStatus": result["paginationStatus"],
+                "chainCoverageVerified": False}
+
     def fetch_user_funding_paginated_result(
         self,
         address: str,
@@ -4297,7 +4427,9 @@ class WalletTrackerService:
             {
                 "type": "userFills",
                 "user": address,
-                "aggregateByTime": True,
+                # Preserve original trade identities/position continuity so
+                # the live response can be archived with the historical feed.
+                "aggregateByTime": False,
             },
             [],
         )
@@ -4390,6 +4522,13 @@ class WalletTrackerService:
                 futures["funding"] = executor.submit(
                     self.fetch_user_funding_paginated_result, wallet.address, fills_start_ms
                 )
+                if self.history_cache is not None:
+                    # The background owner persists the stream and resumes it
+                    # between batches. Never add an uncheckpointed ledger walk
+                    # to an ad-hoc/live snapshot or its latency budget.
+                    futures["ledger"] = executor.submit(
+                        self.fetch_user_ledger_paginated_result, wallet.address, fills_start_ms
+                    )
                 # Two fill requests per wallet per cycle are already the
                 # largest traffic block (see WALLET_IDLE_FILL_THRESHOLD_MS
                 # above), so this must not become a third one every cycle. The
@@ -4441,6 +4580,10 @@ class WalletTrackerService:
             if funding_fetched
             else {"ok": True, "data": [], "error": "", "skipped": True}
         )
+        ledger_fetched = "ledger" in futures
+        ledger_result = futures["ledger"].result() if ledger_fetched else dict(skipped_result)
+        ledger_events = ledger_result.get("data") or []
+        ledger_complete = bool(ledger_result.get("ok") and not ledger_result.get("truncated", True))
         open_orders = orders_result.get("data", []) if isinstance(orders_result, dict) else []
         base_fills = fills_result.get("data", []) if isinstance(fills_result, dict) else []
         twap_slices = twap_fills_result.get("data", []) if isinstance(twap_fills_result, dict) else []
@@ -4477,6 +4620,22 @@ class WalletTrackerService:
         live_fills = recent_fills_result.get("data", []) if recent_fills_ok else []
         if not isinstance(live_fills, list):
             live_fills = []
+        raw_archive_error = ""
+        raw_archived_rows = 0
+        if WALLET_RAW_ARCHIVE_ENABLED and (base_fills or raw_slices or live_fills):
+            try:
+                archive_path = self.wallet_quality_cache_path.with_name("wallet_history.sqlite3")
+                archive_path.parent.mkdir(parents=True, exist_ok=True)
+                if shutil.disk_usage(archive_path.parent).free < WALLET_RAW_ARCHIVE_MIN_FREE_BYTES:
+                    raise OSError("raw history archive paused: free-space reserve reached")
+                archive = self.history_cache or ResumableHistoryCache(archive_path)
+                raw_archived_rows = archive.record_observations(
+                    wallet.address, "fills", base_fills + raw_slices + live_fills,
+                    timestamp=lambda row: int(to_float(row.get("time"))),
+                    identity=raw_fill_identity,
+                )
+            except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+                raw_archive_error = str(exc)
         portfolio_ok = bool(isinstance(portfolio_result, dict) and portfolio_result.get("ok"))
         funding_ok = bool(isinstance(funding_result, dict) and funding_result.get("ok"))
         funding_truncated = bool(
@@ -4758,7 +4917,7 @@ class WalletTrackerService:
             perp_all_time.get("pnlHistory", []), cutoff_180d_ms
         )
         equity_history = observed_perp_history(portfolio)
-        if full_quality_refresh and portfolio_ok and equity_history.get("pnlHistory"):
+        if full_quality_refresh and portfolio_ok:
             try:
                 equity_history = EquityHistoryCache(
                     self.wallet_quality_cache_path.with_name("wallet_equity.sqlite3")
@@ -4772,17 +4931,46 @@ class WalletTrackerService:
             equity_history.get("accountValueHistory", []),
             cutoff_180d_ms,
             now_ms,
+            ledger_times=[row["time"] for row in ledger_events],
         )
+        if equity_history.get("historyConflict") or equity_history.get("historyInputMissing"):
+            equity_metrics_180d.update(equityCurveComplete=False, sortino=None,
+                                       calmar=None, cagrPct=None, maxDrawdownPct=None)
         equity_verification = equity_curve_verification(
             equity_metrics_180d,
             portfolio_ok=portfolio_ok,
             funding_complete=funding_complete,
             episode_history_complete=pf_history_complete,
+            cashflow_complete=ledger_complete,
+            history_conflict=bool(equity_history.get("historyConflict")),
+            history_input_missing=bool(equity_history.get("historyInputMissing")),
+        )
+        shorter_metrics = shorter_equity_metrics(
+            equity_history, now_ms, funding_complete=funding_complete,
+            ledger_times=[row["time"] for row in ledger_events],
+            ledger_complete=ledger_complete if ledger_fetched else None,
+            portfolio_ok=portfolio_ok,
         )
         loss_metrics_180d = episode_loss_metrics(
             closed_runs_180d, equity_history.get("accountValueHistory", []),
             equity_history.get("pnlHistory", []),
         )
+        largest_loser_evidence_at = now_ms if loss_metrics_180d.get("largestLoserPct") is not None else None
+        if equity_history.get("historyConflict") or equity_history.get("historyInputMissing"):
+            # Quarantined capital cannot establish a NEW percentage loss veto.
+            # Retain an already measured, still in-window veto without renewing
+            # its evidence date; otherwise the percentage is unknown.
+            previous = underlying_rank(cached.get("recentWinRateRank") or {}) or {}
+            previous_at = int(to_float(previous.get("largestLoserEvidenceAtMs", previous.get("historyThroughMs"))))
+            retain = (previous.get("lossCapitalMethod") == "fresh_bracket_v1"
+                      and previous.get("largestLoserPct") is not None
+                      and cutoff_180d_ms <= previous_at <= now_ms)
+            loss_metrics_180d.update(
+                largestLoserPct=previous.get("largestLoserPct") if retain else None,
+                largestLoserMeasuredEpisodes=0,
+                largestLoserMissingCapitalEpisodes=sum(to_float(run.get("pnl")) < 0 for run in closed_runs_180d),
+            )
+            largest_loser_evidence_at = previous_at if retain else None
         recent_closed_trade_count = win_count + loss_count
         hit_rate = (win_count / max(recent_closed_trade_count, 1)) * 100
         closed_trade_count_30d = win_count_30d + loss_count_30d
@@ -4868,7 +5056,9 @@ class WalletTrackerService:
             observed_drawdown_pct=equity_metrics_180d.get("observedMaxDrawdownPct"),
             drawdown_upper_bound_pct=equity_metrics_180d.get("maxDrawdownUpperBoundPct"),
             largest_loser_pct=loss_metrics_180d.get("largestLoserPct"),
-            largest_loser_complete=int(to_float(loss_metrics_180d.get("largestLoserMissingCapitalEpisodes"))) == 0,
+            largest_loser_complete=(int(to_float(loss_metrics_180d.get("largestLoserMissingCapitalEpisodes"))) == 0
+                                    and not equity_history.get("historyConflict")
+                                    and not equity_history.get("historyInputMissing")),
             current_open_loss_pct=current_open_loss_pct,
             # The current API has no historical per-position mark series. Keep
             # this distinct and unknown rather than relabelling current uPnL.
@@ -4883,13 +5073,16 @@ class WalletTrackerService:
             "equityCurveComplete": bool(equity_metrics_180d.get("equityCurveComplete")),
             "equityCurveVerified": bool(equity_verification.get("verified")),
             "equityCurveVerification": equity_verification,
+            "equityMetricsByWindow": shorter_metrics,
             "fundingIncluded": funding_complete,
             "pfHistoryComplete": pf_history_complete,
             "closedGrossProfit180d": gross_profit_180d,
             "closedGrossLoss180d": gross_loss_180d,
             "openCostsLoss180d": open_costs_loss,
             "lossCapitalMethod": "fresh_bracket_v1",
+            "largestLoserEvidenceAtMs": largest_loser_evidence_at,
             "historyThroughMs": now_ms,
+            "cashflowHistoryComplete": ledger_complete if ledger_fetched else None,
         }
         if wallet.address.lower() in ELITE_WALLET_OVERRIDES:
             # Keep the old configuration visible for audit, but addresses no
@@ -4940,9 +5133,12 @@ class WalletTrackerService:
             "adjustedProfitFactor180d": recent_win_rate_rank.get("adjustedProfitFactor180d"),
             "fundingPnl180d": round(funding_180d, 2),
             "fundingEvents180d": funding_events_180d,
+            "cashflowHistoryComplete": ledger_complete if ledger_fetched else None,
+            "cashflowEventCount180d": len(ledger_events) if ledger_fetched else None,
             "fundingHistoryComplete": funding_complete,
             "pfHistoryComplete": pf_history_complete,
             "equityCurveVerification": equity_verification,
+            "equityMetricsByWindow": shorter_metrics,
             "episodes180d": len(closed_runs_180d),
             "losses180d": loss_count_180d,
             "dailyReturns180d": int(to_float(equity_metrics_180d.get("dailyReturnCount"))),
@@ -4966,6 +5162,7 @@ class WalletTrackerService:
             "largestLoserPct": loss_metrics_180d.get("largestLoserPct"),
             "largestLoserMeasuredEpisodes": loss_metrics_180d.get("largestLoserMeasuredEpisodes"),
             "largestLoserMissingCapitalEpisodes": loss_metrics_180d.get("largestLoserMissingCapitalEpisodes"),
+            "largestLoserEvidenceAtMs": largest_loser_evidence_at,
             "currentOpenLossPct": round(current_open_loss_pct, 2),
             "maxObservedPositionDrawdownPct": None,
             # Same position-episode reconstruction as closedTrades30d, over the
@@ -5011,7 +5208,16 @@ class WalletTrackerService:
                 "episodeDiagnostics": episode_diagnostics,
                 "fillRetentionLimited": bool(fills_result.get("retentionLimited")),
                 "equityHistoryStorageError": equity_history.get("storageError", ""),
+                "rawHistoryArchiveError": raw_archive_error,
+                "rawHistoryNewRows": raw_archived_rows,
                 "equityHistoryRejectedWindows": equity_history.get("rejectedWindows", []),
+                "equityHistoryConflict": bool(equity_history.get("historyConflict")) if full_quality_refresh and portfolio_ok else None,
+                "equityHistoryInputMissing": bool(equity_history.get("historyInputMissing")) if full_quality_refresh and portfolio_ok else None,
+                "equityObservationsQuarantined": equity_history.get("incomingObservationsQuarantined", 0) if full_quality_refresh and portfolio_ok else None,
+                "ledgerFetched": ledger_fetched,
+                "ledgerComplete": ledger_complete if ledger_fetched else None,
+                "ledgerError": ledger_result.get("error", "") if ledger_fetched else "",
+                "ledgerGuardedIntervals": equity_metrics_180d.get("ledgerGuardedIntervals", 0),
                 "stateOk": state_fetch_ok,
                 # Every flag in this block describes a request issued during the
                 # current cycle. Anything reused from the quality cache lives
@@ -5477,6 +5683,12 @@ class WalletTrackerService:
             if isinstance(review, dict):
                 snapshot["reviewWeightMultiplier"] = max(0.0, min(to_float(review.get("weight", 1.0)), 1.0))
                 snapshot["reviewReasons"] = list(review.get("reasons", []))
+        copyability = load_wallet_copyability()
+        for snapshot in snapshots:
+            address = str(snapshot.get("address") or "").lower()
+            snapshot["qualityAssessment"] = quality_assessment(
+                snapshot, wallet_quality_dimensions(snapshot, copyability.get(address)),
+            )
         self.persist_wallet_snapshots(snapshots, {wallet.address.lower() for wallet in wallets})
         fill_ok_count = sum(1 for item in snapshots if item.get("dataQuality", {}).get("fillsOk"))
         fill_fetch_failed_count = sum(1 for item in snapshots if self.wallet_fill_fetch_failed(item))
@@ -5524,6 +5736,7 @@ class WalletTrackerService:
                 "liveFillsSkippedWallets": live_fill_skipped_count,
                 "fillsServedFromCacheWallets": fill_cache_served_count,
                 "fillsUnusableWallets": fill_unusable_count,
+                "rawArchiveFailedWallets": sum(bool((w.get("dataQuality") or {}).get("rawHistoryArchiveError")) for w in snapshots),
                 "walletsWithRecentFills": wallets_with_recent_fills,
                 "totalRecentFills": total_recent_fills,
                 "fillsGloballyDegraded": fills_globally_degraded,
@@ -5605,6 +5818,7 @@ class WalletTrackerService:
                 "fillsServedFromCacheWallets": fill_cache_served_count,
                 "fillsUnusableWallets": fill_unusable_count,
                 "cacheCoverage": round(cache_coverage, 4),
+                "rawArchiveFailedWallets": totals["dataQuality"]["rawArchiveFailedWallets"],
                 "rateLimitedWallets": rate_limited_wallets,
                 "throttle": self.client.rate_limiter.throttle_report(),
                 "fillsGloballyDegraded": fills_globally_degraded,
@@ -12582,6 +12796,17 @@ class WalletTrackerService:
         )
 
         lines = ["Wallet ranks by multi-period quality"]
+        if any(wallet.get("qualityAssessment") for wallet in wallets):
+            for index, wallet in enumerate(wallets[:max(1, limit)], start=1):
+                assessment = wallet.get("qualityAssessment")
+                if assessment:
+                    lines.append(
+                        f'{index}. {wallet_label(wallet.get("alias", ""), wallet.get("address", ""))}: '
+                        + format_quality_assessment(assessment)
+                    )
+            lines.append("Legacy group composite rank is a separate measure, not this quality rank.")
+            lines.append(f'Checked at: {dashboard.get("generatedAt", now_iso())}')
+            return "\n".join(lines)
         ranked_wallets = [
             wallet
             for wallet in wallets

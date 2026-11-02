@@ -312,7 +312,7 @@ class SegmentTests(unittest.TestCase):
         self.assertFalse(verification["verified"])
         self.assertEqual(verification["reasons"], ["funding_history_incomplete"])
 
-    def test_verified_status_requires_complete_twap_and_episode_history(self) -> None:
+    def test_equity_verification_is_independent_of_episode_history(self) -> None:
         metrics = {
             "equityCurveComplete": True, "dailyReturnCount": 180,
             "missingDayCount": 0, "invalidDayCount": 0,
@@ -322,8 +322,10 @@ class SegmentTests(unittest.TestCase):
             metrics, portfolio_ok=True, funding_complete=True,
             episode_history_complete=False,
         )
-        self.assertEqual(verification["status"], "preliminary")
-        self.assertIn("episode_history_incomplete", verification["reasons"])
+        self.assertTrue(verification["verified"])
+        self.assertEqual(verification["reasons"], [])
+        self.assertFalse(verification["profitFactorVerified"])
+        self.assertIn("episode_history_incomplete", verification["profitFactorReasons"])
 
     def test_incomplete_curve_with_zero_downside_does_not_get_infinite_sortino(self) -> None:
         day_ms = 86_400_000
