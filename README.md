@@ -139,6 +139,13 @@ and the PnL trend, with the existing 35/25/20/20 weights. It requires 90 daily
 returns for a complete curve and distinguishes a successful fetch from a verified
 assessment. Historical 180-day evidence is not reused as 90-day evidence;
 confirmed Shadow restrictions remain until a verified reassessment.
+An incomplete history can display a **Provisional / Low** numeric rank, using
+only observable components and renormalizing their original weights. When only
+observed adjusted PF and trend are available, the effective weights are 50/50
+(40% of the full model's component weight). Missing Calmar and Sortino do not
+become zeroes. Observed PF includes open losses and known episode costs; its
+incomplete sample can be biased. `quality.verifiedScore` stays null and trading
+admission continues to use the original verification and risk gates.
 The refresh health file exposes `fetchSucceeded`, `rankable`, assessment status,
 missing components, and fill retention limits. Observed perp equity/PnL points
 from compatible portfolio windows are preserved in `wallet_equity.sqlite3` under

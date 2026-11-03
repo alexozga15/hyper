@@ -12843,7 +12843,8 @@ class WalletTrackerService:
         wallets = sorted(
             dashboard.get("wallets", []),
             key=lambda wallet: (
-                to_float(wallet.get("recentWinRateRank", {}).get("score")),
+                to_float((wallet.get("qualityAssessment") or {}).get("quality", {}).get(
+                    "score", wallet.get("recentWinRateRank", {}).get("score"))),
                 to_float(wallet.get("hitRate")),
                 int(wallet.get("recentClosedTrades") or 0),
                 to_float(wallet.get("recentRealizedPnl")),

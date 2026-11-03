@@ -43,7 +43,8 @@ function formatWalletRank(rank, showRange = false, assessment = null) {
   if (assessment?.quality) {
     const quality = assessment.quality;
     const score = quality.score == null ? "n/a" : `${percentFormatter.format(quality.score)}/100`;
-    return `${quality.status} (${score}) · ${assessment.data?.status || "Preliminary"}`;
+    const basis = quality.preliminary ? ` · Low · ${quality.preliminary.originalWeightCoveragePct}% component weight` : "";
+    return `${quality.status} (${score}) · ${assessment.data?.status || "Preliminary"}${basis}`;
   }
   const label = rank?.label || "Unranked";
   if (rank?.score == null) {
@@ -343,7 +344,7 @@ function renderWalletTable() {
     ["Orders", "openOrderCount"],
     ["30D Fills", "fills30d"],
     ["7D Hit Rate", "hitRate"],
-    ["Quality Rank", "recentWinRateRank.score"],
+    ["Quality Rank", "qualityAssessment.quality.score"],
   ];
 
   root.className = "table-wrap";
